@@ -1,0 +1,331 @@
+import argparse
+import json
+import os
+import sys
+import time
+from types import SimpleNamespace
+
+import cv2
+
+from .depth_geometry import add_depth_args, attach_3d, build_private_state, coordinate_convention, draw_annotated
+from .detector_runtime import DetectorModel, add_detector_args
+from .io_utils import parse_json_or_embedded, project_path, write_json
+from .llm_scene_reasoner import (
+    add_llm_args,
+    build_llm_input,
+    build_prompt,
+    build_stack_blocks_prompt,
+    call_ollama,
+    normalize_decision_text,
+    normalize_stack_blocks_text,
+)
+from .realsense_capture import add_realsense_args, capture_rgbd
+from .tabletop_geometry import add_tabletop_args, attach_tabletop_geometry
+from .tf_transform import add_tf_args, attach_base_coordinates, resolved_transform_matrix, transform_summary
+
+
+DEFAULT_OUT = "/tmp/robot_scene_pipeline"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Single-frame robot scene perception + LLM reasoning pipeline.")
+    parser.add_argument("--instruction", default="描述当前场景，并给出下一步安全操作建议")
+    parser.add_argument("--output-dir", default=DEFAULT_OUT)
+    parser.add_argument(
+        "--capture-trigger",
+        choices=("immediate", "enter"),
+        default="immediate",
+        help="When to capture the RGB-D snapshot.",
+    )
+    parser.add_argument("--pre-capture-delay", type=float, default=0.0)
+    parser.add_argument("--compile-execution-plan", action="store_true")
+    parser.add_argument("--llm-task", choices=("scene_action", "stack_blocks"), default="scene_action")
+    parser.add_argument(
+        "--force-llm-stack-decision",
+        action="store_true",
+        help=(
+            "For stack_blocks, force the VLM/LLM call path. Explicit color instructions "
+            "are still used to repair object ids against detector hard priors before execution."
+        ),
+    )
+    parser.add_argument("--place-offset-m", type=float, default=0.08)
+    parser.add_argument("--approach-height-m", type=float, default=0.08)
+    parser.add_argument("--pick-target-lift-m", type=float, default=0.0)
+    parser.add_argument("--place-target-lift-m", type=float, default=0.0)
+    parser.add_argument(
+        "--left-right-axis",
+        choices=("x", "y"),
+        default="y",
+        help="Base-frame axis used for left_of/right_of placement.",
+    )
+    parser.add_argument(
+        "--left-direction-sign",
+        choices=("positive", "negative"),
+        default="positive",
+        help="Direction for left_of along --left-right-axis. right_of uses the opposite direction.",
+    )
+    parser.add_argument(
+        "--front-back-axis",
+        choices=("x", "y"),
+        default="x",
+        help="Base-frame axis used for in_front_of/behind placement.",
+    )
+    parser.add_argument(
+        "--front-direction-sign",
+        choices=("positive", "negative"),
+        default="positive",
+        help="Direction for in_front_of along --front-back-axis. behind uses the opposite direction.",
+    )
+    parser.add_argument("--show", action="store_true")
+    add_realsense_args(parser)
+    add_detector_args(parser)
+    parser.add_argument("--detector-config", default="config/yolo_detector.json")
+    add_depth_args(parser)
+    add_tf_args(parser)
+    add_tabletop_args(parser)
+    add_llm_args(parser)
+    return parser.parse_args()
+
+
+def cli_flag_present(*flags):
+    present = set(sys.argv[1:])
+    return any(flag in present for flag in flags)
+
+
+def apply_detector_config(args):
+    config_path = project_path(getattr(args, "detector_config", ""))
+    if not config_path or not os.path.exists(config_path):
+        return args
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    if not cli_flag_present("--detector-weight") and config.get("weights"):
+        args.detector_weight = config["weights"]
+    if not cli_flag_present("--score-thresh") and config.get("conf") is not None:
+        args.score_thresh = float(config["conf"])
+    if not cli_flag_present("--detector-iou") and config.get("iou") is not None:
+        args.detector_iou = float(config["iou"])
+    if not cli_flag_present("--detector-imgsz") and config.get("imgsz") is not None:
+        args.detector_imgsz = int(config["imgsz"])
+    if not cli_flag_present("--detector-device") and config.get("device"):
+        args.detector_device = config["device"]
+    return args
+
+
+def wait_for_capture_trigger(args):
+    if args.image_in:
+        return
+    if args.capture_trigger == "enter":
+        input("Move the robot to an observe pose, then press Enter to capture RGB-D...")
+    if args.pre_capture_delay > 0:
+        print("Waiting {:.2f}s before capture...".format(args.pre_capture_delay), flush=True)
+        time.sleep(args.pre_capture_delay)
+
+
+def capture_or_load_snapshot(args):
+    if args.image_in:
+        args.image_in = project_path(args.image_in)
+        frame_bgr = cv2.imread(args.image_in, cv2.IMREAD_COLOR)
+        if frame_bgr is None:
+            raise RuntimeError("Failed to read image: {}".format(args.image_in))
+        used_profile = {
+            "color_width": int(frame_bgr.shape[1]),
+            "color_height": int(frame_bgr.shape[0]),
+            "depth_width": None,
+            "depth_height": None,
+            "fps": None,
+            "depth_available": False,
+            "source": args.image_in,
+        }
+        return frame_bgr, None, None, used_profile
+
+    wait_for_capture_trigger(args)
+    return capture_rgbd(args)
+
+
+def compile_execution_plan(args, decision_text, private_state, output_path):
+    from tools.decision_to_execution import compile_plan
+
+    decision = parse_json_or_embedded(decision_text)
+    if "action_plan" not in decision and isinstance(decision.get("task_decision"), dict):
+        step = dict(decision["task_decision"])
+        step.setdefault("step", 1)
+        decision["action_plan"] = [step]
+    plan_args = SimpleNamespace(
+        place_offset_m=args.place_offset_m,
+        approach_height_m=args.approach_height_m,
+        pick_target_lift_m=args.pick_target_lift_m,
+        place_target_lift_m=args.place_target_lift_m,
+        left_right_axis=args.left_right_axis,
+        left_direction_sign=args.left_direction_sign,
+        front_back_axis=args.front_back_axis,
+        front_direction_sign=args.front_direction_sign,
+    )
+    plan = compile_plan(decision, private_state, plan_args)
+    write_json(output_path, plan)
+    return plan
+
+
+def drop_transient_detection_fields(detections):
+    for det in detections:
+        det.pop("_mask_bool", None)
+        det.pop("_mask", None)
+        det.pop("_object_points_base", None)
+    return detections
+
+
+def main():
+    args = parse_args()
+    args = apply_detector_config(args)
+    args.output_dir = project_path(args.output_dir)
+    if hasattr(args, "detector_weight"):
+        args.detector_weight = project_path(args.detector_weight)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    snapshot_path = os.path.join(args.output_dir, "snapshot.jpg")
+    annotated_path = os.path.join(args.output_dir, "annotated_detector.jpg")
+    objects_path = os.path.join(args.output_dir, "detector_objects_3d.json")
+    candidates_path = os.path.join(args.output_dir, "detector_candidates.json")
+    llm_input_path = os.path.join(args.output_dir, "llm_input.json")
+    private_state_path = os.path.join(args.output_dir, "private_scene_state.json")
+    tf_status_path = os.path.join(args.output_dir, "tf_status.json")
+    tabletop_path = os.path.join(args.output_dir, "tabletop_geometry.json")
+    raw_decision_path = os.path.join(args.output_dir, "llm_scene_graph_decision_raw.json")
+    decision_path = os.path.join(args.output_dir, "llm_scene_graph_decision.json")
+    execution_plan_path = os.path.join(args.output_dir, "robot_execution_plan.json")
+
+    frame_bgr, depth_frame, intrinsics, used_profile = capture_or_load_snapshot(args)
+    cv2.imwrite(snapshot_path, frame_bgr)
+    print("Saved snapshot: {}".format(snapshot_path), flush=True)
+
+    detector = DetectorModel(args)
+    detections, candidates = detector.predict(
+        frame_bgr,
+        args.score_thresh,
+        args.detector_scale,
+        args.max_detections,
+    )
+    detector_metadata = {
+        "weight": args.detector_weight,
+        "score_threshold": args.score_thresh,
+        "iou": args.detector_iou,
+        "imgsz": args.detector_imgsz,
+        "device": args.detector_device,
+        "detector_scale": args.detector_scale,
+    }
+    write_json(candidates_path, {**detector_metadata, "candidates": candidates[: args.debug_topk]})
+    print("Saved detector candidates: {}".format(candidates_path), flush=True)
+
+    detections = attach_3d(detections, depth_frame, intrinsics, args.depth_window)
+    tf_payload = {
+        "enabled": bool(args.use_tf),
+        "base_frame": args.base_frame,
+        "camera_frame": args.camera_frame,
+        "status": "not_requested",
+    }
+    transform_matrix = None
+    if args.use_tf:
+        detections, transform = attach_base_coordinates(
+            detections,
+            args.base_frame,
+            args.camera_frame,
+            args.tf_timeout,
+            getattr(args, "tf_json", ""),
+            getattr(args, "tf_point_mode", "optical-to-camera-link")
+        )
+        transform_matrix = resolved_transform_matrix(transform)
+        tf_payload.update({"status": "ok", "transform": transform_summary(transform)})
+    write_json(tf_status_path, tf_payload)
+
+    table_plane = None
+    tabletop_payload = {"enabled": bool(args.estimate_tabletop), "status": "not_requested"}
+    if args.estimate_tabletop:
+        try:
+            detections, table_plane = attach_tabletop_geometry(
+                detections,
+                depth_frame,
+                intrinsics,
+                args,
+                transform_matrix=transform_matrix,
+            )
+            valid_objects = sum(bool(det.get("pointcloud_geometry_valid")) for det in detections)
+            tabletop_payload.update(
+                {
+                    "status": "ok",
+                    "table_plane": table_plane,
+                    "valid_object_count": valid_objects,
+                }
+            )
+        except Exception as exc:
+            tabletop_payload.update({"status": "error", "error": str(exc)})
+            write_json(tabletop_path, tabletop_payload)
+            raise
+    write_json(tabletop_path, tabletop_payload)
+    detections = drop_transient_detection_fields(detections)
+
+    write_json(
+        objects_path,
+        {
+            **detector_metadata,
+            "max_detections": args.max_detections,
+            "coordinate_convention": coordinate_convention(args.camera_frame),
+            "tf": tf_payload,
+            "tabletop": tabletop_payload,
+            "objects": detections,
+        },
+    )
+
+    annotated = draw_annotated(frame_bgr, detections)
+    cv2.imwrite(annotated_path, annotated)
+    print("Saved annotated detector image: {}".format(annotated_path), flush=True)
+
+    private_state = build_private_state(
+        args,
+        detections,
+        snapshot_path,
+        annotated_path,
+        used_profile,
+        table_plane=table_plane,
+    )
+    write_json(private_state_path, private_state)
+    print("Saved private scene state: {}".format(private_state_path), flush=True)
+
+    llm_input = build_llm_input(args, detections, snapshot_path, used_profile)
+    write_json(llm_input_path, llm_input)
+    print("Saved LLM input: {}".format(llm_input_path), flush=True)
+
+    if not args.skip_llm:
+        prompt = build_stack_blocks_prompt(llm_input) if args.llm_task == "stack_blocks" else build_prompt(llm_input)
+        raw_result = call_ollama(args, prompt, snapshot_path)
+        hard_prior_objects = llm_input.get("hard_priors", {}).get("objects", [])
+        if args.llm_task == "stack_blocks":
+            result = normalize_stack_blocks_text(
+                raw_result,
+                hard_prior_objects=hard_prior_objects,
+                instruction=args.instruction,
+                prefer_explicit_rule=True,
+            )
+        else:
+            result = normalize_decision_text(
+                raw_result,
+                hard_prior_objects=hard_prior_objects,
+                instruction=args.instruction,
+            )
+        with open(raw_decision_path, "w", encoding="utf-8") as f:
+            f.write(raw_result)
+        with open(decision_path, "w", encoding="utf-8") as f:
+            f.write(result)
+        print("Saved raw LLM scene graph and decision: {}".format(raw_decision_path), flush=True)
+        print("Saved LLM scene graph and decision: {}".format(decision_path), flush=True)
+        print(result)
+        if args.compile_execution_plan and args.llm_task != "stack_blocks":
+            compile_execution_plan(args, result, private_state, execution_plan_path)
+            print("Saved robot execution plan: {}".format(execution_plan_path), flush=True)
+
+    if args.show:
+        cv2.imshow("robot scene pipeline", annotated)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()

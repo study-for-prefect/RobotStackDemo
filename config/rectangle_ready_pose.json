@@ -1,0 +1,26 @@
+{
+  "schema_version": "ur_ready_joint_pose_v1",
+  "name": "rectangle_grasp_ready_downward",
+  "source": "/joint_states",
+  "recorded_ros_time": {
+    "sec": 1780889528,
+    "nanosec": 373736405
+  },
+  "joint_names": [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint"
+  ],
+  "joint_positions": [
+    0.1193699985742569,
+    -2.1189144293414515,
+    2.1018519401550293,
+    -1.593656365071432,
+    -1.5875409285174769,
+    -1.5191405455218714
+  ],
+  "note": "User-approved current pose: gripper vertical downward ready pose before yaw staging."
+}

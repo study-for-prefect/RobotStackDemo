@@ -1,0 +1,9 @@
+{
+  "weights": "models/yolo/weights/best.pt",
+  "data_yaml": "models/yolo/data.yaml",
+  "conf": 0.5,
+  "iou": 0.45,
+  "imgsz": 960,
+  "device": "cuda:0",
+  "use_segmentation_mask": true
+}

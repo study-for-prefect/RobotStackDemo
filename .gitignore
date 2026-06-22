@@ -1,0 +1,51 @@
+cat > .gitignore <<'EOF'
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Conda / cache
+.cache/
+.ipynb_checkpoints/
+
+# ROS / build
+build/
+install/
+log/
+*.bag
+*.db3
+
+# Runtime outputs
+runtime/
+runs/
+outputs/
+debug/
+logs/
+
+# Dataset / large files
+datasets/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.mp4
+*.avi
+*.bag
+*.zip
+*.tar
+*.tar.gz
+
+# System
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.key
+*.pem
+EOF

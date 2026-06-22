@@ -1,0 +1,21 @@
+# 数据集路径配置
+path: datasets/blocks_rgb
+train: images/train
+val: images/val
+
+# 类别定义
+nc: 10
+names:
+  0: circle
+  1: rectangle
+  2: square blue
+  3: square red
+  4: square yellow
+  5: square green
+  6: semi square
+  7: triangle
+  8: semi circle
+  9: concave
+
+# 分割任务标记
+segment: True
