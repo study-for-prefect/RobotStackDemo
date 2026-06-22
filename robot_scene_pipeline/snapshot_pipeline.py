@@ -143,7 +143,7 @@ def capture_or_load_snapshot(args):
 
 
 def compile_execution_plan(args, decision_text, private_state, output_path):
-    from tools.decision_to_execution import compile_plan
+    from tools.planning.decision_to_execution import compile_plan
 
     decision = parse_json_or_embedded(decision_text)
     if "action_plan" not in decision and isinstance(decision.get("task_decision"), dict):

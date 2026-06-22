@@ -12,16 +12,28 @@ import time
 from types import SimpleNamespace
 
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from robot_scene_pipeline.llm_scene_reasoner import rule_stack_blocks_decision, validate_stack_blocks_decision
 from robot_scene_pipeline.stack_state import estimate_stack_state, verify_stack_growth
-from tools.build_geometry_pick_plan import find_object, set_stack_demo_yaw
-from tools.decision_to_execution import compile_place_on_top, compile_plan, write_json
-from tools.two_stage_visual_pick import build_corrected_plan, camera_optical_vector_to_base, camera_vector_to_base
-from tools.xy_correction import apply_step_xy_correction, load_xy_correction
+from robot_scene_pipeline.xy_correction import apply_step_xy_correction, load_xy_correction
+from tools.planning.build_geometry_pick_plan import find_object, set_stack_demo_yaw
+from tools.planning.decision_to_execution import compile_place_on_top, compile_plan, write_json
+from tools.workflows.two_stage_visual_pick import (
+    build_corrected_plan,
+    camera_optical_vector_to_base,
+    camera_vector_to_base,
+)
+from robot_scene_pipeline.scene_memory import (
+    load_memory,
+    save_memory,
+    update_from_detections,
+    set_base,
+    set_role,
+    mark_placed,
+)
 
 
 def parse_args():
@@ -136,6 +148,17 @@ def parse_args():
     parser.add_argument("--place-acceleration", type=float, default=0.03)
     parser.add_argument("--tf-timeout", type=float, default=8.0)
     parser.add_argument("--gripper-port", default="/dev/ttyUSB0")
+    parser.add_argument(
+        "--memory-json",
+        default=None,
+        help="Path to scene memory json. Default: <output-dir>/scene_memory.json",
+    )
+
+    parser.add_argument(
+        "--resume-memory",
+        action="store_true",
+        help="Resume existing scene memory instead of starting from current run.",
+    )
     return parser.parse_args()
 
 
@@ -152,7 +175,7 @@ def run(command):
 def tf_lookup_command(args, require_tool=True):
     command = [
         args.ros_python,
-        "tools/tf_lookup_json.py",
+        "tools/robot/tf_lookup_json.py",
         "--output",
         args.tf_json,
         "--base-frame",
@@ -185,7 +208,7 @@ def failure_state_path(args):
 
 def pose_command(args, pose_json):
     command = [
-        args.ros_python, "tools/moveit_plan_preview.py",
+        args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--ready-only", "--ready-joint-pose-json", pose_json,
         "--velocity", str(args.velocity), "--acceleration", str(args.acceleration),
         "--max-joint-delta", str(getattr(args, "ready_max_joint_delta", 1.30)),
@@ -200,7 +223,7 @@ def pose_command(args, pose_json):
 
 def open_gripper_command(args):
     command = [
-        args.ros_python, "tools/moveit_plan_preview.py",
+        args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--gripper-open-only", "--enable-gripper",
         "--gripper-port", args.gripper_port, "--execute",
     ]
@@ -254,7 +277,7 @@ def capture_empty_current_pose(args, output_dir, held_object_id, allow_holding=F
 
 def relative_translate_command(args, offset_base):
     command = [
-        args.ros_python, "tools/moveit_plan_preview.py",
+        args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--relative-tool-translation-base", *[str(value) for value in offset_base],
         "--velocity", str(args.velocity), "--acceleration", str(args.acceleration),
         *moveit_frame_args(args),
@@ -590,12 +613,49 @@ def print_decision_summary(initial_state, decision):
             )
 
 
+def memory_id_for_scene_object(memory, scene_obj, max_dist_m=0.05):
+    label = scene_obj.get("label") or scene_obj.get("class_name") or scene_obj.get("name")
+    center = (
+        scene_obj.get("geometry_center_m")
+        or scene_obj.get("center_base")
+        or scene_obj.get("center_base_m")
+    )
+
+    if label is None or center is None:
+        return None
+
+    best_id = None
+    best_dist = float("inf")
+
+    for obj_id, obj in memory.get("objects", {}).items():
+        if obj.get("label") != label:
+            continue
+
+        old_center = obj.get("last_pose_base")
+        if not old_center:
+            continue
+
+        dist = math.hypot(
+            float(old_center[0]) - float(center[0]),
+            float(old_center[1]) - float(center[1]),
+        )
+
+        if dist < best_dist:
+            best_dist = dist
+            best_id = obj_id
+
+    if best_id is not None and best_dist <= float(max_dist_m):
+        return best_id
+
+    return None
+
+
 def pick_motion_command(args, plan_path, path_mode, enable_gripper):
     local_offset = args.grasp_tool_offset_local
     if local_offset is None:
         local_offset = [0.0, 0.0]
     command = [
-        args.ros_python, "tools/moveit_plan_preview.py",
+        args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--plan-json", plan_path, "--path-mode", path_mode,
         "--orientation-mode", "object-yaw",
         "--grasp-axis", "long",
@@ -633,7 +693,7 @@ def pick_command(args, plan_path):
 
 def place_command(args, plan_path):
     command = [
-        args.ros_python, "tools/moveit_plan_preview.py",
+        args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--plan-json", plan_path, "--path-mode", "full",
         "--orientation-mode", "object-yaw",
         "--grasp-axis", "long",
@@ -993,6 +1053,28 @@ def reject_held_observation_and_keep_locked(cycle_dir, reason, place_plan_path, 
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.memory_json is None:
+        args.memory_json = os.path.join(args.output_dir, "scene_memory.json")
+
+    memory = load_memory(args.memory_json, task="stack_blocks")
+
+    if not args.resume_memory:
+        memory = {
+            "version": 1,
+            "task": "stack_blocks",
+            "step_index": 0,
+            "objects": {},
+            "structure": {
+                "base": None,
+                "placed_order": [],
+                "current_top": None,
+                "top_center_base": None,
+                "top_z": None,
+            },
+            "action_history": [],
+        }
+        save_memory(memory, args.memory_json)
     runtime = {
         "current_stage": "startup",
         "held_object_id": None,
@@ -1015,7 +1097,21 @@ def main():
         write_json(os.path.join(args.output_dir, "stack_blocks_decision.json"), decision)
         write_json(os.path.join(args.output_dir, "initial_scene_state.json"), initial_state)
 
+        memory = update_from_detections(memory, initial_state.get("objects", []))
+
         base_object = copy.deepcopy(object_by_id(initial_state, base_id))
+        base_mem_id = memory_id_for_scene_object(memory, base_object)
+        if base_mem_id is not None:
+            memory = set_base(memory, base_mem_id)
+
+        for target_id in order:
+            target_object = object_by_id(initial_state, target_id)
+            target_mem_id = memory_id_for_scene_object(memory, target_object)
+            if target_mem_id is not None:
+                memory = set_role(memory, target_mem_id, role="target", state="free")
+
+        save_memory(memory, args.memory_json)
+
         held_templates = {object_id: copy.deepcopy(object_by_id(initial_state, object_id)) for object_id in order}
         write_json(
             os.path.join(args.output_dir, "locked_initial_geometry.json"),
@@ -1045,6 +1141,8 @@ def main():
                 )
                 if observed is not None:
                     current_state = observed
+                    memory = update_from_detections(memory, current_state.get("objects", []))
+                    save_memory(memory, args.memory_json)
 
             runtime["current_stage"] = "detect_target_and_freeze_place"
             held_object = copy.deepcopy(reacquire_target(current_state, held_templates[object_id]))
@@ -1074,6 +1172,8 @@ def main():
                     )
                     if recheck_state is not None:
                         current_state = recheck_state
+                        memory = update_from_detections(memory, current_state.get("objects", []))
+                        save_memory(memory, args.memory_json)
                         held_object = copy.deepcopy(reacquire_target(current_state, held_templates[object_id]))
                         pre_pick_excluded_ids, pre_pick_excluded_xy = target_exclusion_for_pre_pick(held_object)
                         current_base_object, stack_state = estimate_current_stack(
@@ -1356,10 +1456,23 @@ def main():
                 run(place_command(args, place_plan_path))
             runtime["held_object_id"] = None
 
+            placed_mem_id = memory_id_for_scene_object(memory, held_object)
+            if placed_mem_id is not None:
+                memory = mark_placed(
+                    memory,
+                    placed_mem_id,
+                    target_id=memory["structure"].get("current_top"),
+                    result="executed" if args.execute else "dry_run",
+                )
+                save_memory(memory, args.memory_json)
+
             if not args.execute:
                 held_state = simulate_held_state(current_state, object_id)
                 current_state = simulate_placed_state(held_state, held_object, place_step)
                 write_json(os.path.join(cycle_dir, "after_place_scene_state.json"), current_state)
+                memory = update_from_detections(memory, current_state.get("objects", []))
+                save_memory(memory, args.memory_json)
+
             previous_locked_stack = final_stack_state
             previous_stack_xy = final_stack_state["stack_xy_base_m"]
 
@@ -1371,6 +1484,8 @@ def main():
         )
         if observed is not None:
             current_state = observed
+            memory = update_from_detections(memory, current_state.get("objects", []))
+            save_memory(memory, args.memory_json)
         final_base_object, final_stack_state = estimate_current_stack(
             current_state,
             base_object,
@@ -1390,6 +1505,7 @@ def main():
             "stack_order": order,
             "cycles_completed": len(order),
             "final_stack_state": final_stack_state,
+            "scene_memory_json": args.memory_json,
         }
         write_json(os.path.join(args.output_dir, "stack_demo_summary.json"), summary)
         if os.path.exists(failure_state_path(args)):

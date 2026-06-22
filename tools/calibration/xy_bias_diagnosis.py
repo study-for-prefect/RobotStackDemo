@@ -20,7 +20,7 @@ from datetime import datetime
 import numpy as np
 
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
@@ -99,7 +99,7 @@ def run(command):
 def hover_command(args, output_dir, yaw_deg):
     command = [
         args.ros_python,
-        "tools/hover_tool_offset_calibration.py",
+        "tools/calibration/hover_tool_offset_calibration.py",
         "--label",
         args.label,
         "--output-dir",

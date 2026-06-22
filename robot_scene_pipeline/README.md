@@ -9,8 +9,8 @@ This directory contains the split single-frame robot scene pipeline:
 - `tf_transform.py`: TF lookup and camera-to-base point transform.
 - `llm_scene_reasoner.py`: LLM prompt and Ollama call.
 
-For real TCP calibration, tabletop plane validation, and object size/yaw
-acceptance criteria, see `docs/TCP_TABLETOP_YAW_CALIBRATION.md`.
+For hover/TCP offset and XY-bias calibration, see
+`../docs/HOVER_XY_CALIBRATION.md`.
 
 ## Static TF
 
@@ -93,7 +93,8 @@ The main robot entry now combines LLM task reasoning with the tabletop-yaw and
 second-snapshot pick workflow:
 
 ```bash
-bash tools/run_robot_scene_final.sh "把绿色方块放到红色方块左边"
+python3 tools/workflows/stack_demo_pipeline.py \
+  --instruction "把绿色方块放到红色方块左边"
 ```
 
 The integrated flow is:
@@ -133,11 +134,10 @@ Important output files:
 The deterministic rotation-only test remains available:
 
 ```bash
-python3 tools/two_stage_visual_pick.py \
+python3 tools/workflows/two_stage_visual_pick.py \
   --object-label "square green" \
   --execute \
   --yes
 ```
 
-Set `INTEGRATED_TWO_STAGE_PICK=0` when invoking `tools/run_robot_scene_final.sh`
-to use the legacy single-snapshot execution path.
+Use the two-stage workflow directly when you only need one deterministic pick.

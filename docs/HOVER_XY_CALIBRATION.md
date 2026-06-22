@@ -1,4 +1,4 @@
-# XY Bias Diagnosis
+# Hover and XY Calibration
 
 This procedure separates four error sources:
 
@@ -14,6 +14,19 @@ error_x = observed gripper center X - physical object center X
 error_y = observed gripper center Y - physical object center Y
 ```
 
+## Hover-only Check
+
+The standalone hover command is now grouped with the other calibration tools:
+
+```bash
+python3 tools/calibration/hover_tool_offset_calibration.py \
+  --label green \
+  --hover-height 0.08
+```
+
+Add `--execute --yes` only after checking the detected target and robot safety
+state. This workflow never descends, closes the gripper, picks, or places.
+
 Enter measurements in millimeters. For example, if the gripper center is
 3 mm toward positive base X and 2.5 mm toward positive base Y:
 
@@ -26,7 +39,7 @@ Enter measurements in millimeters. For example, if the gripper center is
 Keep one object at the same position. Do not change offsets during collection.
 
 ```bash
-python3 tools/xy_bias_diagnosis.py collect \
+python3 tools/calibration/xy_bias_diagnosis.py collect \
   --phase yaw \
   --label green \
   --output-dir runtime/xy_bias_diagnosis/yaw_green \
@@ -50,7 +63,7 @@ The report separates:
 Keep yaw at zero. Move the same object to each prompted workspace location.
 
 ```bash
-python3 tools/xy_bias_diagnosis.py collect \
+python3 tools/calibration/xy_bias_diagnosis.py collect \
   --phase workspace \
   --label green \
   --output-dir runtime/xy_bias_diagnosis/workspace_green \
@@ -77,7 +90,7 @@ the transforms explicitly.
 ## Offline Analysis
 
 ```bash
-python3 tools/xy_bias_diagnosis.py analyze \
+python3 tools/calibration/xy_bias_diagnosis.py analyze \
   runtime/xy_bias_diagnosis/yaw_green/samples.json
 ```
 

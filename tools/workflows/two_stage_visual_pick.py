@@ -9,7 +9,9 @@ import subprocess
 import sys
 
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 
 def parse_args():
@@ -521,7 +523,7 @@ def snapshot_command(args, output_dir, run_llm=False):
 def build_plan_command(args, private_state, output):
     command = [
         sys.executable,
-        "tools/build_geometry_pick_plan.py",
+        "tools/planning/build_geometry_pick_plan.py",
         "--private-state-json",
         private_state,
     ]
@@ -565,7 +567,7 @@ def build_plan_command(args, private_state, output):
 def moveit_common(args, plan_path):
     command = [
         args.ros_python,
-        "tools/moveit_plan_preview.py",
+        "tools/robot/moveit_plan_preview.py",
         "--plan-json",
         plan_path,
         "--tool-z-offset",
@@ -593,7 +595,7 @@ def moveit_common(args, plan_path):
 def relative_translate_command(args, offset_base):
     command = [
         args.ros_python,
-        "tools/moveit_plan_preview.py",
+        "tools/robot/moveit_plan_preview.py",
         "--relative-tool-translation-base",
         *[str(value) for value in offset_base],
         "--max-joint-delta",
@@ -616,7 +618,7 @@ def capture_second_snapshot_and_plan(args, second_private, second_plan):
     attempts = max(0, int(args.second_snapshot_retry_count)) + 1
     for attempt in range(attempts):
         if attempt > 0:
-            run([args.ros_python, "tools/tf_lookup_json.py", "--output", args.tf_json, "--once"], args.execute)
+            run([args.ros_python, "tools/robot/tf_lookup_json.py", "--output", args.tf_json, "--once"], args.execute)
             base_offset = camera_optical_vector_to_base(args.tf_json, args.second_snapshot_retry_offset_camera)
             print(
                 "\nSecond snapshot target missing; retry {}/{} after optical camera offset {} -> base offset {}.".format(
@@ -628,7 +630,7 @@ def capture_second_snapshot_and_plan(args, second_private, second_plan):
                 flush=True,
             )
             run(relative_translate_command(args, base_offset), args.execute)
-        run([args.ros_python, "tools/tf_lookup_json.py", "--output", args.tf_json, "--once"], args.execute)
+        run([args.ros_python, "tools/robot/tf_lookup_json.py", "--output", args.tf_json, "--once"], args.execute)
         run(snapshot_command(args, args.second_dir), args.execute)
         if args.execute and not target_visible(args, second_private):
             print_missing_target("Second snapshot", args, second_private)
@@ -645,7 +647,7 @@ def capture_second_snapshot_and_plan(args, second_private, second_plan):
 def capture_first_snapshot_until_target_visible(args, first_private, run_llm=False):
     attempts = max(0, int(args.first_snapshot_retry_count)) + 1
     for attempt in range(attempts):
-        run([args.ros_python, "tools/tf_lookup_json.py", "--output", args.tf_json, "--once"], args.execute)
+        run([args.ros_python, "tools/robot/tf_lookup_json.py", "--output", args.tf_json, "--once"], args.execute)
         run(snapshot_command(args, args.first_dir, run_llm=run_llm), args.execute)
         if run_llm or not args.execute or target_visible(args, first_private):
             return True
@@ -685,7 +687,7 @@ def main():
 
     ready = [
         args.ros_python,
-        "tools/moveit_plan_preview.py",
+        "tools/robot/moveit_plan_preview.py",
         "--ready-only",
         "--ready-joint-pose-json",
         args.ready_pose_json,

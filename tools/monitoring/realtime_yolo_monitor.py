@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -10,8 +11,13 @@ import numpy as np
 from ultralytics import YOLO
 
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+
 def parse_args():
-    root = Path(__file__).resolve().parents[1]
+    root = Path(PROJECT_ROOT)
     parser = argparse.ArgumentParser("Realtime YOLO-seg monitor for RealSense with base_link 3D coordinates")
     parser.add_argument("--weight", default=str(root / "runs" / "segment" / "building_block5" / "weights" / "best.pt"))
     parser.add_argument("--device", default="cuda:0")
@@ -46,7 +52,7 @@ def parse_args():
     parser.add_argument("--show-depth", action="store_true")
 
     # TF bridge output:
-    # python3 tools/tf_lookup_json.py --base-frame base_link --camera-frame camera_link --output /tmp/scene_tf_base_camera.json
+    # python3 tools/robot/tf_lookup_json.py --base-frame base_link --camera-frame camera_link --output /tmp/scene_tf_base_camera.json
     parser.add_argument("--tf-json", default="/tmp/scene_tf_base_camera.json")
     parser.add_argument("--tf-reload-s", type=float, default=0.2)
     parser.add_argument("--base-frame", default="base_link")

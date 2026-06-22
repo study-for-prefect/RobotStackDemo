@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from xy_bias_diagnosis import analyze_dataset, fit_workspace_model, trial_key
+from tools.calibration.xy_bias_diagnosis import analyze_dataset, fit_workspace_model, trial_key
 
 
 def yaw_dataset(base_error, local_error):

@@ -9,12 +9,12 @@ import sys
 from types import SimpleNamespace
 
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from tools.decision_to_execution import compile_plan, write_json
-from tools.xy_correction import apply_step_xy_correction, load_xy_correction
+from robot_scene_pipeline.xy_correction import apply_step_xy_correction, load_xy_correction
+from tools.planning.decision_to_execution import compile_plan, write_json
 
 
 DEFAULT_PRIVATE = "/tmp/robot_scene_geometry/private_scene_state.json"

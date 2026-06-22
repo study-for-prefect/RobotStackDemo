@@ -17,7 +17,7 @@ from datetime import datetime
 import yaml
 
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
@@ -389,7 +389,7 @@ def effective_tool_offset_base(args, yaw_used):
 def moveit_hover_command(args, hover_position, hover_quat, tool_offset_base):
     command = [
         args.ros_python,
-        "tools/moveit_plan_preview.py",
+        "tools/robot/moveit_plan_preview.py",
         "--hover-only",
         "--hover-target-base", *[str(value) for value in hover_position],
         "--hover-orientation-xyzw", *[str(value) for value in hover_quat],

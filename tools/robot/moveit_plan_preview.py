@@ -16,7 +16,7 @@ import time
 
 import yaml
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
@@ -902,7 +902,7 @@ def setup_gripper(args):
     if not args.enable_gripper:
         return None
     try:
-        from tools.dh_gripper_runtime import DHPGCGripper
+        from tools.robot.dh_gripper_runtime import DHPGCGripper
     except ImportError:
         from dh_gripper_runtime import DHPGCGripper
 

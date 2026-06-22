@@ -92,7 +92,7 @@ def attach_base_coordinates(detections, base_frame, camera_frame, timeout_sec, t
     if tf_json:
         if not os.path.exists(tf_json):
             raise RuntimeError(
-                "TF JSON file does not exist: {}. Start tools/tf_lookup_json.py with ROS2 python first, "
+                "TF JSON file does not exist: {}. Start tools/robot/tf_lookup_json.py with ROS2 python first, "
                 "or pass an existing --tf-json path.".format(tf_json)
             )
         with open(tf_json, "r", encoding="utf-8") as f:

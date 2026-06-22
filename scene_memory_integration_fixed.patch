@@ -1,0 +1,556 @@
+diff --git a/robot_scene_pipeline/scene_memory.py b/robot_scene_pipeline/scene_memory.py
+new file mode 100644
+index 0000000..13da70f
+--- /dev/null
++++ b/robot_scene_pipeline/scene_memory.py
+@@ -0,0 +1,310 @@
++from __future__ import annotations
++
++import json
++import math
++from pathlib import Path
++from typing import Any, Dict, List, Optional
++
++
++Memory = Dict[str, Any]
++Obj = Dict[str, Any]
++
++
++def default_memory(task: str = "build_blocks") -> Memory:
++    return {
++        "version": 1,
++        "task": task,
++        "step_index": 0,
++        "objects": {},
++        "structure": {
++            "base": None,
++            "placed_order": [],
++            "current_top": None,
++            "top_center_base": None,
++            "top_z": None,
++        },
++        "action_history": [],
++    }
++
++
++def load_memory(path: str | Path, task: str = "build_blocks") -> Memory:
++    path = Path(path)
++    if not path.exists():
++        return default_memory(task=task)
++    with path.open("r", encoding="utf-8") as f:
++        return json.load(f)
++
++
++def save_memory(memory: Memory, path: str | Path) -> None:
++    path = Path(path)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    tmp_path = path.with_suffix(path.suffix + ".tmp")
++    with tmp_path.open("w", encoding="utf-8") as f:
++        json.dump(memory, f, ensure_ascii=False, indent=2)
++    tmp_path.replace(path)
++
++
++def reset_memory(path: str | Path, task: str = "build_blocks") -> Memory:
++    memory = default_memory(task=task)
++    save_memory(memory, path)
++    return memory
++
++
++def _label(det: Obj) -> Optional[str]:
++    value = det.get("label") or det.get("class_name") or det.get("name")
++    return None if value is None else str(value)
++
++
++def _detector_id(det: Obj) -> Optional[int]:
++    value = det.get("id", det.get("object_id"))
++    if value is None:
++        return None
++    try:
++        return int(value)
++    except (TypeError, ValueError):
++        return None
++
++
++def _center_base(det: Obj) -> Optional[List[float]]:
++    for key in ("geometry_center_m", "center_3d_base_m", "center_base_m", "center_base", "base_center_m"):
++        value = det.get(key)
++        if isinstance(value, list) and len(value) >= 3:
++            return [float(value[0]), float(value[1]), float(value[2])]
++    return None
++
++
++def _size_m(det: Obj) -> Optional[List[float]]:
++    for key in ("dimensions_m", "size_m", "bbox_size_m"):
++        value = det.get(key)
++        if isinstance(value, list) and len(value) >= 3:
++            return [float(value[0]), float(value[1]), float(value[2])]
++    return None
++
++
++def _yaw_rad(det: Obj) -> Optional[float]:
++    for key in ("yaw_rad", "yaw", "theta_rad"):
++        if det.get(key) is not None:
++            return float(det[key])
++    if det.get("table_yaw_deg") is not None:
++        return math.radians(float(det["table_yaw_deg"]))
++    return None
++
++
++def _top_z(det: Obj, center: Optional[List[float]], size: Optional[List[float]]) -> Optional[float]:
++    for key in ("top_z", "top_z_m", "geometry_top_z_m"):
++        if det.get(key) is not None:
++            return float(det[key])
++    if center is not None and size is not None:
++        return float(center[2] + 0.5 * size[2])
++    return None
++
++
++def _dist_xy(a: List[float], b: List[float]) -> float:
++    return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1]))
++
++
++def _make_memory_id(label: str, objects: Dict[str, Obj]) -> str:
++    prefix = label.replace(" ", "_")
++    i = 1
++    while f"{prefix}_{i}" in objects:
++        i += 1
++    return f"{prefix}_{i}"
++
++
++def find_memory_id_by_detector_id(memory: Memory, detector_id: int) -> Optional[str]:
++    detector_id = int(detector_id)
++    for mem_id, obj in memory.get("objects", {}).items():
++        ids = obj.get("detector_ids", [])
++        if obj.get("detector_id") == detector_id or detector_id in ids:
++            return mem_id
++    return None
++
++
++def find_memory_id_by_label_pose(
++    memory: Memory,
++    label: str,
++    center_base: List[float],
++    max_dist_m: float = 0.05,
++) -> Optional[str]:
++    best_id = None
++    best_d = float("inf")
++    for mem_id, obj in memory.get("objects", {}).items():
++        if obj.get("label") != label:
++            continue
++        old_center = obj.get("last_pose_base")
++        if not old_center:
++            continue
++        d = _dist_xy(center_base, old_center)
++        if d <= max_dist_m and d < best_d:
++            best_id = mem_id
++            best_d = d
++    return best_id
++
++
++def _operability(role: str, state: str) -> tuple[bool, bool]:
++    locked = role in ("base", "structure") or state in ("placed", "locked", "held")
++    if locked:
++        return False, False
++    return True, True
++
++
++def update_from_detections(memory: Memory, detections: List[Obj], match_dist_m: float = 0.05) -> Memory:
++    memory["step_index"] = int(memory.get("step_index", 0)) + 1
++    step_index = memory["step_index"]
++    memory.setdefault("objects", {})
++
++    for obj in memory.get("objects", {}).values():
++        obj["visible"] = False
++
++    for det in detections:
++        if det.get("is_workspace"):
++            continue
++        label = _label(det)
++        center = _center_base(det)
++        if label is None or center is None:
++            continue
++
++        det_id = _detector_id(det)
++        mem_id = find_memory_id_by_detector_id(memory, det_id) if det_id is not None else None
++        if mem_id is None:
++            mem_id = find_memory_id_by_label_pose(memory, label, center, match_dist_m)
++        if mem_id is None:
++            mem_id = _make_memory_id(label, memory["objects"])
++            memory["objects"][mem_id] = {
++                "id": mem_id,
++                "label": label,
++                "role": "unknown",
++                "state": "free",
++                "detector_ids": [],
++            }
++
++        obj = memory["objects"][mem_id]
++        ids = obj.setdefault("detector_ids", [])
++        if det_id is not None and det_id not in ids:
++            ids.append(det_id)
++        if det_id is not None:
++            obj["detector_id"] = det_id
++
++        role = obj.get("role", "unknown")
++        state = obj.get("state", "free")
++        graspable, pushable = _operability(role, state)
++        size = _size_m(det)
++
++        obj.update(
++            {
++                "id": mem_id,
++                "label": label,
++                "last_pose_base": center,
++                "size_m": size,
++                "yaw_rad": _yaw_rad(det),
++                "top_z": _top_z(det, center, size),
++                "visible": True,
++                "graspable": graspable,
++                "pushable": pushable,
++                "last_seen_step": step_index,
++            }
++        )
++
++    for obj in memory.get("objects", {}).values():
++        if obj.get("visible"):
++            continue
++        if obj.get("state") == "free":
++            obj["state"] = "missing"
++
++    return memory
++
++
++def set_role(memory: Memory, mem_id: str, role: str, state: Optional[str] = None) -> Memory:
++    obj = memory["objects"][mem_id]
++    obj["role"] = role
++    if state is not None:
++        obj["state"] = state
++    obj["graspable"], obj["pushable"] = _operability(obj.get("role", "unknown"), obj.get("state", "free"))
++    return memory
++
++
++def set_base(memory: Memory, mem_id: str) -> Memory:
++    obj = memory["objects"][mem_id]
++    obj["role"] = "base"
++    obj["state"] = "locked"
++    obj["graspable"] = False
++    obj["pushable"] = False
++    memory["structure"]["base"] = mem_id
++    memory["structure"]["current_top"] = mem_id
++    memory["structure"]["top_center_base"] = obj.get("last_pose_base")
++    memory["structure"]["top_z"] = obj.get("top_z")
++    if mem_id not in memory["structure"]["placed_order"]:
++        memory["structure"]["placed_order"].append(mem_id)
++    return memory
++
++
++def mark_placed(
++    memory: Memory,
++    mem_id: str,
++    target_id: Optional[str] = None,
++    pose_base: Optional[List[float]] = None,
++    top_z: Optional[float] = None,
++    result: str = "executed_unverified",
++) -> Memory:
++    obj = memory["objects"][mem_id]
++    obj["role"] = "structure"
++    obj["state"] = "placed"
++    obj["graspable"] = False
++    obj["pushable"] = False
++    if pose_base is not None:
++        obj["last_pose_base"] = [float(v) for v in pose_base[:3]]
++    if top_z is not None:
++        obj["top_z"] = float(top_z)
++    if mem_id not in memory["structure"]["placed_order"]:
++        memory["structure"]["placed_order"].append(mem_id)
++    memory["structure"]["current_top"] = mem_id
++    memory["structure"]["top_center_base"] = obj.get("last_pose_base")
++    memory["structure"]["top_z"] = obj.get("top_z")
++    memory["action_history"].append(
++        {
++            "step_index": memory.get("step_index", 0),
++            "action": "place",
++            "object": mem_id,
++            "target": target_id,
++            "result": result,
++        }
++    )
++    return memory
++
++
++def mark_pushed(
++    memory: Memory,
++    mem_id: str,
++    direction_base: List[float],
++    distance_m: float,
++    reason: str = "clear_obstacle",
++    result: str = "executed_unverified",
++) -> Memory:
++    obj = memory["objects"][mem_id]
++    obj["role"] = "obstacle"
++    obj["state"] = "free"
++    obj["graspable"], obj["pushable"] = _operability(obj["role"], obj["state"])
++    memory["action_history"].append(
++        {
++            "step_index": memory.get("step_index", 0),
++            "action": "push",
++            "object": mem_id,
++            "direction_base": [float(v) for v in direction_base[:3]],
++            "distance_m": float(distance_m),
++            "reason": reason,
++            "result": result,
++        }
++    )
++    return memory
++
++
++def get_locked_object_ids(memory: Memory) -> List[str]:
++    out = []
++    for mem_id, obj in memory.get("objects", {}).items():
++        if obj.get("state") in ("locked", "placed") or obj.get("role") in ("base", "structure"):
++            out.append(mem_id)
++    return out
++
++
++def is_locked(memory: Memory, mem_id: str) -> bool:
++    return mem_id in get_locked_object_ids(memory)
+diff --git a/tests/test_scene_memory.py b/tests/test_scene_memory.py
+new file mode 100644
+index 0000000..dbe20f3
+--- /dev/null
++++ b/tests/test_scene_memory.py
+@@ -0,0 +1,59 @@
++from robot_scene_pipeline.scene_memory import (
++    default_memory,
++    find_memory_id_by_detector_id,
++    is_locked,
++    mark_placed,
++    mark_pushed,
++    set_base,
++    update_from_detections,
++)
++
++
++def test_scene_memory_basic():
++    memory = default_memory()
++    detections = [
++        {
++            "id": 1,
++            "label": "square red",
++            "geometry_center_m": [0.40, 0.10, 0.02],
++            "dimensions_m": [0.04, 0.04, 0.03],
++            "yaw_rad": 0.0,
++        },
++        {
++            "id": 2,
++            "label": "square green",
++            "geometry_center_m": [0.46, 0.10, 0.02],
++            "dimensions_m": [0.04, 0.04, 0.03],
++            "yaw_rad": 0.0,
++        },
++        {
++            "id": 3,
++            "label": "rectangle",
++            "geometry_center_m": [0.43, 0.12, 0.02],
++            "dimensions_m": [0.08, 0.03, 0.03],
++            "yaw_rad": 1.57,
++        },
++    ]
++
++    memory = update_from_detections(memory, detections)
++    assert len(memory["objects"]) == 3
++
++    red_id = find_memory_id_by_detector_id(memory, 1)
++    green_id = find_memory_id_by_detector_id(memory, 2)
++    rect_id = find_memory_id_by_detector_id(memory, 3)
++
++    assert red_id == "square_red_1"
++    assert green_id == "square_green_1"
++    assert rect_id == "rectangle_1"
++
++    memory = set_base(memory, red_id)
++    assert is_locked(memory, red_id)
++    assert memory["objects"][red_id]["pushable"] is False
++
++    memory = mark_placed(memory, green_id, target_id=red_id)
++    assert is_locked(memory, green_id)
++    assert memory["structure"]["current_top"] == green_id
++
++    memory = mark_pushed(memory, rect_id, direction_base=[-1.0, 0.0, 0.0], distance_m=0.05)
++    assert memory["objects"][rect_id]["role"] == "obstacle"
++    assert len(memory["action_history"]) == 2
+diff --git a/tools/workflows/stack_demo_pipeline.py b/tools/workflows/stack_demo_pipeline.py
+index 436d5e3..c61b96a 100644
+--- a/tools/workflows/stack_demo_pipeline.py
++++ b/tools/workflows/stack_demo_pipeline.py
+@@ -17,6 +17,16 @@ if PROJECT_ROOT not in sys.path:
+     sys.path.insert(0, PROJECT_ROOT)
+ 
+ from robot_scene_pipeline.llm_scene_reasoner import rule_stack_blocks_decision, validate_stack_blocks_decision
++from robot_scene_pipeline.scene_memory import (
++    find_memory_id_by_detector_id,
++    load_memory,
++    mark_placed,
++    reset_memory,
++    save_memory,
++    set_base,
++    set_role,
++    update_from_detections,
++)
+ from robot_scene_pipeline.stack_state import estimate_stack_state, verify_stack_growth
+ from robot_scene_pipeline.xy_correction import apply_step_xy_correction, load_xy_correction
+ from tools.planning.build_geometry_pick_plan import find_object, set_stack_demo_yaw
+@@ -140,6 +150,8 @@ def parse_args():
+     parser.add_argument("--place-acceleration", type=float, default=0.03)
+     parser.add_argument("--tf-timeout", type=float, default=8.0)
+     parser.add_argument("--gripper-port", default="/dev/ttyUSB0")
++    parser.add_argument("--memory-json", default="", help="Scene memory JSON. Defaults to <output-dir>/scene_memory.json.")
++    parser.add_argument("--resume-memory", action="store_true", help="Load existing scene memory instead of resetting it at startup.")
+     return parser.parse_args()
+ 
+ 
+@@ -187,6 +199,40 @@ def failure_state_path(args):
+     return os.path.join(args.output_dir, "failure_state.json")
+ 
+ 
++def scene_memory_path(args):
++    return args.memory_json or os.path.join(args.output_dir, "scene_memory.json")
++
++
++def refresh_scene_memory(memory, args, state, source):
++    if state is None:
++        return memory
++    objects = [obj for obj in state.get("objects", []) if not obj.get("is_workspace")]
++    memory = update_from_detections(memory, objects)
++    memory.setdefault("snapshots", []).append(
++        {
++            "step_index": memory.get("step_index", 0),
++            "source": source,
++            "object_count": len(objects),
++        }
++    )
++    save_memory(memory, scene_memory_path(args))
++    return memory
++
++
++def memory_id_for_detector(memory, detector_id, required=True):
++    mem_id = find_memory_id_by_detector_id(memory, int(detector_id))
++    if mem_id is None and required:
++        raise RuntimeError("Scene memory has no object for detector id {}.".format(detector_id))
++    return mem_id
++
++
++def planned_place_memory_pose(place_step):
++    pos = place_step.get("target_position_m")
++    if isinstance(pos, list) and len(pos) >= 3:
++        return [float(pos[0]), float(pos[1]), float(pos[2])]
++    return None
++
++
+ def pose_command(args, pose_json):
+     command = [
+         args.ros_python, "tools/robot/moveit_plan_preview.py",
+@@ -1003,6 +1049,11 @@ def main():
+         "last_pick_pose": None,
+         "last_place_pose": None,
+     }
++    mem_path = scene_memory_path(args)
++    if args.resume_memory:
++        memory = load_memory(mem_path, task="stack_blocks")
++    else:
++        memory = reset_memory(mem_path, task="stack_blocks")
+     try:
+         runtime["current_stage"] = "init_ready_pose"
+         init_ready_pose(args)
+@@ -1019,6 +1070,19 @@ def main():
+         write_json(os.path.join(args.output_dir, "stack_blocks_decision.json"), decision)
+         write_json(os.path.join(args.output_dir, "initial_scene_state.json"), initial_state)
+ 
++        memory = refresh_scene_memory(memory, args, initial_state, "initial_snapshot")
++        base_mem_id = memory_id_for_detector(memory, base_id)
++        memory = set_base(memory, base_mem_id)
++        for detector_id in order:
++            target_mem_id = memory_id_for_detector(memory, detector_id)
++            memory = set_role(memory, target_mem_id, "target", state="free")
++        memory.setdefault("task_plan", {})["instruction"] = args.instruction
++        memory["task_plan"]["base_detector_id"] = int(base_id)
++        memory["task_plan"]["base_memory_id"] = base_mem_id
++        memory["task_plan"]["stack_order_detector_ids"] = [int(v) for v in order]
++        memory["task_plan"]["stack_order_memory_ids"] = [memory_id_for_detector(memory, v) for v in order]
++        save_memory(memory, mem_path)
++
+         base_object = copy.deepcopy(object_by_id(initial_state, base_id))
+         held_templates = {object_id: copy.deepcopy(object_by_id(initial_state, object_id)) for object_id in order}
+         write_json(
+@@ -1049,6 +1113,12 @@ def main():
+                 )
+                 if observed is not None:
+                     current_state = observed
++                    memory = refresh_scene_memory(
++                        memory,
++                        args,
++                        current_state,
++                        "cycle_{:02d}_observation_before_pick".format(index),
++                    )
+ 
+             runtime["current_stage"] = "detect_target_and_freeze_place"
+             held_object = copy.deepcopy(reacquire_target(current_state, held_templates[object_id]))
+@@ -1078,6 +1148,12 @@ def main():
+                     )
+                     if recheck_state is not None:
+                         current_state = recheck_state
++                        memory = refresh_scene_memory(
++                            memory,
++                            args,
++                            current_state,
++                            "cycle_{:02d}_previous_place_recheck".format(index),
++                        )
+                         held_object = copy.deepcopy(reacquire_target(current_state, held_templates[object_id]))
+                         pre_pick_excluded_ids, pre_pick_excluded_xy = target_exclusion_for_pre_pick(held_object)
+                         current_base_object, stack_state = estimate_current_stack(
+@@ -1113,6 +1189,11 @@ def main():
+             first_pick_plan_path = os.path.join(cycle_dir, "pick_plan_first_observation.json")
+             build_offline_pick_plan(current_state, held_object, first_pick_plan_path, args)
+ 
++            target_mem_id = memory_id_for_detector(memory, object_id)
++            memory["objects"][target_mem_id]["state"] = "targeting"
++            memory["objects"][target_mem_id]["current_cycle_index"] = index
++            save_memory(memory, mem_path)
++
+             runtime["current_stage"] = "empty_gripper_first_pick_approach"
+             if args.execute:
+                 run(pick_approach_command(args, first_pick_plan_path))
+@@ -1360,6 +1441,17 @@ def main():
+                 run(place_command(args, place_plan_path))
+             runtime["held_object_id"] = None
+ 
++            target_mem_id = memory_id_for_detector(memory, object_id)
++            previous_top_mem_id = memory["structure"].get("current_top")
++            memory = mark_placed(
++                memory,
++                target_mem_id,
++                target_id=previous_top_mem_id,
++                pose_base=planned_place_memory_pose(place_step),
++                result="executed_unverified" if args.execute else "dry_run",
++            )
++            save_memory(memory, mem_path)
++
+             if not args.execute:
+                 held_state = simulate_held_state(current_state, object_id)
+                 current_state = simulate_placed_state(held_state, held_object, place_step)
+@@ -1375,6 +1467,7 @@ def main():
+         )
+         if observed is not None:
+             current_state = observed
++            memory = refresh_scene_memory(memory, args, current_state, "final_observation")
+         final_base_object, final_stack_state = estimate_current_stack(
+             current_state,
+             base_object,
+@@ -1394,6 +1487,7 @@ def main():
+             "stack_order": order,
+             "cycles_completed": len(order),
+             "final_stack_state": final_stack_state,
++            "scene_memory_json": mem_path,
+         }
+         write_json(os.path.join(args.output_dir, "stack_demo_summary.json"), summary)
+         if os.path.exists(failure_state_path(args)):
