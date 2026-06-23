@@ -112,7 +112,8 @@ The integrated flow is:
 8. Execute the remaining LLM plan, such as `place_relative`.
 
 The default integrated calibration values are `--tool-offset-base -0.015 0 0`,
-`--pick-target-lift-m 0.005`, and negative wrist pre-rotation. The controller
+`--pick-target-lift-m 0.010`, `--release-gap-m 0.010`, and negative wrist
+pre-rotation. The controller
 accepts one LLM-selected `pick` per run; a later second `pick` is rejected
 before motion because it would require another two-stage correction cycle.
 

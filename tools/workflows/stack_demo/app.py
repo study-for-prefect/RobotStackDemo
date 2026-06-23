@@ -1,0 +1,582 @@
+"""Top-level orchestration for the closed-loop stack demo."""
+
+import copy
+import os
+import sys
+
+from robot_scene_pipeline.geometry_relations import build_geometry_relations
+from robot_scene_pipeline.scene_memory import (
+    load_memory,
+    mark_placed,
+    save_memory,
+    set_base,
+    set_role,
+    update_from_detections,
+)
+from robot_scene_pipeline.stack_state import verify_stack_growth
+from robot_scene_pipeline.xy_correction import load_xy_correction
+from tools.planning.decision_to_execution import write_json
+from tools.workflows.two_stage_visual_pick import build_corrected_plan
+
+from .arguments import parse_args
+from .commands import (
+    capture_empty_observation,
+    failure_state_path,
+    init_ready_pose,
+    load_json,
+    retry_close_observation,
+    run,
+)
+from .pick import (
+    build_offline_pick_plan,
+    pick_approach_command,
+    pick_command,
+    place_approach_command,
+    place_command,
+    plan_envelope,
+    simulate_held_state,
+    simulate_placed_state,
+)
+from .placement import (
+    build_frozen_place_step,
+    reject_held_observation_and_keep_locked,
+    validate_pick_place_separation,
+    validate_place_second_snapshot,
+)
+from .scene import (
+    estimate_current_stack,
+    held_object_exclusion,
+    load_or_capture_initial,
+    locked_object_geometry,
+    memory_id_for_scene_object,
+    object_by_id,
+    print_decision_summary,
+    reacquire_pick_target_for_second_observation,
+    reacquire_target,
+    target_exclusion_for_pre_pick,
+    validate_decision,
+)
+
+def main() -> int:
+    args = parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.memory_json is None:
+        args.memory_json = os.path.join(args.output_dir, "scene_memory.json")
+
+    memory = load_memory(args.memory_json, task="stack_blocks")
+
+    if not args.resume_memory:
+        memory = {
+            "version": 1,
+            "task": "stack_blocks",
+            "step_index": 0,
+            "objects": {},
+            "structure": {
+                "base": None,
+                "placed_order": [],
+                "current_top": None,
+                "top_center_base": None,
+                "top_z": None,
+            },
+            "action_history": [],
+        }
+        save_memory(memory, args.memory_json)
+    runtime = {
+        "current_stage": "startup",
+        "held_object_id": None,
+        "last_pick_pose": None,
+        "last_place_pose": None,
+    }
+    try:
+        runtime["current_stage"] = "init_ready_pose"
+        init_ready_pose(args)
+
+        runtime["current_stage"] = "initial_snapshot_and_decision"
+        initial_state, raw_decision = load_or_capture_initial(args)
+        decision, base_id, order = validate_decision(
+            raw_decision,
+            initial_state,
+            args.instruction,
+            prefer_explicit_rule=True,
+        )
+        print_decision_summary(initial_state, decision)
+        write_json(os.path.join(args.output_dir, "stack_blocks_decision.json"), decision)
+        write_json(os.path.join(args.output_dir, "initial_scene_state.json"), initial_state)
+
+        memory = update_from_detections(memory, initial_state.get("objects", []))
+
+        base_object = copy.deepcopy(object_by_id(initial_state, base_id))
+        base_mem_id = memory_id_for_scene_object(memory, base_object)
+        if base_mem_id is not None:
+            memory = set_base(memory, base_mem_id)
+
+        for target_id in order:
+            target_object = object_by_id(initial_state, target_id)
+            target_mem_id = memory_id_for_scene_object(memory, target_object)
+            if target_mem_id is not None:
+                memory = set_role(memory, target_mem_id, role="target", state="free")
+
+        save_memory(memory, args.memory_json)
+
+        held_templates = {object_id: copy.deepcopy(object_by_id(initial_state, object_id)) for object_id in order}
+        write_json(
+            os.path.join(args.output_dir, "locked_initial_geometry.json"),
+            {
+                "base": locked_object_geometry(base_object),
+                "stack_order": [locked_object_geometry(held_templates[object_id]) for object_id in order],
+                "table_plane": initial_state.get("table_plane"),
+                "source": "initial_safe_observation_before_any_pick",
+            },
+        )
+
+        xy_correction = load_xy_correction(args.xy_correction_json)
+        current_state = copy.deepcopy(initial_state)
+        previous_stack_xy = None
+        previous_locked_stack = None
+
+        for index, object_id in enumerate(order, start=1):
+            cycle_dir = os.path.join(args.output_dir, "cycle_{:02d}_object_{}".format(index, object_id))
+            os.makedirs(cycle_dir, exist_ok=True)
+
+            if index > 1:
+                runtime["current_stage"] = "empty_gripper_ready_observation"
+                observed = capture_empty_observation(
+                    args,
+                    os.path.join(cycle_dir, "observation_before_pick"),
+                    runtime["held_object_id"],
+                )
+                if observed is not None:
+                    current_state = observed
+                    memory = update_from_detections(memory, current_state.get("objects", []))
+                    save_memory(memory, args.memory_json)
+
+            runtime["current_stage"] = "detect_target_and_freeze_place"
+            held_object = copy.deepcopy(reacquire_target(current_state, held_templates[object_id]))
+            relations = build_geometry_relations(
+                current_state.get("objects", []),
+                target_id=int(held_object["id"]),
+            )
+            geometry_relations_path = os.path.join(
+                cycle_dir,
+                "geometry_relations_before_pick.json",
+            )
+            write_json(geometry_relations_path, relations)
+            push_candidates = [
+                rel for rel in relations
+                if rel.get("type") == "should_push_away"
+                and str(rel.get("object")) == str(held_object["id"])
+            ]
+            if push_candidates:
+                selected_push = push_candidates[0]
+                push_plan = {
+                    "schema_version": "push_plan_v1",
+                    "execution_status": "dry_run_only",
+                    "target_object_id": held_object.get("id"),
+                    "target_label": held_object.get("label"),
+                    "push_candidates": push_candidates,
+                    "selected_push": selected_push,
+                    "note": (
+                        "Geometry relation suggests clearing obstacle before pick. "
+                        "Execution is not connected yet."
+                    ),
+                }
+                write_json(
+                    os.path.join(cycle_dir, "push_plan_before_pick.json"),
+                    push_plan,
+                )
+                print(
+                    "Geometry relation suggests push before pick: "
+                    "obstacle={} target={} direction={} distance={}".format(
+                        selected_push.get("subject"),
+                        selected_push.get("object"),
+                        selected_push.get("direction_base"),
+                        selected_push.get("distance_m"),
+                    ),
+                    flush=True,
+                )
+            pre_pick_excluded_ids, pre_pick_excluded_xy = target_exclusion_for_pre_pick(held_object)
+            current_base_object, stack_state = estimate_current_stack(
+                current_state,
+                base_object,
+                previous_stack_xy,
+                args,
+                search_radius_m=args.search_radius_m,
+                excluded_object_ids=pre_pick_excluded_ids,
+                excluded_xy=pre_pick_excluded_xy,
+                exclusion_radius_m=args.target_exclusion_radius_m,
+            )
+            if current_base_object.get("reacquire_source") == "current_observation":
+                base_object = current_base_object
+            if not stack_state.get("valid"):
+                raise RuntimeError("Cycle {} pre-pick stack estimate failed: {}".format(index, stack_state.get("reason")))
+            if previous_locked_stack is not None:
+                verification = verify_stack_growth(previous_locked_stack, stack_state)
+                write_json(os.path.join(cycle_dir, "previous_place_verification.json"), verification)
+                if not verification["valid"]:
+                    recheck_state = capture_empty_observation(
+                        args,
+                        os.path.join(cycle_dir, "previous_place_verification_recheck"),
+                        runtime["held_object_id"],
+                    )
+                    if recheck_state is not None:
+                        current_state = recheck_state
+                        memory = update_from_detections(memory, current_state.get("objects", []))
+                        save_memory(memory, args.memory_json)
+                        held_object = copy.deepcopy(reacquire_target(current_state, held_templates[object_id]))
+                        pre_pick_excluded_ids, pre_pick_excluded_xy = target_exclusion_for_pre_pick(held_object)
+                        current_base_object, stack_state = estimate_current_stack(
+                            current_state,
+                            base_object,
+                            previous_stack_xy,
+                            args,
+                            search_radius_m=args.search_radius_m,
+                            excluded_object_ids=pre_pick_excluded_ids,
+                            excluded_xy=pre_pick_excluded_xy,
+                            exclusion_radius_m=args.target_exclusion_radius_m,
+                        )
+                        if current_base_object.get("reacquire_source") == "current_observation":
+                            base_object = current_base_object
+                        verification = verify_stack_growth(previous_locked_stack, stack_state)
+                        write_json(
+                            os.path.join(cycle_dir, "previous_place_verification_recheck.json"),
+                            verification,
+                        )
+                    if not verification["valid"]:
+                        raise RuntimeError(
+                            "Cycle {} previous placement verification failed after recheck: {}".format(
+                                index, verification["reason"]
+                            )
+                        )
+            write_json(os.path.join(cycle_dir, "stack_state_locked_before_pick.json"), stack_state)
+            previous_stack_xy = stack_state["stack_xy_base_m"]
+            provisional_place_step = build_frozen_place_step(
+                current_state, stack_state, current_base_object, held_object, args
+            )
+            provisional_place_plan_path = os.path.join(cycle_dir, "place_on_top_plan_first_observation.json")
+            write_json(provisional_place_plan_path, plan_envelope(current_state, provisional_place_step))
+            first_pick_plan_path = os.path.join(cycle_dir, "pick_plan_first_observation.json")
+            build_offline_pick_plan(current_state, held_object, first_pick_plan_path, args)
+
+            runtime["current_stage"] = "empty_gripper_first_pick_approach"
+            if args.execute:
+                run(pick_approach_command(args, first_pick_plan_path))
+
+            runtime["current_stage"] = "empty_gripper_second_pick_snapshot"
+            second_dir = os.path.join(cycle_dir, "pick_second_observation")
+            def parse_second_pick_target(state):
+                state["_second_snapshot_max_xy_m"] = float(args.max_second_snapshot_correction_m)
+                state["_second_snapshot_max_z_error_m"] = float(args.second_snapshot_max_z_error_m)
+                return copy.deepcopy(reacquire_pick_target_for_second_observation(state, held_object))
+
+            try:
+                second_state, second_object = retry_close_observation(
+                    args,
+                    second_dir,
+                    runtime["held_object_id"],
+                    parse_second_pick_target,
+                    "Second target observation",
+                    retry_offset_camera=args.second_snapshot_retry_offset_camera,
+                )
+            except RuntimeError as exc:
+                message = str(exc)
+                if (
+                    "Second observation center z" not in message
+                    and "Second observation center XY delta" not in message
+                    and "Second observation center is not finite" not in message
+                ):
+                    raise
+                print(
+                    "Second target observation was visible but had unreliable 3D center; "
+                    "using locked first observation without XY correction: {}".format(message),
+                    flush=True,
+                )
+                write_json(
+                    os.path.join(cycle_dir, "pick_second_observation_unreliable_use_first.json"),
+                    {
+                        "reason": message,
+                        "fallback": "use_locked_first_observation_without_second_xy_correction",
+                        "max_second_snapshot_correction_m": args.max_second_snapshot_correction_m,
+                        "second_snapshot_max_z_error_m": args.second_snapshot_max_z_error_m,
+                    },
+                )
+                second_state = current_state
+                second_object = copy.deepcopy(held_object)
+            if second_state is None:
+                second_state = current_state
+                second_object = copy.deepcopy(held_object)
+            second_pick_plan_path = os.path.join(cycle_dir, "pick_plan_second_observation.json")
+            build_offline_pick_plan(second_state, second_object, second_pick_plan_path, args)
+            pick_plan_path = os.path.join(cycle_dir, "pick_plan_second_xy_corrected.json")
+            correction_report_path = os.path.join(cycle_dir, "pick_second_xy_correction.json")
+            build_corrected_plan(
+                first_pick_plan_path,
+                second_pick_plan_path,
+                pick_plan_path,
+                correction_report_path,
+                args.max_second_snapshot_correction_m,
+                args.max_grasp_offset_m,
+                use_second_yaw=False,
+                use_second_grasp_offset=True,
+            )
+            pick_plan = load_json(pick_plan_path)
+            pick_step = pick_plan["steps"][0]
+
+            # Do not leave the corrected pick approach before grasping. The base is
+            # reacquired only after the object is held and the robot is above it.
+            final_stack_state = stack_state
+            place_step = build_frozen_place_step(
+                current_state, final_stack_state, current_base_object, held_object, args
+            )
+            place_step["coordinate_source"] = "pre_pick_stack_observation.approach_only"
+            validate_pick_place_separation(pick_step, place_step, args.min_pick_place_xy_distance_m)
+            place_plan_path = os.path.join(cycle_dir, "place_on_top_plan_locked_before_pick.json")
+            write_json(place_plan_path, plan_envelope(current_state, place_step))
+            runtime["last_place_pose"] = {
+                "position_m": place_step["target_position_m"],
+                "pre_place_z_base_m": place_step["pre_place_z_base_m"],
+                "release_z_base_m": place_step["release_z_base_m"],
+                "detected_base_center_xy_m": final_stack_state.get("placement_base_center_xy_m"),
+                "placement_reference_center_xy_m": place_step.get("placement_reference_center_xy_m"),
+                "placement_reference_source": place_step.get("placement_reference_source"),
+                "observed_top_center_xy_m": place_step.get("observed_top_center_xy_m"),
+                "top_center_offset_from_reference_m": place_step.get("top_center_offset_from_reference_m"),
+                "detected_base_top_z_m": final_stack_state.get("placement_base_top_z_m"),
+                "place_top_z_bias_m": place_step.get("place_top_z_bias_m"),
+                "release_gap_m": place_step.get("release_gap_m"),
+                "yaw_deg": place_step["chosen_place_yaw_deg"],
+                "source": place_step["coordinate_source"],
+            }
+
+            print(
+                "\nCycle {} pick corrected by second target snapshot; grasp immediately before base approach: "
+                "target_id={} label={} first_center={} second_center={} "
+                "first_object_yaw={} second_object_yaw={} final_grasp_yaw={} "
+                "grasp_tool_offset_local={} grasp_tool_offset_base={} "
+                "expected_tool0_grasp_xy={} detected_base_id={} detected_base_center={} "
+                "detected_base_top_z={} stack_average_center={} stack_yaw={} place_pose={}".format(
+                    index,
+                    held_object.get("id"),
+                    held_object.get("label"),
+                    held_object.get("geometry_center_m"),
+                    second_object.get("geometry_center_m"),
+                    held_object.get("table_yaw_deg"),
+                    second_object.get("table_yaw_deg"),
+                    pick_step.get("chosen_grasp_yaw_deg"),
+                    pick_step.get("grasp_tool_offset_local_xy_m"),
+                    pick_step.get("grasp_tool_offset_base_xy_m"),
+                    pick_step.get("expected_tool0_grasp_xy_base_m"),
+                    final_stack_state.get("placement_base_object_id"),
+                    final_stack_state.get("placement_base_center_xy_m"),
+                    final_stack_state.get("placement_base_top_z_m"),
+                    final_stack_state.get("stack_xy_base_m"),
+                    final_stack_state.get("stack_yaw_deg"),
+                    runtime["last_place_pose"],
+                ),
+                flush=True,
+            )
+
+            runtime["current_stage"] = "pick_from_second_visual_correction"
+            runtime["last_pick_pose"] = {
+                "first_center_base_m": held_object.get("geometry_center_m"),
+                "second_center_base_m": second_object.get("geometry_center_m"),
+                "corrected_target_position_m": pick_step.get("target_position_m"),
+                "first_estimated_yaw_deg": held_object.get("table_yaw_deg"),
+                "second_estimated_yaw_deg": second_object.get("table_yaw_deg"),
+                "chosen_grasp_yaw_deg": pick_step.get("chosen_grasp_yaw_deg"),
+            }
+            if args.execute:
+                runtime["held_object_id"] = object_id
+                run(pick_command(args, pick_plan_path))
+            else:
+                runtime["held_object_id"] = object_id
+
+            runtime["current_stage"] = "holding_object_move_above_locked_base"
+            if args.execute:
+                run(place_approach_command(args, place_plan_path))
+
+                runtime["current_stage"] = "holding_object_final_base_snapshot"
+                held_close_dir = os.path.join(cycle_dir, "place_final_observation_while_holding")
+
+                def parse_held_base(state):
+                    excluded_ids, excluded_xy = held_object_exclusion(state, held_object)
+                    anchor_xy = final_stack_state.get("stack_xy_base_m") or final_stack_state.get("placement_base_center_xy_m")
+                    _, estimate = estimate_current_stack(
+                        state,
+                        current_base_object,
+                        anchor_xy,
+                        args,
+                        search_radius_m=args.close_stack_search_radius_m,
+                        excluded_object_ids=excluded_ids,
+                        excluded_xy=excluded_xy,
+                        exclusion_radius_m=args.target_exclusion_radius_m,
+                    )
+                    if not estimate.get("valid"):
+                        _, estimate = estimate_current_stack(
+                            state,
+                            current_base_object,
+                            anchor_xy,
+                            args,
+                            search_radius_m=max(args.close_stack_search_radius_m, args.search_radius_m),
+                            excluded_object_ids=excluded_ids,
+                            excluded_xy=excluded_xy,
+                            exclusion_radius_m=args.target_exclusion_radius_m,
+                        )
+                    if not estimate.get("valid"):
+                        raise RuntimeError(estimate.get("reason"))
+                    estimate["held_observation_excluded_held_object_ids"] = excluded_ids
+                    estimate["held_observation_excluded_held_object_xy_m"] = excluded_xy
+                    estimate["held_observation_anchor_xy_m"] = anchor_xy
+                    return estimate
+
+                try:
+                    held_close_state, held_final_stack = retry_close_observation(
+                        args,
+                        held_close_dir,
+                        runtime["held_object_id"],
+                        parse_held_base,
+                        "Final held-object base observation",
+                        allow_holding=True,
+                        retry_count=args.close_observation_retry_count,
+                        retry_offset_camera=args.place_observation_offset_camera,
+                    )
+                    if held_close_state is None or held_final_stack is None:
+                        raise RuntimeError("Final held-object base observation produced no scene state.")
+                    write_json(
+                        os.path.join(cycle_dir, "stack_state_final_held_before_place.json"),
+                        held_final_stack,
+                    )
+                    held_place_correction = validate_place_second_snapshot(
+                        final_stack_state,
+                        held_final_stack,
+                        args.max_place_second_snapshot_correction_m,
+                        top_z_tolerance_m=args.held_base_top_z_tolerance_m,
+                    )
+                    write_json(
+                        os.path.join(cycle_dir, "place_final_held_xy_z_correction.json"),
+                        held_place_correction,
+                    )
+                    place_step = build_frozen_place_step(
+                        held_close_state,
+                        held_final_stack,
+                        current_base_object,
+                        held_object,
+                        args,
+                        locked_place_step=place_step,
+                    )
+                    place_step["coordinate_source"] = (
+                        "held_object_final_observation.placement_base_center_xy_and_top_z"
+                    )
+                    place_step["pre_holding_base_center_xy_m"] = held_place_correction["first_base_center_xy_m"]
+                    place_step["final_held_base_center_xy_m"] = held_place_correction["second_base_center_xy_m"]
+                    place_step["final_held_delta_base_xy_m"] = held_place_correction["second_snapshot_delta_base_xy_m"]
+                    place_step["pre_holding_base_top_z_m"] = held_place_correction["first_base_top_z_m"]
+                    place_step["final_held_base_top_z_m"] = held_place_correction["second_base_top_z_m"]
+                    validate_pick_place_separation(pick_step, place_step, args.min_pick_place_xy_distance_m)
+                    place_plan_path = os.path.join(cycle_dir, "place_on_top_plan_final_held_observation.json")
+                    write_json(place_plan_path, plan_envelope(held_close_state, place_step))
+                    final_stack_state = held_final_stack
+                    runtime["last_place_pose"] = {
+                        "position_m": place_step["target_position_m"],
+                        "pre_place_z_base_m": place_step["pre_place_z_base_m"],
+                        "release_z_base_m": place_step["release_z_base_m"],
+                        "detected_base_center_xy_m": held_final_stack.get("placement_base_center_xy_m"),
+                        "placement_reference_center_xy_m": place_step.get("placement_reference_center_xy_m"),
+                        "placement_reference_source": place_step.get("placement_reference_source"),
+                        "observed_top_center_xy_m": place_step.get("observed_top_center_xy_m"),
+                        "top_center_offset_from_reference_m": place_step.get("top_center_offset_from_reference_m"),
+                        "detected_base_top_z_m": held_final_stack.get("placement_base_top_z_m"),
+                        "place_top_z_bias_m": place_step.get("place_top_z_bias_m"),
+                        "release_gap_m": place_step.get("release_gap_m"),
+                        "yaw_deg": place_step["chosen_place_yaw_deg"],
+                        "source": place_step["coordinate_source"],
+                    }
+                except RuntimeError as exc:
+                    reject_held_observation_and_keep_locked(
+                        cycle_dir,
+                        exc,
+                        place_plan_path,
+                        locals().get("held_final_stack"),
+                        args,
+                    )
+
+            runtime["current_stage"] = "place_from_final_base_geometry"
+            if args.execute:
+                run(place_command(args, place_plan_path))
+            runtime["held_object_id"] = None
+
+            placed_mem_id = memory_id_for_scene_object(memory, held_object)
+            if placed_mem_id is not None:
+                memory = mark_placed(
+                    memory,
+                    placed_mem_id,
+                    target_id=memory["structure"].get("current_top"),
+                    result="executed" if args.execute else "dry_run",
+                )
+                save_memory(memory, args.memory_json)
+
+            if not args.execute:
+                held_state = simulate_held_state(current_state, object_id)
+                current_state = simulate_placed_state(held_state, held_object, place_step)
+                write_json(os.path.join(cycle_dir, "after_place_scene_state.json"), current_state)
+                memory = update_from_detections(memory, current_state.get("objects", []))
+                save_memory(memory, args.memory_json)
+
+            previous_locked_stack = final_stack_state
+            previous_stack_xy = final_stack_state["stack_xy_base_m"]
+
+        runtime["current_stage"] = "final_empty_gripper_ready_verification"
+        observed = capture_empty_observation(
+            args,
+            os.path.join(args.output_dir, "final_observation"),
+            runtime["held_object_id"],
+        )
+        if observed is not None:
+            current_state = observed
+            memory = update_from_detections(memory, current_state.get("objects", []))
+            save_memory(memory, args.memory_json)
+        final_base_object, final_stack_state = estimate_current_stack(
+            current_state,
+            base_object,
+            previous_stack_xy,
+            args,
+            search_radius_m=args.search_radius_m,
+        )
+        final_verification = verify_stack_growth(previous_locked_stack, final_stack_state)
+        write_json(os.path.join(args.output_dir, "final_place_verification.json"), final_verification)
+        if not final_verification["valid"]:
+            raise RuntimeError("Final placement verification failed: {}".format(final_verification["reason"]))
+
+        summary = {
+            "task_type": "stack_blocks",
+            "execution_status": "executed" if args.execute else "dry_run_complete",
+            "base_object_id": base_id,
+            "stack_order": order,
+            "cycles_completed": len(order),
+            "final_stack_state": final_stack_state,
+            "geometry_relations_enabled": True,
+            "scene_memory_json": args.memory_json,
+        }
+        write_json(os.path.join(args.output_dir, "stack_demo_summary.json"), summary)
+        if os.path.exists(failure_state_path(args)):
+            os.remove(failure_state_path(args))
+        print("\nStack demo {}: {}".format(summary["execution_status"], args.output_dir))
+        return 0
+    except Exception as exc:
+        held_at_failure = runtime.get("held_object_id")
+        failure = dict(runtime)
+        failure.update(
+            {
+                "error": str(exc),
+                "held_object_id_at_failure": held_at_failure,
+            }
+        )
+        write_json(failure_state_path(args), failure)
+        print(
+            "\nSTACK DEMO FAILED at stage {}: {}\nSaved failure state: {}".format(
+                runtime.get("current_stage"), exc, failure_state_path(args)
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1

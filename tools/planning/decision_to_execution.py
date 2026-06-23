@@ -188,7 +188,7 @@ def compile_place_on_top(held_object, stack_state, config):
     if not math.isfinite(top_z_bias) or abs(top_z_bias) > 0.01:
         raise ValueError("place_top_z_bias_m must be finite and within +/-0.010 m.")
     corrected_top_z = float(top_z) + top_z_bias
-    release_gap = float(_config_value(config, "release_gap_m", 0.001))
+    release_gap = float(_config_value(config, "release_gap_m", 0.010))
     if not math.isfinite(release_gap) or release_gap < 0.0:
         raise ValueError("release_gap_m must be finite and non-negative.")
     if release_gap > 0.01:

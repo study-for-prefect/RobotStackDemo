@@ -2,6 +2,10 @@
 
 这里仅放可执行工具；可复用逻辑应优先放入 `robot_scene_pipeline/`。
 
+较大的命令文件只保留稳定入口，具体实现放在同目录下的功能包中。例如
+`stack_demo_pipeline.py` 对应 `stack_demo/`，`moveit_plan_preview.py`
+对应 `moveit_preview/`。
+
 | 目录 | 内容 |
 | --- | --- |
 | `calibration/` | hover-only 标定、XY 系统偏差采集与拟合 |

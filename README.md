@@ -22,6 +22,9 @@ RobotStackDemo/
 └── training/                # 数据转换和 YOLO 训练脚本
 ```
 
+大型命令采用“薄入口 + 内部功能包”结构，原命令路径保持兼容。完整模块地图见
+[项目结构说明](docs/PROJECT_STRUCTURE.md)。
+
 ## 常用入口
 
 ```bash
@@ -51,3 +54,4 @@ python3 -m unittest discover -s tests
 - [Hover 与 XY 标定](docs/HOVER_XY_CALIBRATION.md)
 - [LLM 堆叠入口](docs/LLM_STACK_BLOCKS.md)
 - [感知流水线](robot_scene_pipeline/README.md)
+- [项目结构说明](docs/PROJECT_STRUCTURE.md)
