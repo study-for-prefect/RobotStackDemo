@@ -30,6 +30,7 @@ from .orientation import (
     transform_position_quat,
 )
 from .plan_io import load_joint_pose, load_plan, load_tcp_offset
+from .push import run_push_plan
 from .steps import (
     command_sequence_for_step,
     diagnostic_steps,
@@ -47,6 +48,22 @@ from .trajectory import (
 
 def main() -> Optional[int]:
     args = parse_args()
+    push_only = bool(args.push_plan_json)
+    exclusive_modes = sum(
+        bool(value)
+        for value in (
+            args.ready_only,
+            args.gripper_open_only,
+            args.relative_tool_translation_base is not None,
+            args.hover_only,
+            push_only,
+        )
+    )
+    if exclusive_modes > 1:
+        raise RuntimeError(
+            "--push-plan-json, --ready-only, --gripper-open-only, "
+            "--relative-tool-translation-base, and --hover-only are mutually exclusive."
+        )
     if args.ready_only and not args.ready_joint_pose_json:
         raise RuntimeError("--ready-only requires --ready-joint-pose-json.")
     if args.gripper_open_only and not args.enable_gripper:
@@ -58,8 +75,18 @@ def main() -> Optional[int]:
             raise RuntimeError("--hover-only requires --hover-orientation-xyzw QX QY QZ QW.")
         if args.enable_gripper:
             raise RuntimeError("--hover-only refuses --enable-gripper.")
+    if push_only and args.enable_gripper:
+        raise RuntimeError("--push-plan-json refuses --enable-gripper.")
     relative_only = args.relative_tool_translation_base is not None
-    plan = None if args.ready_only or relative_only or args.gripper_open_only or args.hover_only else load_plan(args.plan_json)
+    plan = (
+        None
+        if args.ready_only
+        or relative_only
+        or args.gripper_open_only
+        or args.hover_only
+        or push_only
+        else load_plan(args.plan_json)
+    )
     tcp_offset_tool = load_tcp_offset(args.tcp_calibration_json)
     ready_joint_pose = load_joint_pose(args.ready_joint_pose_json)
     if args.diagnostic_yaw_deg:
@@ -81,6 +108,8 @@ def main() -> Optional[int]:
     print("Mode: {}".format("EXECUTE" if args.execute else "PLAN ONLY"))
     if args.hover_only:
         print("Hover-only: enabled")
+    if push_only:
+        print("Push clearing plan: {}".format(args.push_plan_json))
     print("Path mode: {}".format(args.path_mode))
     print("Gripper: {}".format("enabled" if args.enable_gripper else "disabled"))
     print("Planner: {}".format("Cartesian" if args.cartesian else "Joint-space pose"))
@@ -187,6 +216,11 @@ def main() -> Optional[int]:
                 start_joint_state=planning_start_state,
             )
             if not result:
+                return 2
+            return 0
+
+        if push_only:
+            if not run_push_plan(node, args, planning_start_state):
                 return 2
             return 0
 

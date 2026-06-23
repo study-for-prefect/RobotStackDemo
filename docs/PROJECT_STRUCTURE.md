@@ -41,7 +41,8 @@ tools/
 ├── monitoring/
 │   └── realtime_monitor/        # camera, TF, display, realtime loop
 ├── robot/
-│   └── moveit_preview/          # arguments, poses, steps, trajectories, execution, TF node
+│   ├── moveit_preview/          # arguments, poses, push, trajectories, execution, TF node
+│   └── push_primitives.py       # pure push-target geometry
 └── workflows/
     ├── stack_demo/              # closed-loop stack workflow
     └── two_stage_pick/          # two-snapshot visual pick workflow

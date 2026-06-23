@@ -15,6 +15,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Plan or execute MoveIt motions from robot_execution_plan.json.")
     parser.add_argument("--plan-json", default=DEFAULT_PLAN)
     parser.add_argument(
+        "--push-plan-json",
+        default="",
+        help="Run one four-stage tabletop push from push_execution_plan_v1 JSON.",
+    )
+    parser.add_argument(
         "--ready-only",
         action="store_true",
         help="Only plan/execute --ready-joint-pose-json, then exit without loading or running a pick plan.",

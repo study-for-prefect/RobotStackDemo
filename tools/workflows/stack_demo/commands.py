@@ -136,6 +136,30 @@ def relative_translate_command(args, offset_base):
     return command
 
 
+def push_clear_command(args, push_plan_path):
+    command = [
+        args.ros_python,
+        "tools/robot/moveit_plan_preview.py",
+        "--push-plan-json",
+        push_plan_path,
+        "--tool-z-offset",
+        str(args.tool_z_offset),
+        "--tool-offset-base",
+        *[str(value) for value in args.tool_offset_base],
+        "--velocity",
+        str(args.velocity),
+        "--acceleration",
+        str(args.acceleration),
+        "--tf-timeout",
+        str(getattr(args, "tf_timeout", 8.0)),
+        *moveit_frame_args(args),
+        "--execute",
+    ]
+    if args.yes:
+        command.append("--yes")
+    return command
+
+
 def retry_close_observation(
     args,
     output_dir,

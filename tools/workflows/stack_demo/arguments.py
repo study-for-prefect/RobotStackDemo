@@ -22,6 +22,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-object-id", type=int, default=None)
     parser.add_argument("--stack-order", nargs="+", type=int, default=None)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument(
+        "--execute-push-clearing",
+        action="store_true",
+        help="Execute geometry-based obstacle push clearing before pick when should_push_away is detected.",
+    )
+    parser.add_argument(
+        "--push-clearing-distance-m",
+        type=float,
+        default=0.05,
+        help="Default push distance for obstacle clearing.",
+    )
+    parser.add_argument(
+        "--push-clearing-lift-m",
+        type=float,
+        default=0.05,
+        help="Lift height before and after push clearing.",
+    )
+    parser.add_argument(
+        "--push-clearing-contact-z-offset-m",
+        type=float,
+        default=0.015,
+        help="Contact z offset above table for push clearing.",
+    )
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--conda-env", default="yolo")
     parser.add_argument("--ros-python", default="/usr/bin/python3")
