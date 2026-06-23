@@ -4,11 +4,9 @@ import copy
 import os
 import sys
 
-from robot_scene_pipeline.geometry_relations import build_geometry_relations
 from robot_scene_pipeline.scene_memory import (
     load_memory,
     mark_placed,
-    mark_pushed,
     save_memory,
     set_base,
     set_role,
@@ -25,7 +23,6 @@ from .commands import (
     failure_state_path,
     init_ready_pose,
     load_json,
-    push_clear_command,
     retry_close_observation,
     run,
 )
@@ -45,11 +42,7 @@ from .placement import (
     validate_pick_place_separation,
     validate_place_second_snapshot,
 )
-from .push_clearing import (
-    build_push_execution_plan,
-    relation_objects_with_protected_structure,
-    validate_push_clearance_against_structure,
-)
+from .push_flow import handle_push_clearing_before_pick
 from .scene import (
     estimate_current_stack,
     held_object_exclusion,
@@ -63,6 +56,7 @@ from .scene import (
     target_exclusion_for_pre_pick,
     validate_decision,
 )
+
 
 def main() -> int:
     args = parse_args()
@@ -165,117 +159,17 @@ def main() -> int:
 
             runtime["current_stage"] = "detect_target_and_freeze_place"
             held_object = copy.deepcopy(reacquire_target(current_state, held_templates[object_id]))
-            relation_objects = relation_objects_with_protected_structure(
-                current_state.get("objects", []),
+            current_state, memory, held_object = handle_push_clearing_before_pick(
+                args,
+                cycle_dir,
+                runtime,
+                memory,
+                current_state,
+                held_templates[object_id],
+                held_object,
                 base_id,
                 previous_locked_stack,
             )
-            relations = build_geometry_relations(
-                relation_objects,
-                target_id=int(held_object["id"]),
-            )
-            geometry_relations_path = os.path.join(
-                cycle_dir,
-                "geometry_relations_before_pick.json",
-            )
-            write_json(geometry_relations_path, relations)
-            push_candidates = [
-                rel for rel in relations
-                if rel.get("type") == "should_push_away"
-                and str(rel.get("object")) == str(held_object["id"])
-            ]
-            if push_candidates:
-                selected_push = push_candidates[0]
-                obstacle = object_by_id(current_state, selected_push["subject"])
-                obstacle_memory_id = memory_id_for_scene_object(memory, obstacle)
-                push_plan = {
-                    "schema_version": "push_plan_v1",
-                    "execution_status": "dry_run_only",
-                    "target_object_id": held_object.get("id"),
-                    "target_label": held_object.get("label"),
-                    "push_candidates": push_candidates,
-                    "selected_push": selected_push,
-                    "note": (
-                        "Geometry relation suggests clearing obstacle before pick. "
-                        "Execution is not connected yet."
-                    ),
-                }
-                write_json(
-                    os.path.join(cycle_dir, "push_plan_before_pick.json"),
-                    push_plan,
-                )
-                push_execution_plan = build_push_execution_plan(
-                    current_state,
-                    held_object,
-                    selected_push,
-                    args,
-                )
-                push_execution_plan_path = os.path.join(
-                    cycle_dir,
-                    "push_execution_plan.json",
-                )
-                write_json(push_execution_plan_path, push_execution_plan)
-                print(
-                    "Geometry relation suggests push before pick: "
-                    "obstacle={} target={} direction={} distance={}".format(
-                        selected_push.get("subject"),
-                        selected_push.get("object"),
-                        selected_push.get("direction_base"),
-                        selected_push.get("distance_m"),
-                    ),
-                    flush=True,
-                )
-                if args.execute and args.execute_push_clearing:
-                    validate_push_clearance_against_structure(
-                        current_state,
-                        selected_push,
-                        base_id,
-                        previous_locked_stack,
-                    )
-                    runtime["current_stage"] = "push_clearing_before_pick"
-                    run(push_clear_command(args, push_execution_plan_path))
-                    push_execution_plan["execution_status"] = "executed"
-                    write_json(push_execution_plan_path, push_execution_plan)
-
-                    runtime["current_stage"] = "observation_after_push_clearing"
-                    pushed_state = capture_empty_observation(
-                        args,
-                        os.path.join(cycle_dir, "observation_after_push"),
-                        runtime["held_object_id"],
-                    )
-                    if pushed_state is None:
-                        raise RuntimeError(
-                            "Push clearing completed but no live observation was produced afterward."
-                        )
-                    current_state = pushed_state
-                    memory = update_from_detections(memory, current_state.get("objects", []))
-                    if obstacle_memory_id is not None:
-                        memory = mark_pushed(
-                            memory,
-                            obstacle_memory_id,
-                            selected_push["direction_base"],
-                            selected_push.get("distance_m", args.push_clearing_distance_m),
-                            reason=selected_push.get("reason") or "clear_obstacle",
-                            result="executed",
-                        )
-                    save_memory(memory, args.memory_json)
-                    held_object = copy.deepcopy(
-                        reacquire_target(current_state, held_templates[object_id])
-                    )
-
-                    relation_objects_after_push = relation_objects_with_protected_structure(
-                        current_state.get("objects", []),
-                        base_id,
-                        previous_locked_stack,
-                    )
-                    relations_after_push = build_geometry_relations(
-                        relation_objects_after_push,
-                        target_id=int(held_object["id"]),
-                    )
-                    write_json(
-                        os.path.join(cycle_dir, "geometry_relations_after_push.json"),
-                        relations_after_push,
-                    )
             pre_pick_excluded_ids, pre_pick_excluded_xy = target_exclusion_for_pre_pick(held_object)
             current_base_object, stack_state = estimate_current_stack(
                 current_state,
