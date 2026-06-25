@@ -143,6 +143,8 @@ class YawRotationProbeTests(unittest.TestCase):
         self.assertIsNone(record["point_camera_xyz"])
         self.assertIsNone(record["point_base_xyz"])
         self.assertEqual(record["tool0_position"], [0.2, 0.1, 0.35])
+        self.assertIn("tool0_pose", record)
+        self.assertIn("camera_link_pose", record)
 
     def test_pose_check_rejects_unreached_yaw_before_recording_detection(self):
         args = Namespace(
@@ -177,6 +179,8 @@ class YawRotationProbeTests(unittest.TestCase):
         self.assertEqual(record["status"], "pose_failed")
         self.assertEqual(record["target_pose_key"], "yaw_p0deg")
         self.assertIn("pose_check", record)
+        self.assertIn("tool0_pose", record)
+        self.assertIn("camera_link_pose", record)
 
 
 if __name__ == "__main__":

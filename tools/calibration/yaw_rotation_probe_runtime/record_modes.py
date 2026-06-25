@@ -13,7 +13,7 @@ from robot_scene_pipeline.io_utils import write_json
 
 from .motion import build_yaw_motion_command, run_yaw_motion_command
 from .pose_math import pose_to_matrix, yaw_file_stem
-from .pose_math import tool_z_axis_base
+from .pose_math import pose_payload, tool_z_axis_base
 from .recording import (
     build_record,
     detect_objects,
@@ -218,8 +218,10 @@ def build_pose_failed_record(
         "target_pose": targets["targets"].get(stem),
         "tool0_position": [float(v) for v in tool_pose[0]],
         "tool0_quat": [float(v) for v in tool_pose[1]],
+        "tool0_pose": pose_payload(tool_pose[0], tool_pose[1]),
         "camera_link_position": [float(v) for v in camera_pose[0]],
         "camera_link_quat": [float(v) for v in camera_pose[1]],
+        "camera_link_pose": pose_payload(camera_pose[0], camera_pose[1]),
         "pose_check": check,
         "point_camera_xyz": None,
         "point_base_xyz": None,
@@ -234,6 +236,7 @@ def build_missed_record(
     camera_pose: Optional[Pose],
     targets: Dict[str, object],
     attempts: int,
+    check: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     stem = yaw_file_stem(yaw_deg)
     record = {
@@ -254,13 +257,16 @@ def build_missed_record(
         "camera_link_quat": None,
         "point_camera_xyz": None,
         "point_base_xyz": None,
+        "pose_check": check,
     }
     if tool_pose is not None:
         record["tool0_position"] = [float(v) for v in tool_pose[0]]
         record["tool0_quat"] = [float(v) for v in tool_pose[1]]
+        record["tool0_pose"] = pose_payload(tool_pose[0], tool_pose[1])
     if camera_pose is not None:
         record["camera_link_position"] = [float(v) for v in camera_pose[0]]
         record["camera_link_quat"] = [float(v) for v in camera_pose[1]]
+        record["camera_link_pose"] = pose_payload(camera_pose[0], camera_pose[1])
     return record
 
 
@@ -280,7 +286,9 @@ def capture_yaw_record(
     last_tool_pose = None
     last_camera_pose = None
     last_annotated = None
+    last_pose_check = None
     attempts = max(1, int(args.record_attempts))
+    target_pose = targets["targets"].get(yaw_file_stem(yaw_deg))  # type: ignore[index]
     for attempt in range(attempts):
         frame = subscriber.wait_for_frame(float(args.frame_timeout_ms) / 1000.0, last_seq, require_depth=True)
         last_seq = frame.color_seq
@@ -307,40 +315,26 @@ def capture_yaw_record(
         key = show_view(args, view, args.preview_ms if selected is not None else 1)
         if key in (27, ord("q")):
             raise KeyboardInterrupt("yaw probe interrupted by user")
-        if selected is None or tool_pose is None or camera_pose is None:
-            last_error = tf_error or "no selected detection with base_link point"
+        if tool_pose is None or camera_pose is None:
+            last_error = tf_error or "TF pose unavailable"
             continue
 
-        target_pose = targets["targets"].get(yaw_file_stem(yaw_deg))  # type: ignore[index]
         check = pose_check(args, tool_pose, target_pose)
+        last_pose_check = check
         if not check["ok"]:
-            record = build_pose_failed_record(
-                args,
-                yaw_deg,
-                tool_pose,
-                camera_pose,
-                targets,
-                check,
-                attempt + 1,
+            last_error = (
+                "tool0 pose not reached: orientation_error={:.2f}deg "
+                "z_axis_error={:.2f}deg position_error={:.4f}m"
+            ).format(
+                float(check["orientation_error_deg"]),
+                float(check["z_axis_error_deg"]),
+                float(check["position_error_m"]),
             )
-            stem = yaw_file_stem(yaw_deg)
-            output_path = os.path.join(args.output_dir, stem + "_pose_failed.json")
-            image_path = os.path.join(args.output_dir, stem + "_pose_failed.png")
-            write_json(output_path, record)
-            cv2.imwrite(image_path, annotated)
-            print(
-                "[WARN] pose failed yaw {:.1f}: orientation_error={:.2f}deg "
-                "z_axis_error={:.2f}deg position_error={:.4f}m; saved {} and {}".format(
-                    float(yaw_deg),
-                    float(check["orientation_error_deg"]),
-                    float(check["z_axis_error_deg"]),
-                    float(check["position_error_m"]),
-                    output_path,
-                    image_path,
-                ),
-                flush=True,
-            )
-            return int(last_seq), False
+            continue
+
+        if selected is None:
+            last_error = "no selected detection with base_link point"
+            continue
 
         record = build_record(
             args,
@@ -362,6 +356,37 @@ def capture_yaw_record(
         return int(last_seq), True
 
     stem = yaw_file_stem(yaw_deg)
+    if last_pose_check is not None and not last_pose_check.get("ok") and last_tool_pose is not None and last_camera_pose is not None:
+        record = build_pose_failed_record(
+            args,
+            yaw_deg,
+            last_tool_pose,
+            last_camera_pose,
+            targets,
+            last_pose_check,
+            attempts,
+        )
+        output_path = os.path.join(args.output_dir, stem + "_pose_failed.json")
+        write_json(output_path, record)
+        if last_annotated is not None:
+            image_path = os.path.join(args.output_dir, stem + "_pose_failed.png")
+            cv2.imwrite(image_path, last_annotated)
+            print(
+                "[WARN] pose failed yaw {:.1f}: orientation_error={:.2f}deg "
+                "z_axis_error={:.2f}deg position_error={:.4f}m; saved {} and {}".format(
+                    float(yaw_deg),
+                    float(last_pose_check["orientation_error_deg"]),
+                    float(last_pose_check["z_axis_error_deg"]),
+                    float(last_pose_check["position_error_m"]),
+                    output_path,
+                    image_path,
+                ),
+                flush=True,
+            )
+        else:
+            print("[WARN] pose failed yaw {:.1f}; saved {}".format(float(yaw_deg), output_path), flush=True)
+        return int(last_seq), False
+
     record = build_missed_record(
         args,
         yaw_deg,
@@ -370,6 +395,7 @@ def capture_yaw_record(
         last_camera_pose,
         targets,
         attempts,
+        check=last_pose_check,
     )
     output_path = os.path.join(args.output_dir, stem + "_missed.json")
     write_json(output_path, record)
