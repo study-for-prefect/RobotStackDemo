@@ -55,6 +55,7 @@ python3 tools/calibration/yaw_rotation_probe.py \
 - `config/yaw_rotation_probe_pose.json`: 检验用 `tool0` 初始 XYZ，可按现场安全位置修改。
 - `yaw_motion_commands.json`: 实际调用 MoveIt 的命令，便于检查。
 - `yaw_p0deg.json`, `yaw_p45deg.json`, `yaw_m45deg.json` 等记录文件。
+- `yaw_p90deg_missed.json` 这类文件：该角度没有检测到目标或没有可用三维点时写入，程序会继续下一个 yaw。
 - 同名 `.png` 标注图，画面中会标出检测物体在 `base_link` 和相机坐标系下的三维坐标。
 
 每条记录包含 `tool0_position`、`tool0_quat`、`camera_link_position`、`camera_link_quat`、`point_camera_xyz`、`point_base_xyz`，并附带从配置目标位姿算出的 XYZ/RPY 偏差检查。没有 `--execute` 时只做 MoveIt 规划预检和目标文件生成，不会移动机械臂，也不会写有效的 `yaw_p*.json` 测量记录。

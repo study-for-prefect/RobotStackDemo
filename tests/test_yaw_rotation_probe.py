@@ -7,6 +7,7 @@ from tools.calibration.yaw_rotation_probe_runtime.motion import (
     build_yaw_motion_command,
     hover_target_from_tool0_position,
 )
+from tools.calibration.yaw_rotation_probe_runtime.record_modes import build_missed_record
 from tools.calibration.yaw_rotation_probe_runtime.pose_math import (
     build_yaw_targets,
     quaternion_to_rpy_xyzw,
@@ -111,6 +112,33 @@ class YawRotationProbeTests(unittest.TestCase):
         hover_target = [float(value) for value in command[hover_index:hover_index + 3]]
         for actual, expected in zip(hover_target, [0.4, -0.2, 0.2]):
             self.assertAlmostEqual(actual, expected, places=9)
+
+    def test_missed_record_keeps_yaw_sequence_analysis_fields(self):
+        args = Namespace(base_frame="base_link", tool_frame="tool0", camera_frame="camera_link")
+        targets = {
+            "targets": {
+                "yaw_p90deg": {
+                    "yaw_deg": 90.0,
+                    "tool0_position": [0.2, 0.1, 0.35],
+                    "tool0_quat": vertical_down_quaternion_for_yaw(90.0),
+                }
+            }
+        }
+        record = build_missed_record(
+            args,
+            90.0,
+            "no selected detection with base_link point",
+            ([0.2, 0.1, 0.35], vertical_down_quaternion_for_yaw(90.0)),
+            ([0.21, 0.1, 0.35], [0.0, 0.0, 0.0, 1.0]),
+            targets,
+            attempts=5,
+        )
+        self.assertEqual(record["status"], "missed_detection")
+        self.assertEqual(record["target_pose_key"], "yaw_p90deg")
+        self.assertEqual(record["attempts"], 5)
+        self.assertIsNone(record["point_camera_xyz"])
+        self.assertIsNone(record["point_base_xyz"])
+        self.assertEqual(record["tool0_position"], [0.2, 0.1, 0.35])
 
 
 if __name__ == "__main__":

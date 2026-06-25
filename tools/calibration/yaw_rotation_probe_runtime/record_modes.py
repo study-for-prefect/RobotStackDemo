@@ -135,6 +135,44 @@ def write_motion_command_preview(args: Namespace, targets: Dict[str, object]) ->
     return output_path
 
 
+def build_missed_record(
+    args: Namespace,
+    yaw_deg: float,
+    reason: str,
+    tool_pose: Optional[Pose],
+    camera_pose: Optional[Pose],
+    targets: Dict[str, object],
+    attempts: int,
+) -> Dict[str, object]:
+    stem = yaw_file_stem(yaw_deg)
+    record = {
+        "schema_version": "yaw_rotation_missed_record_v1",
+        "recorded_at_unix": time.time(),
+        "yaw_deg": float(yaw_deg),
+        "target_pose_key": stem,
+        "status": "missed_detection",
+        "reason": str(reason),
+        "attempts": int(attempts),
+        "base_frame": args.base_frame,
+        "tool_frame": args.tool_frame,
+        "camera_frame": args.camera_frame,
+        "target_pose": targets["targets"].get(stem),
+        "tool0_position": None,
+        "tool0_quat": None,
+        "camera_link_position": None,
+        "camera_link_quat": None,
+        "point_camera_xyz": None,
+        "point_base_xyz": None,
+    }
+    if tool_pose is not None:
+        record["tool0_position"] = [float(v) for v in tool_pose[0]]
+        record["tool0_quat"] = [float(v) for v in tool_pose[1]]
+    if camera_pose is not None:
+        record["camera_link_position"] = [float(v) for v in camera_pose[0]]
+        record["camera_link_quat"] = [float(v) for v in camera_pose[1]]
+    return record
+
+
 def capture_yaw_record(
     args: Namespace,
     model: Any,
@@ -146,8 +184,11 @@ def capture_yaw_record(
     source_tool_pose: Pose,
     source_camera_pose: Pose,
     targets: Dict[str, object],
-) -> int:
+) -> Tuple[int, bool]:
     last_error = "no attempt"
+    last_tool_pose = None
+    last_camera_pose = None
+    last_annotated = None
     attempts = max(1, int(args.record_attempts))
     for attempt in range(attempts):
         frame = subscriber.wait_for_frame(float(args.frame_timeout_ms) / 1000.0, last_seq, require_depth=True)
@@ -161,6 +202,9 @@ def capture_yaw_record(
             ignore_zone,
             0.50,
         )
+        last_tool_pose = tool_pose
+        last_camera_pose = camera_pose
+        last_annotated = annotated
         status = "AUTO yaw={:+.1f} attempt={}/{} selected={}".format(
             float(yaw_deg),
             attempt + 1,
@@ -192,8 +236,27 @@ def capture_yaw_record(
         write_json(output_path, record)
         cv2.imwrite(image_path, annotated)
         print("[INFO] saved record: {} and {}".format(output_path, image_path), flush=True)
-        return int(last_seq)
-    raise RuntimeError("No valid detection recorded for yaw {:.1f}: {}".format(float(yaw_deg), last_error))
+        return int(last_seq), True
+
+    stem = yaw_file_stem(yaw_deg)
+    record = build_missed_record(
+        args,
+        yaw_deg,
+        last_error,
+        last_tool_pose,
+        last_camera_pose,
+        targets,
+        attempts,
+    )
+    output_path = os.path.join(args.output_dir, stem + "_missed.json")
+    write_json(output_path, record)
+    if last_annotated is not None:
+        image_path = os.path.join(args.output_dir, stem + "_missed.png")
+        cv2.imwrite(image_path, last_annotated)
+        print("[WARN] missed yaw {:.1f}; saved {} and {}".format(float(yaw_deg), output_path, image_path), flush=True)
+    else:
+        print("[WARN] missed yaw {:.1f}; saved {}".format(float(yaw_deg), output_path), flush=True)
+    return int(last_seq), False
 
 
 def run_auto_record_sequence(
@@ -210,6 +273,8 @@ def run_auto_record_sequence(
     command_path = write_motion_command_preview(args, targets)
     print("[INFO] saved yaw motion commands:", command_path, flush=True)
     last_seq = first_seq
+    recorded_count = 0
+    missed_count = 0
     for target in target_sequence(targets):
         yaw_deg = float(target["yaw_deg"])
         print("[INFO] code-driven yaw target: {:+.1f} deg".format(yaw_deg), flush=True)
@@ -218,7 +283,7 @@ def run_auto_record_sequence(
             continue
         if args.motion_settle_s > 0:
             time.sleep(float(args.motion_settle_s))
-        last_seq = capture_yaw_record(
+        last_seq, recorded = capture_yaw_record(
             args,
             model,
             subscriber,
@@ -230,8 +295,14 @@ def run_auto_record_sequence(
             source_camera_pose,
             targets,
         )
+        if recorded:
+            recorded_count += 1
+        else:
+            missed_count += 1
     if not args.execute:
         print("[INFO] plan-only run finished; add --execute to move the robot and write yaw_p*.json records.", flush=True)
+    else:
+        print("[INFO] yaw probe finished: recorded={} missed={}".format(recorded_count, missed_count), flush=True)
 
 
 def run_manual_record_loop(
