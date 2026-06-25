@@ -11,6 +11,8 @@ from tools.calibration.yaw_rotation_probe_runtime.pose_math import (
     build_yaw_targets,
     quaternion_to_rpy_xyzw,
     rpy_to_quaternion_xyzw,
+    tool_z_axis_base,
+    vertical_down_quaternion_for_yaw,
 )
 
 
@@ -44,6 +46,19 @@ class YawRotationProbeTests(unittest.TestCase):
         self.assertAlmostEqual(cam90[0], 1.0, places=9)
         self.assertAlmostEqual(cam90[1], 2.1, places=9)
         self.assertAlmostEqual(cam90[2], 0.3, places=9)
+
+    def test_vertical_down_targets_keep_tool_z_axis_down(self):
+        payload = build_yaw_targets(
+            [0.2, 0.1, 0.35],
+            vertical_down_quaternion_for_yaw(0.0),
+            yaw_values_deg=(0, 45, 90, 180),
+        )
+        for target in payload["targets"].values():
+            z_axis = tool_z_axis_base(target["tool0_quat"])
+            self.assertAlmostEqual(z_axis[0], 0.0, places=9)
+            self.assertAlmostEqual(z_axis[1], 0.0, places=9)
+            self.assertAlmostEqual(z_axis[2], -1.0, places=9)
+            self.assertEqual(target["tool0_position"], [0.2, 0.1, 0.35])
 
     def test_hover_target_reconstructs_same_tool0_position(self):
         tool0_position = [0.42, -0.18, 0.36]
@@ -87,7 +102,7 @@ class YawRotationProbeTests(unittest.TestCase):
         )
         command = build_yaw_motion_command(args, target)
         self.assertIn("--hover-only", command)
-        self.assertIn("--joint-space", command)
+        self.assertNotIn("--joint-space", command)
         self.assertIn("--execute", command)
         self.assertIn("--yes", command)
         scientific_number = re.compile(r"^-?\d+(?:\.\d+)?e[+-]?\d+$", re.IGNORECASE)

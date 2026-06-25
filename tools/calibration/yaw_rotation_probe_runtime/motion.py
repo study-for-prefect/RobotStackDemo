@@ -68,7 +68,6 @@ def build_yaw_motion_command(args: Namespace, target_pose: Dict[str, object]) ->
         args.base_frame,
         "--end-effector",
         args.tool_frame,
-        "--joint-space",
         "--pre-rotate-before-translation",
         "--pre-rotate-strategy",
         args.pre_rotate_strategy,
@@ -90,6 +89,41 @@ def build_yaw_motion_command(args: Namespace, target_pose: Dict[str, object]) ->
     if args.yes:
         command.append("--yes")
     return command
+
+
+def build_ready_motion_command(args: Namespace) -> List[str]:
+    command = [
+        args.ros_python,
+        "tools/robot/moveit_plan_preview.py",
+        "--ready-only",
+        "--ready-joint-pose-json",
+        args.ready_joint_pose_json,
+        "--velocity",
+        cli_float(args.velocity),
+        "--acceleration",
+        cli_float(args.acceleration),
+        "--planning-time",
+        cli_float(args.planning_time),
+        "--tf-timeout",
+        cli_float(args.tf_timeout),
+        "--base-link",
+        args.base_frame,
+        "--end-effector",
+        args.tool_frame,
+        "--max-joint-delta",
+        cli_float(args.max_joint_delta),
+    ]
+    if args.execute:
+        command.append("--execute")
+    if args.yes:
+        command.append("--yes")
+    return command
+
+
+def run_ready_motion_command(args: Namespace) -> None:
+    command = build_ready_motion_command(args)
+    print("\n$ {}".format(" ".join(command)), flush=True)
+    subprocess.run(command, cwd=PROJECT_ROOT, check=True)
 
 
 def run_yaw_motion_command(args: Namespace, target_pose: Dict[str, object]) -> None:

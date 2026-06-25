@@ -17,6 +17,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", default="/tmp/yaw_rotation_probe")
     parser.add_argument("--target-poses-json", default="")
+    parser.add_argument("--probe-pose-json", default="config/yaw_rotation_probe_pose.json")
     parser.add_argument(
         "--record-mode",
         choices=("auto", "manual"),
@@ -31,10 +32,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-frame", default="camera_link")
     parser.add_argument("--tf-timeout", type=float, default=2.0)
     parser.add_argument("--tool0-position", nargs=3, type=float, default=None)
-    parser.add_argument("--tool0-quat", nargs=4, type=float, default=None)
+    parser.add_argument(
+        "--use-current-tool0-position",
+        action="store_true",
+        help="Debug fallback only. Default uses --probe-pose-json/--tool0-position for repeatable yaw tests.",
+    )
+    parser.add_argument("--initial-yaw-deg", type=float, default=None)
     parser.add_argument("--execute", action="store_true", help="Actually drive the robot through yaw targets.")
     parser.add_argument("--yes", action="store_true", help="Do not ask MoveIt confirmation for each executed yaw.")
     parser.add_argument("--ros-python", default="/usr/bin/python3")
+    parser.add_argument("--ready-joint-pose-json", default="config/rectangle_ready_pose.json")
+    parser.add_argument("--skip-initial-ready", action="store_true")
+    parser.add_argument("--initial-ready-settle-s", type=float, default=0.6)
     parser.add_argument("--motion-tool-z-offset", type=float, default=0.15)
     parser.add_argument("--motion-tool-offset-base", nargs=3, type=float, default=[0.0, 0.0, 0.0])
     parser.add_argument("--motion-settle-s", type=float, default=0.6)

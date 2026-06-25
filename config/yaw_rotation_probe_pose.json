@@ -1,0 +1,10 @@
+{
+  "schema_version": "yaw_rotation_probe_pose_v1",
+  "tool0_position": [
+    0.200662266267,
+    0.114755155944,
+    0.351099530149
+  ],
+  "initial_yaw_deg": 0.0,
+  "note": "Yaw probe starts from this tool0 XYZ in base_link. Orientation is generated in code: tool0 +Z points to base_link -Z, then only base Z yaw changes."
+}

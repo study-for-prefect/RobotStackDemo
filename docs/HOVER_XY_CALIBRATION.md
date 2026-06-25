@@ -38,7 +38,9 @@ Enter measurements in millimeters. For example, if the gripper center is
 
 Keep one object at the same position. Do not change offsets during collection.
 
-不要手动把末端拧到不同 yaw。手动调整会把 roll/pitch 和 XYZ 误差一起带进去，导致不同角度的检测误差不可解释。使用代码驱动的 yaw-only probe：先从当前 `tool0` 位姿生成目标，只替换 yaw，保持 `tool0` XYZ 和 roll/pitch；然后由 MoveIt 逐个转到目标 yaw，稳定后自动检测并记录。
+不要手动把末端拧到不同 yaw。手动调整会把 roll/pitch 和 XYZ 误差一起带进去，导致不同角度的检测误差不可解释。
+
+使用代码驱动的 yaw-only probe。它从 `config/yaw_rotation_probe_pose.json` 读取 `tool0_position`，姿态由代码生成：`tool0` 的 `+Z` 轴对准 `base_link` 的 `-Z` 轴，然后只绕 `base_link` 的 Z 轴改变 yaw。也就是说，检测不同 yaw 角误差时不继承当前 tool0 的 roll/pitch，不允许 roll/pitch 漂移。
 
 ```bash
 python3 tools/calibration/yaw_rotation_probe.py \
@@ -49,12 +51,13 @@ python3 tools/calibration/yaw_rotation_probe.py \
 
 默认 yaw 顺序是 `0, +45, -45, +90, -90, +135, -135, 180`。命令会写：
 
-- `yaw_target_poses.json`: 每个目标 `tool0` 位姿；XYZ 和 roll/pitch 来自起始位姿，只替换 yaw。
+- `yaw_target_poses.json`: 每个目标 `tool0` 位姿；XYZ 来自配置，姿态始终保持竖直向下，只替换 yaw。
+- `config/yaw_rotation_probe_pose.json`: 检验用 `tool0` 初始 XYZ，可按现场安全位置修改。
 - `yaw_motion_commands.json`: 实际调用 MoveIt 的命令，便于检查。
 - `yaw_p0deg.json`, `yaw_p45deg.json`, `yaw_m45deg.json` 等记录文件。
 - 同名 `.png` 标注图，画面中会标出检测物体在 `base_link` 和相机坐标系下的三维坐标。
 
-每条记录包含 `tool0_position`、`tool0_quat`、`camera_link_position`、`camera_link_quat`、`point_camera_xyz`、`point_base_xyz`，并附带从起始位姿算出的 XYZ/RPY 偏差检查。没有 `--execute` 时只做 MoveIt 规划预检和目标文件生成，不会移动机械臂，也不会写有效的 `yaw_p*.json` 测量记录。
+每条记录包含 `tool0_position`、`tool0_quat`、`camera_link_position`、`camera_link_quat`、`point_camera_xyz`、`point_base_xyz`，并附带从配置目标位姿算出的 XYZ/RPY 偏差检查。没有 `--execute` 时只做 MoveIt 规划预检和目标文件生成，不会移动机械臂，也不会写有效的 `yaw_p*.json` 测量记录。
 
 保留旧的人工记录入口仅用于临时排障：
 

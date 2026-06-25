@@ -5,10 +5,14 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-from robot_scene_pipeline.grasp_orientation import normalize_quaternion_xyzw
+from robot_scene_pipeline.grasp_orientation import (
+    downward_quaternion_for_yaw,
+    normalize_quaternion_xyzw,
+)
 
 
 DEFAULT_YAWS_DEG: Tuple[int, ...] = (0, 45, -45, 90, -90, 135, -135, 180)
+DEFAULT_DOWNWARD_QUAT_XYZW: Tuple[float, ...] = (1.0, 0.0, 0.0, 0.0)
 
 
 def normalize_yaw_deg(yaw_deg: float) -> float:
@@ -19,6 +23,16 @@ def yaw_file_stem(yaw_deg: float) -> str:
     rounded = int(round(float(yaw_deg)))
     prefix = "p" if rounded >= 0 else "m"
     return "yaw_{}{}deg".format(prefix, abs(rounded))
+
+
+def vertical_down_quaternion_for_yaw(yaw_deg: float) -> List[float]:
+    """Return orientation with tool0 +Z aligned to base_link -Z, yawed about base Z."""
+    return downward_quaternion_for_yaw(DEFAULT_DOWNWARD_QUAT_XYZW, float(yaw_deg))
+
+
+def tool_z_axis_base(quat_xyzw: Iterable[float]) -> List[float]:
+    matrix = quaternion_xyzw_to_matrix(quat_xyzw)
+    return matrix[:3, 2].astype(float).tolist()
 
 
 def rpy_to_quaternion_xyzw(roll: float, pitch: float, yaw: float) -> List[float]:
@@ -138,6 +152,8 @@ def build_yaw_targets(
     camera_position_m: Optional[Iterable[float]] = None,
     camera_quat_xyzw: Optional[Iterable[float]] = None,
     yaw_values_deg: Iterable[float] = DEFAULT_YAWS_DEG,
+    reference_tool0_position_m: Optional[Iterable[float]] = None,
+    reference_tool0_quat_xyzw: Optional[Iterable[float]] = None,
 ) -> Dict[str, object]:
     tool0_position = [float(value) for value in tool0_position_m]
     source_quat = normalize_quaternion_xyzw(tool0_quat_xyzw)
@@ -147,7 +163,11 @@ def build_yaw_targets(
     tool_to_camera = None
     if camera_position_m is not None and camera_quat_xyzw is not None:
         camera_matrix = pose_to_matrix(camera_position_m, camera_quat_xyzw)
-        tool_to_camera = np.linalg.inv(source_tool_matrix).dot(camera_matrix)
+        if reference_tool0_position_m is not None and reference_tool0_quat_xyzw is not None:
+            reference_tool_matrix = pose_to_matrix(reference_tool0_position_m, reference_tool0_quat_xyzw)
+        else:
+            reference_tool_matrix = source_tool_matrix
+        tool_to_camera = np.linalg.inv(reference_tool_matrix).dot(camera_matrix)
 
     targets = {}
     for yaw_deg in yaw_values_deg:
@@ -160,6 +180,7 @@ def build_yaw_targets(
             "tool0_position": list(tool0_position),
             "tool0_quat": target_quat,
             "tool0_pose": pose_payload(tool0_position, target_quat),
+            "tool0_z_axis_base": tool_z_axis_base(target_quat),
         }
         if tool_to_camera is not None:
             camera_position, camera_quat = matrix_to_pose(target_tool_matrix.dot(tool_to_camera))
@@ -175,10 +196,11 @@ def build_yaw_targets(
     return {
         "schema_version": "yaw_only_target_poses_v1",
         "yaw_values_deg": [float(value) for value in yaw_values_deg],
-        "euler_convention": "ROS quaternion <-> roll/pitch/yaw; target keeps source roll/pitch and replaces base yaw.",
+        "orientation_rule": "tool0 +Z is aligned with base_link -Z; targets change only base Z yaw.",
         "source_tool0_position": tool0_position,
         "source_tool0_quat": source_quat,
         "source_tool0_pose": pose_payload(tool0_position, source_quat),
+        "source_tool0_z_axis_base": tool_z_axis_base(source_quat),
         "source_yaw_deg": math.degrees(source_yaw),
         "targets": targets,
     }
