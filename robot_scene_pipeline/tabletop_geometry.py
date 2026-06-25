@@ -8,6 +8,7 @@ from .instance_pointcloud import (
     build_object_pointcloud,
     deproject_depth_mask,
     dilate_mask,
+    is_realsense_intrinsics,
     object_mask,
     resize_mask_to_image,
     transform_points,
@@ -100,13 +101,14 @@ def deproject_depth_roi(depth_frame, intrinsics, roi=None, stride=1, max_depth_m
         import pyrealsense2 as rs
     except ImportError:
         rs = None
+    use_rs_deproject = is_realsense_intrinsics(intrinsics, rs)
     points = []
     for y in range(y1, y2 + 1, max(1, int(stride))):
         for x in range(x1, x2 + 1, max(1, int(stride))):
             depth = float(depth_frame.get_distance(x, y))
             if depth <= 0 or depth > float(max_depth_m):
                 continue
-            if rs is not None and hasattr(intrinsics, "model"):
+            if use_rs_deproject:
                 points.append(rs.rs2_deproject_pixel_to_point(intrinsics, [float(x), float(y)], depth))
             else:
                 points.append([(x - ppx) * depth / fx, (y - ppy) * depth / fy, depth])

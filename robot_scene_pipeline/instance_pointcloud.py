@@ -3,6 +3,15 @@
 import numpy as np
 
 
+def is_realsense_intrinsics(intrinsics, rs):
+    if rs is None:
+        return False
+    try:
+        return isinstance(intrinsics, rs.intrinsics)
+    except TypeError:
+        return type(intrinsics).__module__.startswith("pyrealsense2")
+
+
 def resize_mask_to_image(mask, width, height, threshold=0.5):
     if mask is None:
         return None
@@ -71,6 +80,7 @@ def deproject_depth_mask(depth_frame, intrinsics, mask_bool, stride=1, max_depth
         import pyrealsense2 as rs
     except ImportError:
         rs = None
+    use_rs_deproject = is_realsense_intrinsics(intrinsics, rs)
 
     x1, y1, x2, y2 = bounds
     step = max(1, int(stride))
@@ -83,7 +93,7 @@ def deproject_depth_mask(depth_frame, intrinsics, mask_bool, stride=1, max_depth
             depth = float(depth_frame.get_distance(x, y))
             if depth <= 0 or depth > float(max_depth_m):
                 continue
-            if rs is not None and hasattr(intrinsics, "model"):
+            if use_rs_deproject:
                 points.append(rs.rs2_deproject_pixel_to_point(intrinsics, [float(x), float(y)], depth))
             else:
                 points.append([(x - ppx) * depth / fx, (y - ppy) * depth / fy, depth])
@@ -111,6 +121,7 @@ def deproject_depth_bbox(depth_frame, intrinsics, bbox, stride=1, max_depth_m=2.
         import pyrealsense2 as rs
     except ImportError:
         rs = None
+    use_rs_deproject = is_realsense_intrinsics(intrinsics, rs)
 
     step = max(1, int(stride))
     points = []
@@ -119,7 +130,7 @@ def deproject_depth_bbox(depth_frame, intrinsics, bbox, stride=1, max_depth_m=2.
             depth = float(depth_frame.get_distance(x, y))
             if depth <= 0 or depth > float(max_depth_m):
                 continue
-            if rs is not None and hasattr(intrinsics, "model"):
+            if use_rs_deproject:
                 points.append(rs.rs2_deproject_pixel_to_point(intrinsics, [float(x), float(y)], depth))
             else:
                 points.append([(x - ppx) * depth / fx, (y - ppy) * depth / fy, depth])
