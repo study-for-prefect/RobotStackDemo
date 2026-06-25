@@ -11,6 +11,7 @@ from tools.calibration.yaw_rotation_probe_runtime.record_modes import (
     build_missed_record,
     build_pose_failed_record,
     pose_check,
+    yaw_motion_arg_variants,
 )
 from tools.calibration.yaw_rotation_probe_runtime.pose_math import (
     build_yaw_targets,
@@ -181,6 +182,25 @@ class YawRotationProbeTests(unittest.TestCase):
         self.assertIn("pose_check", record)
         self.assertIn("tool0_pose", record)
         self.assertIn("camera_link_pose", record)
+
+    def test_yaw_motion_variants_include_pose_fallback(self):
+        args = Namespace(
+            pre_rotate_strategy="joint-wrist3",
+            pre_rotate_wrist_yaw_sign="negative",
+            pre_rotate_wrist_direction="auto",
+        )
+        variants = yaw_motion_arg_variants(args)
+        keys = [
+            (
+                variant.pre_rotate_strategy,
+                variant.pre_rotate_wrist_yaw_sign,
+                variant.pre_rotate_wrist_direction,
+            )
+            for variant in variants
+        ]
+        self.assertIn(("joint-wrist3", "auto", "auto"), keys)
+        self.assertIn(("joint-wrist3", "positive", "auto"), keys)
+        self.assertIn(("pose", "negative", "auto"), keys)
 
 
 if __name__ == "__main__":

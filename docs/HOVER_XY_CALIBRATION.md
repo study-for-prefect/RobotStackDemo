@@ -61,6 +61,8 @@ python3 tools/calibration/yaw_rotation_probe.py \
 
 每条记录包含 `tool0_position`、`tool0_quat`、`camera_link_position`、`camera_link_quat`、`point_camera_xyz`、`point_base_xyz`，并附带从配置目标位姿算出的 XYZ/RPY 偏差检查。没有 `--execute` 时只做 MoveIt 规划预检和目标文件生成，不会移动机械臂，也不会写有效的 `yaw_p*.json` 测量记录。
 
+自动模式下，每个 yaw 会先执行默认预旋转策略；如果 TF 校验显示未到位，会自动尝试 `joint-wrist3 auto/positive/negative` 和 `pose` 预旋转。只有 TF 到位后才进入检测记录。
+
 保留旧的人工记录入口仅用于临时排障：
 
 ```bash

@@ -1,5 +1,6 @@
 """Manual and code-driven recording loops for yaw rotation probe."""
 
+import copy
 import math
 import os
 import time
@@ -121,7 +122,15 @@ def write_motion_command_preview(args: Namespace, targets: Dict[str, object]) ->
             {
                 "yaw_deg": target.get("yaw_deg"),
                 "file_stem": target.get("file_stem"),
-                "command": build_yaw_motion_command(args, target),
+                "commands": [
+                    {
+                        "pre_rotate_strategy": variant.pre_rotate_strategy,
+                        "pre_rotate_wrist_yaw_sign": variant.pre_rotate_wrist_yaw_sign,
+                        "pre_rotate_wrist_direction": variant.pre_rotate_wrist_direction,
+                        "command": build_yaw_motion_command(variant, target),
+                    }
+                    for variant in yaw_motion_arg_variants(args)
+                ],
             }
         )
     output_path = os.path.join(args.output_dir, "yaw_motion_commands.json")
@@ -135,6 +144,29 @@ def write_motion_command_preview(args: Namespace, targets: Dict[str, object]) ->
         },
     )
     return output_path
+
+
+def yaw_motion_arg_variants(args: Namespace) -> List[Namespace]:
+    candidates = [
+        (args.pre_rotate_strategy, args.pre_rotate_wrist_yaw_sign, args.pre_rotate_wrist_direction),
+        ("joint-wrist3", "auto", args.pre_rotate_wrist_direction),
+        ("joint-wrist3", "positive", args.pre_rotate_wrist_direction),
+        ("joint-wrist3", "negative", args.pre_rotate_wrist_direction),
+        ("pose", args.pre_rotate_wrist_yaw_sign, args.pre_rotate_wrist_direction),
+    ]
+    variants = []
+    seen = set()
+    for strategy, yaw_sign, direction in candidates:
+        key = (strategy, yaw_sign, direction)
+        if key in seen:
+            continue
+        seen.add(key)
+        variant = copy.copy(args)
+        variant.pre_rotate_strategy = strategy
+        variant.pre_rotate_wrist_yaw_sign = yaw_sign
+        variant.pre_rotate_wrist_direction = direction
+        variants.append(variant)
+    return variants
 
 
 def angle_between_deg(left: List[float], right: List[float]) -> float:
@@ -268,6 +300,81 @@ def build_missed_record(
         record["camera_link_quat"] = [float(v) for v in camera_pose[1]]
         record["camera_link_pose"] = pose_payload(camera_pose[0], camera_pose[1])
     return record
+
+
+def verify_motion_reached_target(
+    args: Namespace,
+    subscriber: Any,
+    tf_buffer: Any,
+    target_pose: Dict[str, object],
+) -> Tuple[bool, Optional[Dict[str, object]]]:
+    try:
+        tool_pose = lookup_pose(
+            tf_buffer,
+            subscriber.node,
+            subscriber._rclpy,
+            args.base_frame,
+            args.tool_frame,
+            args.tf_timeout,
+        )
+    except Exception as exc:
+        print("[WARN] TF check after yaw motion failed: {}".format(exc), flush=True)
+        return False, None
+    check = pose_check(args, tool_pose, target_pose)
+    print(
+        "[INFO] post-motion pose check: ok={} orientation_error={:.2f}deg "
+        "z_axis_error={:.2f}deg position_error={:.4f}m".format(
+            check["ok"],
+            float(check["orientation_error_deg"]),
+            float(check["z_axis_error_deg"]),
+            float(check["position_error_m"]),
+        ),
+        flush=True,
+    )
+    return bool(check["ok"]), check
+
+
+def run_verified_yaw_motion(
+    args: Namespace,
+    subscriber: Any,
+    tf_buffer: Any,
+    target_pose: Dict[str, object],
+) -> bool:
+    if not args.execute:
+        run_yaw_motion_command(args, target_pose)
+        return True
+
+    best_check = None
+    for variant in yaw_motion_arg_variants(args):
+        print(
+            "[INFO] yaw motion attempt: strategy={} wrist_yaw_sign={} wrist_direction={}".format(
+                variant.pre_rotate_strategy,
+                variant.pre_rotate_wrist_yaw_sign,
+                variant.pre_rotate_wrist_direction,
+            ),
+            flush=True,
+        )
+        try:
+            run_yaw_motion_command(variant, target_pose)
+        except Exception as exc:
+            print("[WARN] yaw motion command failed: {}".format(exc), flush=True)
+            continue
+        if args.motion_settle_s > 0:
+            time.sleep(float(args.motion_settle_s))
+        reached, check = verify_motion_reached_target(args, subscriber, tf_buffer, target_pose)
+        if check is not None:
+            best_check = check
+        if reached:
+            return True
+
+    if best_check is not None:
+        print(
+            "[WARN] all yaw motion attempts missed target; best/last orientation_error={:.2f}deg".format(
+                float(best_check["orientation_error_deg"])
+            ),
+            flush=True,
+        )
+    return False
 
 
 def capture_yaw_record(
@@ -427,11 +534,11 @@ def run_auto_record_sequence(
     for target in target_sequence(targets):
         yaw_deg = float(target["yaw_deg"])
         print("[INFO] code-driven yaw target: {:+.1f} deg".format(yaw_deg), flush=True)
-        run_yaw_motion_command(args, target)
+        motion_reached = run_verified_yaw_motion(args, subscriber, tf_buffer, target)
         if not args.execute:
             continue
-        if args.motion_settle_s > 0:
-            time.sleep(float(args.motion_settle_s))
+        if not motion_reached:
+            print("[WARN] yaw target {:+.1f} was not reached; writing failure record after final TF/image check.".format(yaw_deg), flush=True)
         last_seq, recorded = capture_yaw_record(
             args,
             model,
