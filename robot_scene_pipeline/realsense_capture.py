@@ -24,6 +24,9 @@ class ArrayDepthFrame:
 
 
 def add_realsense_args(parser):
+    from .ros_topic_capture import add_ros_topic_args
+
+    add_ros_topic_args(parser)
     parser.add_argument("--image-in", default="", help="Use an existing color image instead of capturing from RealSense.")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)

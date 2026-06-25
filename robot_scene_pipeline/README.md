@@ -3,10 +3,13 @@
 This directory contains the split single-frame robot scene pipeline:
 
 - `snapshot_pipeline.py`: main orchestration.
-- `realsense_capture.py`: RealSense RGB-D snapshot capture.
+- `ros_topic_capture.py`: ROS 2 RGB-D topic snapshot capture.
+- `realsense_capture.py`: legacy direct RealSense RGB-D snapshot capture.
 - `detector_runtime.py`: custom detector runtime.
 - `depth_geometry.py`: depth-to-3D and scene state helpers.
 - `tf_transform.py`: TF lookup and camera-to-base point transform.
+- `grasp_yaw_search.py`: 连续抓取 yaw 搜索，输出可行/阻塞 yaw 区间。
+- `grasp_obstruction_decision.py`: 根据 yaw 搜索结果生成 pick、push 或 replan 决策字段。
 - `llm_scene_reasoner.py`: LLM prompt and Ollama call.
 
 For hover/TCP offset and XY-bias calibration, see
@@ -46,6 +49,30 @@ conda run -n scene_graph_benchmark python -m robot_scene_pipeline.snapshot_pipel
 ```
 
 ## RealSense + LLM
+
+Start the RealSense ROS driver outside this project before running online
+perception. The pipeline subscribes to aligned color/depth topics by default:
+
+```bash
+ros2 launch realsense2_camera rs_launch.py \
+  align_depth.enable:=true \
+  enable_color:=true \
+  enable_depth:=true
+```
+
+Default subscribed topics:
+
+```text
+/camera/camera/color/image_raw
+/camera/camera/aligned_depth_to_color/image_raw
+/camera/camera/color/camera_info
+```
+
+Use `--color-topic`, `--depth-topic`, and `--camera-info-topic` if your driver
+uses a different namespace. The old in-process `pyrealsense2` capture path is
+available only when explicitly requested with `--camera-source realsense`.
+Online topic capture requires a Python environment that can import `rclpy` and
+`sensor_msgs`; if YOLO runs in conda, expose the ROS 2 Python packages there.
 
 Capture immediately:
 

@@ -40,6 +40,51 @@ def _relations_for_target(
     )
 
 
+def _target_grasp_analysis(relations: list, target_id: Any) -> dict:
+    for relation in relations:
+        if (
+            relation.get("type") == "target_grasp_analysis"
+            and str(relation.get("object")) == str(target_id)
+        ):
+            return relation
+    return {}
+
+
+def _apply_selected_grasp_to_target(held_object: dict, analysis: dict) -> dict:
+    selected_yaw = analysis.get("selected_grasp_yaw_deg")
+    if selected_yaw is None:
+        return held_object
+    held_object["selected_grasp_yaw_deg"] = float(selected_yaw)
+    held_object["grasp_feasible"] = bool(analysis.get("grasp_feasible"))
+    held_object["feasible_yaw_intervals_deg"] = analysis.get("feasible_yaw_intervals_deg", [])
+    held_object["blocked_yaw_intervals_deg"] = analysis.get("blocked_yaw_intervals_deg", [])
+    held_object["grasp_yaw_source"] = analysis.get("selected_grasp_source") or "adaptive_grasp_yaw_search"
+    return held_object
+
+
+def _raise_if_non_push_action(analysis: dict) -> None:
+    action = analysis.get("action")
+    if action in (None, "pick", "push_clearing", "pick_away"):
+        return
+    if action in ("remove_top_object", "pick_away_top_object"):
+        raise RuntimeError(
+            "Target is under another object; do not solve this by rotating the gripper. "
+            "Recommended action={} object_above_target={}.".format(
+                action,
+                analysis.get("object_above_target"),
+            )
+        )
+    if action == "replan_required":
+        raise RuntimeError(
+            "All grasp yaws are blocked by protected structure; push clearing is refused. "
+            "blocked_by_base={} blocked_by_locked_structure={} blocked_by_placed_structure={}.".format(
+                analysis.get("blocked_by_base"),
+                analysis.get("blocked_by_locked_structure"),
+                analysis.get("blocked_by_placed_structure"),
+            )
+        )
+
+
 def _manual_clear_and_reobserve(
     args: Any,
     cycle_dir: str,
@@ -145,6 +190,15 @@ def handle_push_clearing_before_pick(
         base_id,
         previous_locked_stack,
     )
+    analysis = _target_grasp_analysis(relations, held_object["id"])
+    write_json(
+        os.path.join(cycle_dir, "grasp_yaw_analysis_before_pick.json"),
+        analysis,
+    )
+    _raise_if_non_push_action(analysis)
+    if analysis.get("action") == "pick" and analysis.get("grasp_feasible"):
+        held_object = _apply_selected_grasp_to_target(held_object, analysis)
+        return current_state, memory, held_object
     if not push_candidates:
         return current_state, memory, held_object
 

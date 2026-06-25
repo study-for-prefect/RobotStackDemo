@@ -8,7 +8,7 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `calibration/` | hover-only 标定、XY 系统偏差采集与拟合 |
+| `calibration/` | hover-only 标定、代码驱动 yaw-only 记录、XY 系统偏差采集与拟合 |
 | `data/` | RealSense 数据集采集 |
 | `diagnostics/` | 静态场景和感知稳定性诊断 |
 | `monitoring/` | 实时 YOLO/深度监控 |

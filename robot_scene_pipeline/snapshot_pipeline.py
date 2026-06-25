@@ -20,6 +20,7 @@ from .llm_scene_reasoner import (
     normalize_stack_blocks_text,
 )
 from .realsense_capture import add_realsense_args, capture_rgbd
+from .ros_topic_capture import capture_rgbd_from_ros_topics
 from .tabletop_geometry import add_tabletop_args, attach_tabletop_geometry
 from .tf_transform import add_tf_args, attach_base_coordinates, resolved_transform_matrix, transform_summary
 
@@ -139,6 +140,8 @@ def capture_or_load_snapshot(args):
         return frame_bgr, None, None, used_profile
 
     wait_for_capture_trigger(args)
+    if getattr(args, "camera_source", "ros-topic") == "ros-topic":
+        return capture_rgbd_from_ros_topics(args)
     return capture_rgbd(args)
 
 

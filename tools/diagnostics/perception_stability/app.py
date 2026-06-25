@@ -33,7 +33,7 @@ def main() -> None:
     all_records = []
     sample_errors = []
     try:
-        if not args.image_in:
+        if not args.image_in and getattr(args, "camera_source", "ros-topic") == "realsense":
             session = start_realsense_session(args)
         for sample_index in range(1, int(args.samples) + 1):
             print("Capturing sample {}/{}...".format(sample_index, args.samples), flush=True)

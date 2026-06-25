@@ -31,6 +31,15 @@ RobotStackDemo/
 # 单帧感知
 python3 -m robot_scene_pipeline.snapshot_pipeline --skip-llm
 
+# 实时检测监控，默认订阅 ROS 相机话题
+python3 tools/monitoring/realtime_yolo_monitor.py
+
+# yaw-only 姿态生成和代码驱动记录检查
+python3 tools/calibration/yaw_rotation_probe.py \
+  --target-label-contains green \
+  --output-dir runtime/yaw_rotation_probe/green \
+  --execute --yes
+
 # hover 标定
 python3 tools/calibration/hover_tool_offset_calibration.py --label green
 
@@ -47,7 +56,30 @@ python3 tools/workflows/stack_demo_pipeline.py --help
 python3 -m unittest discover -s tests
 ```
 
-涉及真实机械臂运动的命令默认只规划或采集；确认 UR5、MoveIt、TF、相机和夹爪状态后，再显式添加 `--execute`。
+涉及真实机械臂运动的命令默认只规划或采集；确认 UR5、MoveIt、TF、相机和夹爪状态后，再显式添加 `--execute`。yaw 角误差检测不要手动转动末端，使用 `yaw_rotation_probe.py --record-mode auto --execute` 让代码只改变目标 yaw 后自动记录。
+
+## 相机启动方式
+
+项目内默认不直接打开 D435i 设备，而是订阅外部 ROS 2 RealSense 驱动发布的已对齐 RGB-D 话题。先在项目外终端启动相机驱动，例如：
+
+```bash
+ros2 launch realsense2_camera rs_launch.py \
+  align_depth.enable:=true \
+  enable_color:=true \
+  enable_depth:=true
+```
+
+项目默认订阅：
+
+```text
+/camera/camera/color/image_raw
+/camera/camera/aligned_depth_to_color/image_raw
+/camera/camera/color/camera_info
+```
+
+如果你的 RealSense ROS 包发布的是旧命名空间，运行项目命令时改 `--color-topic`、`--depth-topic`、`--camera-info-topic`。旧的进程内 `pyrealsense2` 直连路径仍保留为显式兼容模式：`--camera-source realsense`。
+
+在线话题订阅命令需要运行在能导入 `rclpy`、`sensor_msgs` 的 Python 环境中；如果使用 conda 环境跑 YOLO，也要确保该环境能看到 ROS 2 Python 包。
 
 详细说明见：
 

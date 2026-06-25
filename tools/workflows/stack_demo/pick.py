@@ -42,6 +42,23 @@ def yaw_local_xy_to_base(offset_xy, yaw_deg):
     ]
 
 
+def apply_selected_grasp_yaw(step, obj):
+    selected_yaw = obj.get("selected_grasp_yaw_deg")
+    if selected_yaw is None:
+        return
+    yaw = float(selected_yaw)
+    step["target_yaw_deg"] = yaw
+    step["chosen_grasp_yaw_deg"] = yaw
+    step["selected_grasp_yaw_deg"] = yaw
+    step["target_yaw_valid"] = True
+    step["exact_tool_yaw_required"] = True
+    step["yaw_equivalence_period_deg"] = 180.0
+    step["yaw_frame"] = "base_link"
+    step["yaw_source"] = obj.get("grasp_yaw_source") or "adaptive_grasp_yaw_search"
+    step["feasible_yaw_intervals_deg"] = obj.get("feasible_yaw_intervals_deg", [])
+    step["blocked_yaw_intervals_deg"] = obj.get("blocked_yaw_intervals_deg", [])
+
+
 def build_offline_pick_plan(state, obj, output_path, args):
     decision = {"action_plan": [{"step": 1, "action": "pick", "object_id": int(obj["id"])}]}
     plan_args = SimpleNamespace(
@@ -106,6 +123,7 @@ def build_offline_pick_plan(state, obj, output_path, args):
         args.gripper_yaw_offset_deg,
         args.square_yaw_snap_tolerance_deg,
     )
+    apply_selected_grasp_yaw(step, obj)
     local_offset = args.grasp_tool_offset_local
     if local_offset is None:
         local_offset = [0.0, 0.0]

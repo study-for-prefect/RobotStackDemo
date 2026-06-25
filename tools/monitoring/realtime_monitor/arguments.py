@@ -3,6 +3,8 @@
 import argparse
 from pathlib import Path
 
+from robot_scene_pipeline.ros_topic_capture import add_ros_topic_args
+
 from .constants import PROJECT_ROOT
 
 def parse_args():
@@ -13,6 +15,7 @@ def parse_args():
     parser.add_argument("--conf", type=float, default=0.5)
     parser.add_argument("--iou", type=float, default=0.45)
     parser.add_argument("--imgsz", type=int, default=960)
+    add_ros_topic_args(parser)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--depth-width", type=int, default=1280)

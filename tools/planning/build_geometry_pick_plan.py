@@ -168,6 +168,23 @@ def set_stack_demo_yaw(
     step.pop("yaw_forced_from_invalid_aspect_ratio", None)
 
 
+def apply_selected_grasp_yaw(step, obj):
+    selected_yaw = obj.get("selected_grasp_yaw_deg")
+    if selected_yaw is None:
+        return
+    yaw = float(selected_yaw)
+    step["target_yaw_deg"] = yaw
+    step["chosen_grasp_yaw_deg"] = yaw
+    step["selected_grasp_yaw_deg"] = yaw
+    step["target_yaw_valid"] = True
+    step["exact_tool_yaw_required"] = True
+    step["yaw_equivalence_period_deg"] = 180.0
+    step["yaw_frame"] = "base_link"
+    step["yaw_source"] = obj.get("grasp_yaw_source") or "adaptive_grasp_yaw_search"
+    step["feasible_yaw_intervals_deg"] = obj.get("feasible_yaw_intervals_deg", [])
+    step["blocked_yaw_intervals_deg"] = obj.get("blocked_yaw_intervals_deg", [])
+
+
 def find_object(state, object_id=None, object_label=None, nearest_base_xy=None):
     objects = state.get("objects", [])
     if object_id is not None:
@@ -267,8 +284,10 @@ def main():
                 args.gripper_yaw_offset_deg,
                 args.square_yaw_snap_tolerance_deg,
             )
+            apply_selected_grasp_yaw(step, obj)
         else:
             force_object_yaw_if_requested(step, obj, args.force_yaw_labels)
+            apply_selected_grasp_yaw(step, obj)
     write_json(args.output, plan)
     step = plan["steps"][0]
     print("Saved geometry pick plan: {}".format(args.output))

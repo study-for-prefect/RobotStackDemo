@@ -15,6 +15,7 @@ from robot_scene_pipeline.realsense_capture import (
     read_aligned_rgbd,
     stream_profiles,
 )
+from robot_scene_pipeline.ros_topic_capture import capture_rgbd_from_ros_topics
 
 def jsonable(value):
     if isinstance(value, np.ndarray):
@@ -120,6 +121,8 @@ def stop_realsense_session(session):
 def capture_from_session(args, session, sample_index):
     if args.image_in:
         return load_image_snapshot(args)
+    if getattr(args, "camera_source", "ros-topic") == "ros-topic":
+        return capture_rgbd_from_ros_topics(args)
 
     warmup_frames = args.warmup_frames if sample_index == 1 else 0
     frame_bgr, depth_frame, sharpness, sample_count = read_aligned_rgbd(

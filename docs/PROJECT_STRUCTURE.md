@@ -25,6 +25,7 @@ The following files are intentionally thin and keep the existing command paths:
 - `tools/monitoring/realtime_yolo_monitor.py`
 - `tools/diagnostics/perception_stability_probe.py`
 - `tools/calibration/hover_tool_offset_calibration.py`
+- `tools/calibration/yaw_rotation_probe.py`
 - `tools/calibration/xy_bias_diagnosis.py`
 
 Each entry imports one internal package and calls its `main()` function.
@@ -35,6 +36,7 @@ Each entry imports one internal package and calls its `main()` function.
 tools/
 ├── calibration/
 │   ├── hover_calibration/       # hover target, TF, pose, command, orchestration
+│   ├── yaw_rotation_probe_runtime/ # yaw-only 姿态生成、MoveIt 驱动和自动记录
 │   └── xy_bias/                 # sample collection and model analysis
 ├── diagnostics/
 │   └── perception_stability/    # capture, sampling, statistics, orchestration

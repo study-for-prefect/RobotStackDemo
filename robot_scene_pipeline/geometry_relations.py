@@ -6,6 +6,9 @@ robot execution, MoveIt, perception models, or language models.
 
 import math
 
+from .grasp_obstruction_decision import make_grasp_analysis_relation
+from .grasp_yaw_search import blocker_category, select_best_grasp
+
 
 def _finite_vector(value, minimum_length):
     if not isinstance(value, (list, tuple)) or len(value) < minimum_length:
@@ -40,6 +43,10 @@ def _same_object(a, b):
     a_id = a.get("id") if isinstance(a, dict) else None
     b_id = b.get("id") if isinstance(b, dict) else None
     return a_id is not None and b_id is not None and a_id == b_id
+
+
+def _same_object_id(obj, object_id):
+    return str(obj.get("id")) == str(object_id)
 
 
 def _object_name(obj):
@@ -166,16 +173,8 @@ def xy_aabb_overlap(aabb_a, aabb_b):
     """Return overlap along X, overlap along Y, and overlap area."""
     if not aabb_a or not aabb_b:
         return 0.0, 0.0, 0.0
-    overlap_x = max(
-        0.0,
-        min(aabb_a["xmax"], aabb_b["xmax"])
-        - max(aabb_a["xmin"], aabb_b["xmin"]),
-    )
-    overlap_y = max(
-        0.0,
-        min(aabb_a["ymax"], aabb_b["ymax"])
-        - max(aabb_a["ymin"], aabb_b["ymin"]),
-    )
+    overlap_x = max(0.0, min(aabb_a["xmax"], aabb_b["xmax"]) - max(aabb_a["xmin"], aabb_b["xmin"]))
+    overlap_y = max(0.0, min(aabb_a["ymax"], aabb_b["ymax"]) - max(aabb_a["ymin"], aabb_b["ymin"]))
     return overlap_x, overlap_y, overlap_x * overlap_y
 
 
@@ -372,7 +371,24 @@ def safe_to_push(
     )
 
 
-def build_geometry_relations(objects, target_id=None, table_bounds=None):
+def _target_top_objects(scene_objects, target):
+    return [
+        top
+        for top in scene_objects
+        if not _same_object(top, target) and is_on(top, target)
+    ]
+
+
+def build_geometry_relations(
+    objects,
+    target_id=None,
+    table_bounds=None,
+    yaw_step_deg=15.0,
+    local_refine_step_deg=1.0,
+    gripper_outer_width_m=0.112,
+    gripper_inner_width_m=0.048,
+    current_wrist_yaw_deg=None,
+):
     """Build deterministic pairwise and target-specific geometry relations."""
     scene_objects = [obj for obj in (objects or []) if isinstance(obj, dict)]
     relations = []
@@ -395,44 +411,53 @@ def build_geometry_relations(objects, target_id=None, table_bounds=None):
         for bottom in scene_objects:
             if _same_object(top, bottom) or not is_on(top, bottom):
                 continue
-            relations.append(
-                {
-                    "type": "on",
-                    "subject": _object_name(top),
-                    "object": _object_name(bottom),
-                    "source": "geometry",
-                }
-            )
-            relations.append(
-                {
-                    "type": "supporting",
-                    "subject": _object_name(bottom),
-                    "object": _object_name(top),
-                    "source": "geometry",
-                }
-            )
+            relations.append({"type": "on", "subject": _object_name(top), "object": _object_name(bottom), "source": "geometry"})
+            relations.append({"type": "supporting", "subject": _object_name(bottom), "object": _object_name(top), "source": "geometry"})
 
-    target = next(
-        (obj for obj in scene_objects if obj.get("id") == target_id),
-        None,
-    )
+    target = next((obj for obj in scene_objects if _same_object_id(obj, target_id)), None)
     if target is None:
         return relations
 
+    top_objects = _target_top_objects(scene_objects, target)
+    if top_objects:
+        relations.append(make_grasp_analysis_relation(_object_name(target), top_objects))
+        return relations
+
+    grasp_result = select_best_grasp(
+        target,
+        scene_objects,
+        yaw_step_deg=yaw_step_deg,
+        local_refine_step_deg=local_refine_step_deg,
+        gripper_outer_width_m=gripper_outer_width_m,
+        gripper_inner_width_m=gripper_inner_width_m,
+        current_wrist_yaw_deg=current_wrist_yaw_deg,
+    )
+    analysis = make_grasp_analysis_relation(_object_name(target), [], grasp_result)
+    relations.append(analysis)
+    if analysis["grasp_feasible"]:
+        return relations
+    if analysis["action"] != "push_clearing":
+        return relations
+
+    blocker_ids = {
+        str(blocker.get("id"))
+        for blocker in analysis.get("blocking_objects", [])
+        if blocker.get("id") is not None
+    }
     for obstacle in scene_objects:
-        if not blocks_grasp(obstacle, target):
+        if str(obstacle.get("id")) not in blocker_ids:
             continue
         obstacle_name = _object_name(obstacle)
         target_name = _object_name(target)
-        relations.append(
-            {
-                "type": "blocking_grasp",
-                "subject": obstacle_name,
-                "object": target_name,
-                "source": "geometry",
-                "reason": "obstacle_aabb_overlaps_grasp_corridor",
-            }
-        )
+        relations.append({
+            "type": "blocking_grasp",
+            "subject": obstacle_name,
+            "object": target_name,
+            "source": "geometry",
+            "reason": "all_adaptive_grasp_yaws_blocked",
+            "all_grasps_blocked": analysis["all_grasps_blocked"],
+            "blocker_category": blocker_category(obstacle),
+        })
 
         direction = choose_push_direction(obstacle, target)
         if not safe_to_push(

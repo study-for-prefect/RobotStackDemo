@@ -81,6 +81,22 @@ def clamp_int(value, low, high):
     return max(low, min(high, int(round(value))))
 
 
+def deproject_pixel_to_point(intrinsics: object, pixel: object, depth_m: float) -> object:
+    if depth_m <= 0:
+        return None
+    try:
+        import pyrealsense2 as rs
+
+        return rs.rs2_deproject_pixel_to_point(intrinsics, pixel, float(depth_m))
+    except Exception:
+        fx = float(intrinsics.fx)
+        fy = float(intrinsics.fy)
+        ppx = float(intrinsics.ppx)
+        ppy = float(intrinsics.ppy)
+        x, y = [float(value) for value in pixel]
+        return [(x - ppx) * float(depth_m) / fx, (y - ppy) * float(depth_m) / fy, float(depth_m)]
+
+
 def attach_3d(detections, depth_frame, intrinsics, depth_window):
     if depth_frame is None:
         for det in detections:
@@ -92,8 +108,6 @@ def attach_3d(detections, depth_frame, intrinsics, depth_window):
             det["center_3d_m"] = None
             det["coordinate_valid"] = False
         return detections
-
-    import pyrealsense2 as rs
 
     depth_width = depth_frame.get_width()
     depth_height = depth_frame.get_height()
@@ -109,7 +123,7 @@ def attach_3d(detections, depth_frame, intrinsics, depth_window):
             if bbox_sample_px is not None:
                 sample_px = bbox_sample_px
                 depth_source = "bbox_valid_median"
-        point = rs.rs2_deproject_pixel_to_point(intrinsics, sample_px, float(depth_m)) if depth_m > 0 else None
+        point = deproject_pixel_to_point(intrinsics, sample_px, float(depth_m)) if depth_m > 0 else None
         det["center_px"] = [cx, cy]
         det["depth_sample_px"] = [round(float(sample_px[0]), 2), round(float(sample_px[1]), 2)]
         det["depth_source"] = depth_source if depth_m > 0 else "missing"

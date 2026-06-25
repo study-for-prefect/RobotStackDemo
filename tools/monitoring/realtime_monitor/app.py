@@ -7,8 +7,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from robot_scene_pipeline.depth_geometry import deproject_pixel_to_point
+
 from .arguments import parse_args
-from .camera import start_camera
 from .constants import PROJECT_ROOT
 from .display import (
     auto_ignore_zone,
@@ -25,12 +26,12 @@ from .transforms import (
     sample_depth_m,
     transform_point,
 )
+from .stream import start_realtime_stream
 
 def main() -> None:
     args = parse_args()
     args.known_object_height_m = args.known_block_height_m
 
-    import pyrealsense2 as rs
     from ultralytics import YOLO
 
     root = Path(__file__).resolve().parents[1]
@@ -48,8 +49,16 @@ def main() -> None:
     print("[INFO] tf_json:", args.tf_json)
     print("[INFO] tf_point_mode:", args.tf_point_mode)
 
-    pipeline, profile, used, usb_type = start_camera(rs, args)
-    color_width, color_height, depth_width, depth_height, fps = used
+    stream = start_realtime_stream(args)
+    try:
+        first_frame = stream.read(args)
+        if first_frame is None:
+            raise RuntimeError("No RGB-D frame received.")
+    except Exception:
+        stream.close()
+        raise
+    color_width = int(first_frame.profile.get("color_width") or first_frame.frame_bgr.shape[1])
+    color_height = int(first_frame.profile.get("color_height") or first_frame.frame_bgr.shape[0])
     ignore_zone = args.ignore_zone or auto_ignore_zone(color_width, color_height)
     print("[INFO] ignore_zone:", ignore_zone)
     print("[INFO] weight:", args.weight)
@@ -58,7 +67,6 @@ def main() -> None:
     print("[INFO] estimate_tabletop:", args.estimate_tabletop)
     print("[INFO] known_block_height_m:", args.known_block_height_m)
 
-    align = rs.align(rs.stream.color)
     tf_cache = TfJsonCache(args.tf_json, args.tf_reload_s)
     tf_cache.update(force=True)
 
@@ -66,25 +74,28 @@ def main() -> None:
     fps_smooth = 0.0
 
     try:
-        for _ in range(max(0, int(args.warmup_frames))):
-            pipeline.wait_for_frames(args.frame_timeout_ms)
-
+        pending_frame = first_frame
         while True:
-            frames = pipeline.wait_for_frames(args.frame_timeout_ms)
-            frames = align.process(frames)
-
-            color_frame = frames.get_color_frame()
-            depth_frame = frames.get_depth_frame()
-
-            if not color_frame:
+            frame_data = pending_frame if pending_frame is not None else stream.read(args)
+            pending_frame = None
+            if frame_data is None:
                 continue
 
             tf_cache.update(force=False)
             T_base_camera = tf_cache.T
 
-            intr = color_frame.profile.as_video_stream_profile().get_intrinsics()
-            frame = np.asanyarray(color_frame.get_data())
+            intr = frame_data.intrinsics
+            depth_frame = frame_data.depth_frame
+            frame = frame_data.frame_bgr
             annotated = frame.copy()
+            profile = frame_data.profile
+            color_width = int(profile.get("color_width") or frame.shape[1])
+            color_height = int(profile.get("color_height") or frame.shape[0])
+            depth_width = profile.get("depth_width")
+            depth_height = profile.get("depth_height")
+            fps = profile.get("fps")
+            source = profile.get("source", "camera")
+            usb_type = profile.get("usb_type_descriptor", "topic")
 
             ix1, iy1, ix2, iy2 = ignore_zone
 
@@ -154,7 +165,7 @@ def main() -> None:
 
                         if depth_m > 0:
                             p_optical = np.asarray(
-                                rs.rs2_deproject_pixel_to_point(intr, [float(cx), float(cy)], float(depth_m)),
+                                deproject_pixel_to_point(intr, [float(cx), float(cy)], float(depth_m)),
                                 dtype=np.float64,
                             )
 
@@ -278,7 +289,13 @@ def main() -> None:
                 fps_now = 1.0 / dt
                 fps_smooth = fps_now if fps_smooth <= 0 else 0.9 * fps_smooth + 0.1 * fps_now
 
-            status = f"FPS:{fps_smooth:.1f} kept:{kept} {color_width}x{color_height}@{fps} USB:{usb_type}"
+            size_text = f"{color_width}x{color_height}"
+            if depth_width and depth_height:
+                size_text += f"/D{int(depth_width)}x{int(depth_height)}"
+            rate_text = f"@{fps}" if fps else ""
+            status = f"FPS:{fps_smooth:.1f} kept:{kept} {size_text}{rate_text} SRC:{source}"
+            if usb_type != "topic":
+                status += f" USB:{usb_type}"
             if tf_cache.error:
                 status += " TF:ERR"
             else:
@@ -320,7 +337,8 @@ def main() -> None:
 
             if args.show_depth and depth_frame:
                 depth = np.asanyarray(depth_frame.get_data())
-                depth_vis = cv2.convertScaleAbs(depth, alpha=0.03)
+                alpha = 0.03 if depth.dtype != np.float32 else 120.0
+                depth_vis = cv2.convertScaleAbs(depth, alpha=alpha)
                 depth_vis = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
                 view = np.hstack([annotated, cv2.resize(depth_vis, (annotated.shape[1], annotated.shape[0]))])
             else:
@@ -333,5 +351,5 @@ def main() -> None:
                 break
 
     finally:
-        pipeline.stop()
+        stream.close()
         cv2.destroyAllWindows()
