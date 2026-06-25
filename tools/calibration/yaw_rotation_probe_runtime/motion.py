@@ -7,6 +7,16 @@ from typing import Dict, Iterable, List
 from tools.monitoring.realtime_monitor.constants import PROJECT_ROOT
 
 
+def cli_float(value: float) -> str:
+    """Format floats so argparse never confuses tiny negative values for flags."""
+    text = "{:.12f}".format(float(value)).rstrip("0").rstrip(".")
+    return text if text not in ("", "-0") else "0"
+
+
+def cli_floats(values: Iterable[float]) -> List[str]:
+    return [cli_float(float(value)) for value in values]
+
+
 def hover_target_from_tool0_position(
     tool0_position_m: Iterable[float],
     tool_z_offset_m: float,
@@ -35,25 +45,25 @@ def build_yaw_motion_command(args: Namespace, target_pose: Dict[str, object]) ->
         "tools/robot/moveit_plan_preview.py",
         "--hover-only",
         "--hover-target-base",
-        *[str(value) for value in hover_target],
+        *cli_floats(hover_target),
         "--hover-orientation-xyzw",
-        *[str(value) for value in tool0_quat],
+        *cli_floats(tool0_quat),
         "--tool-z-offset",
-        str(args.motion_tool_z_offset),
+        cli_float(args.motion_tool_z_offset),
         "--tool-offset-base",
-        *[str(value) for value in args.motion_tool_offset_base],
+        *cli_floats(args.motion_tool_offset_base),
         "--velocity",
-        str(args.velocity),
+        cli_float(args.velocity),
         "--acceleration",
-        str(args.acceleration),
+        cli_float(args.acceleration),
         "--pre-rotate-velocity",
-        str(args.pre_rotate_velocity),
+        cli_float(args.pre_rotate_velocity),
         "--pre-rotate-acceleration",
-        str(args.pre_rotate_acceleration),
+        cli_float(args.pre_rotate_acceleration),
         "--planning-time",
-        str(args.planning_time),
+        cli_float(args.planning_time),
         "--tf-timeout",
-        str(args.tf_timeout),
+        cli_float(args.tf_timeout),
         "--base-link",
         args.base_frame,
         "--end-effector",
@@ -67,13 +77,13 @@ def build_yaw_motion_command(args: Namespace, target_pose: Dict[str, object]) ->
         "--pre-rotate-wrist-direction",
         args.pre_rotate_wrist_direction,
         "--max-joint-delta",
-        str(args.max_joint_delta),
+        cli_float(args.max_joint_delta),
         "--max-pre-rotate-joint-delta",
-        str(args.max_pre_rotate_joint_delta),
+        cli_float(args.max_pre_rotate_joint_delta),
         "--max-grasp-yaw-error-deg",
-        str(args.max_grasp_yaw_error_deg),
+        cli_float(args.max_grasp_yaw_error_deg),
         "--orientation-settle-error-deg",
-        str(args.orientation_settle_error_deg),
+        cli_float(args.orientation_settle_error_deg),
     ]
     if args.execute:
         command.append("--execute")

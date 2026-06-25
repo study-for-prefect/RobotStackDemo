@@ -79,7 +79,15 @@ ros2 launch realsense2_camera rs_launch.py \
 
 如果你的 RealSense ROS 包发布的是旧命名空间，运行项目命令时改 `--color-topic`、`--depth-topic`、`--camera-info-topic`。旧的进程内 `pyrealsense2` 直连路径仍保留为显式兼容模式：`--camera-source realsense`。
 
-在线话题订阅命令需要运行在能导入 `rclpy`、`sensor_msgs` 的 Python 环境中；如果使用 conda 环境跑 YOLO，也要确保该环境能看到 ROS 2 Python 包。
+在线话题订阅命令需要运行在能导入 `rclpy`、`sensor_msgs` 的 Python 环境中。Ubuntu + ROS 2 Humble + conda YOLO 环境建议在同一个终端里先加载 ROS，再进 conda：
+
+```bash
+source /opt/ros/humble/setup.bash
+conda activate yolo
+python tools/monitoring/realtime_yolo_monitor.py
+```
+
+如果仍提示 `No module named 'rclpy'`，说明当前 Python 还看不到 `/opt/ros/humble` 的 Python 包路径，先检查 `echo $PYTHONPATH` 是否包含 ROS Humble 的 `dist-packages`。
 
 详细说明见：
 

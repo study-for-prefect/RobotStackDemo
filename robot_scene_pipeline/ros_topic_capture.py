@@ -6,6 +6,10 @@ module only subscribes to the already-published color, aligned-depth, and
 camera-info topics.
 """
 
+import glob
+import importlib
+import os
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
@@ -141,8 +145,56 @@ def intrinsics_from_camera_info(msg: Any) -> CameraIntrinsics:
     )
 
 
+def _add_ros_python_paths() -> None:
+    version = "python{}.{}".format(sys.version_info.major, sys.version_info.minor)
+    distros = []
+    if os.environ.get("ROS_DISTRO"):
+        distros.append(os.environ["ROS_DISTRO"])
+    distros.extend(name for name in ("humble", "iron", "jazzy") if name not in distros)
+
+    candidates = []
+    for distro in distros:
+        prefix = os.path.join("/opt/ros", distro)
+        candidates.extend(
+            [
+                os.path.join(prefix, "local", "lib", version, "dist-packages"),
+                os.path.join(prefix, "lib", version, "dist-packages"),
+                os.path.join(prefix, "lib", version, "site-packages"),
+            ]
+        )
+    candidates.extend(glob.glob("/opt/ros/*/local/lib/{}/dist-packages".format(version)))
+    candidates.extend(glob.glob("/opt/ros/*/lib/{}/dist-packages".format(version)))
+    candidates.extend(glob.glob("/opt/ros/*/lib/{}/site-packages".format(version)))
+    for path in candidates:
+        if os.path.isdir(path) and path not in sys.path:
+            sys.path.append(path)
+
+
+def _import_ros_module(module_name: str):
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as first_error:
+        if first_error.name != module_name:
+            raise
+    _add_ros_python_paths()
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as second_error:
+        if second_error.name != module_name:
+            raise
+        raise RuntimeError(
+            "ROS 2 Python module '{}' is not importable in this Python environment.\n"
+            "If you run YOLO from conda on Ubuntu, start the shell like this first:\n"
+            "  source /opt/ros/humble/setup.bash\n"
+            "  conda activate yolo\n"
+            "  python tools/monitoring/realtime_yolo_monitor.py\n"
+            "Or run with explicit PYTHONPATH for ROS Humble Python packages. "
+            "Current executable: {}".format(module_name, sys.executable)
+        ) from second_error
+
+
 def _ensure_rclpy_initialized():
-    import rclpy
+    rclpy = _import_ros_module("rclpy")
 
     if not rclpy.ok():
         rclpy.init(args=None)
@@ -162,9 +214,11 @@ class RosRgbdSubscriber:
         node_name: str = "robot_stack_rgbd_subscriber",
         shutdown_on_close: Optional[bool] = None,
     ) -> None:
-        import rclpy
-        from rclpy.qos import qos_profile_sensor_data
-        from sensor_msgs.msg import CameraInfo, Image
+        rclpy = _import_ros_module("rclpy")
+        qos_profile_sensor_data = _import_ros_module("rclpy.qos").qos_profile_sensor_data
+        sensor_msgs = _import_ros_module("sensor_msgs.msg")
+        CameraInfo = sensor_msgs.CameraInfo
+        Image = sensor_msgs.Image
 
         owns_rclpy = _ensure_rclpy_initialized()
         self._rclpy = rclpy

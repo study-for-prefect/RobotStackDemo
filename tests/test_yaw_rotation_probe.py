@@ -1,4 +1,5 @@
 import math
+import re
 import unittest
 from argparse import Namespace
 
@@ -60,7 +61,7 @@ class YawRotationProbeTests(unittest.TestCase):
     def test_auto_motion_command_drives_hover_only_yaw_target(self):
         target = {
             "tool0_position": [0.4, -0.2, 0.35],
-            "tool0_quat": rpy_to_quaternion_xyzw(0.1, -0.2, math.radians(45.0)),
+            "tool0_quat": [-0.999989495446819, -1.3845783497326288e-06, -0.004573548607806859, 0.00030273293761267294],
         }
         args = Namespace(
             ros_python="/usr/bin/python3",
@@ -89,6 +90,8 @@ class YawRotationProbeTests(unittest.TestCase):
         self.assertIn("--joint-space", command)
         self.assertIn("--execute", command)
         self.assertIn("--yes", command)
+        scientific_number = re.compile(r"^-?\d+(?:\.\d+)?e[+-]?\d+$", re.IGNORECASE)
+        self.assertFalse(any(scientific_number.match(value) for value in command))
         hover_index = command.index("--hover-target-base") + 1
         hover_target = [float(value) for value in command[hover_index:hover_index + 3]]
         for actual, expected in zip(hover_target, [0.4, -0.2, 0.2]):
