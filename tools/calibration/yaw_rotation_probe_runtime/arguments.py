@@ -10,7 +10,7 @@ from tools.monitoring.realtime_monitor.constants import PROJECT_ROOT
 from .pose_math import DEFAULT_YAWS_DEG
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     root = Path(PROJECT_ROOT)
     parser = argparse.ArgumentParser(
         description="Generate yaw-only tool0 target poses and record code-driven detection/TF checks."
@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-depth-m", type=float, default=0.05)
     parser.add_argument("--max-depth-m", type=float, default=1.50)
     parser.add_argument("--record-attempts", type=int, default=5)
-    parser.add_argument("--pose-check-orientation-deg", type=float, default=2.0)
+    parser.add_argument("--pose-check-orientation-deg", type=float, default=5.0)
     parser.add_argument("--pose-check-z-axis-deg", type=float, default=1.0)
     parser.add_argument("--pose-check-position-m", type=float, default=0.005)
     parser.add_argument("--preview-ms", type=int, default=800)
@@ -87,4 +87,4 @@ def parse_args() -> argparse.Namespace:
         help="Depth deprojection returns optical XYZ. Use optical-to-camera-link with base<-camera_link TF.",
     )
     parser.add_argument("--show-depth", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)

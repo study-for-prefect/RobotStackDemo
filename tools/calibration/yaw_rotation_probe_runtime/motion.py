@@ -1,6 +1,7 @@
 """MoveIt command construction for code-driven yaw probe motions."""
 
 import subprocess
+import time
 from argparse import Namespace
 from typing import Dict, Iterable, List
 
@@ -120,13 +121,39 @@ def build_ready_motion_command(args: Namespace) -> List[str]:
     return command
 
 
+def pump_gui_events(args: Namespace) -> None:
+    if getattr(args, "no_window", False):
+        return
+    try:
+        import cv2
+
+        cv2.waitKey(1)
+    except Exception:
+        pass
+
+
+def run_command_with_gui_pump(args: Namespace, command: List[str]) -> None:
+    print("\n$ {}".format(" ".join(command)), flush=True)
+    process = subprocess.Popen(command, cwd=PROJECT_ROOT)
+    try:
+        while True:
+            return_code = process.poll()
+            if return_code is not None:
+                if return_code != 0:
+                    raise subprocess.CalledProcessError(return_code, command)
+                return
+            pump_gui_events(args)
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        process.terminate()
+        raise
+
+
 def run_ready_motion_command(args: Namespace) -> None:
     command = build_ready_motion_command(args)
-    print("\n$ {}".format(" ".join(command)), flush=True)
-    subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    run_command_with_gui_pump(args, command)
 
 
 def run_yaw_motion_command(args: Namespace, target_pose: Dict[str, object]) -> None:
     command = build_yaw_motion_command(args, target_pose)
-    print("\n$ {}".format(" ".join(command)), flush=True)
-    subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    run_command_with_gui_pump(args, command)

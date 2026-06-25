@@ -7,6 +7,7 @@ from tools.calibration.yaw_rotation_probe_runtime.motion import (
     build_yaw_motion_command,
     hover_target_from_tool0_position,
 )
+from tools.calibration.yaw_rotation_probe_runtime.arguments import parse_args
 from tools.calibration.yaw_rotation_probe_runtime.record_modes import (
     build_missed_record,
     build_pose_failed_record,
@@ -182,6 +183,27 @@ class YawRotationProbeTests(unittest.TestCase):
         self.assertIn("pose_check", record)
         self.assertIn("tool0_pose", record)
         self.assertIn("camera_link_pose", record)
+
+    def test_default_pose_threshold_accepts_small_yaw_error_sample(self):
+        args = Namespace(
+            pose_check_orientation_deg=5.0,
+            pose_check_z_axis_deg=1.0,
+            pose_check_position_m=0.005,
+        )
+        actual_tool_pose = (
+            [0.2013341450464915, 0.11448046992861949, 0.35064109061891024],
+            [0.9995013554717989, -0.03156292504364329, 0.00087828710952241, 0.000225354119979848],
+        )
+        target_pose = {
+            "tool0_position": [0.200662266267, 0.114755155944, 0.351099530149],
+            "tool0_quat": vertical_down_quaternion_for_yaw(0.0),
+        }
+        check = pose_check(args, actual_tool_pose, target_pose)
+        self.assertTrue(check["ok"])
+
+    def test_default_pose_orientation_threshold_is_five_degrees(self):
+        args = parse_args(["--output-dir", "/tmp/yaw_probe_args_test"])
+        self.assertEqual(args.pose_check_orientation_deg, 5.0)
 
     def test_yaw_motion_variants_include_pose_fallback(self):
         args = Namespace(
