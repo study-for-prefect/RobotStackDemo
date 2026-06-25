@@ -7,7 +7,11 @@ from tools.calibration.yaw_rotation_probe_runtime.motion import (
     build_yaw_motion_command,
     hover_target_from_tool0_position,
 )
-from tools.calibration.yaw_rotation_probe_runtime.record_modes import build_missed_record
+from tools.calibration.yaw_rotation_probe_runtime.record_modes import (
+    build_missed_record,
+    build_pose_failed_record,
+    pose_check,
+)
 from tools.calibration.yaw_rotation_probe_runtime.pose_math import (
     build_yaw_targets,
     quaternion_to_rpy_xyzw,
@@ -139,6 +143,40 @@ class YawRotationProbeTests(unittest.TestCase):
         self.assertIsNone(record["point_camera_xyz"])
         self.assertIsNone(record["point_base_xyz"])
         self.assertEqual(record["tool0_position"], [0.2, 0.1, 0.35])
+
+    def test_pose_check_rejects_unreached_yaw_before_recording_detection(self):
+        args = Namespace(
+            pose_check_orientation_deg=2.0,
+            pose_check_z_axis_deg=1.0,
+            pose_check_position_m=0.005,
+            base_frame="base_link",
+            tool_frame="tool0",
+            camera_frame="camera_link",
+        )
+        actual_tool_pose = (
+            [0.20030135854089293, 0.11453881561230728, 0.34656066121268264],
+            [0.9947524791217777, 0.10214189507605909, -0.005865867397520513, -0.0003607644985802385],
+        )
+        target_pose = {
+            "tool0_position": [0.200662266267, 0.114755155944, 0.351099530149],
+            "tool0_quat": vertical_down_quaternion_for_yaw(0.0),
+        }
+        check = pose_check(args, actual_tool_pose, target_pose)
+        self.assertFalse(check["ok"])
+        self.assertGreater(check["orientation_error_deg"], 11.0)
+        targets = {"targets": {"yaw_p0deg": target_pose}}
+        record = build_pose_failed_record(
+            args,
+            0.0,
+            actual_tool_pose,
+            ([0.278, 0.162, 0.344], [0.0, 0.0, 0.0, 1.0]),
+            targets,
+            check,
+            attempts=1,
+        )
+        self.assertEqual(record["status"], "pose_failed")
+        self.assertEqual(record["target_pose_key"], "yaw_p0deg")
+        self.assertIn("pose_check", record)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """Manual and code-driven recording loops for yaw rotation probe."""
 
+import math
 import os
 import time
 from argparse import Namespace
@@ -12,6 +13,7 @@ from robot_scene_pipeline.io_utils import write_json
 
 from .motion import build_yaw_motion_command, run_yaw_motion_command
 from .pose_math import pose_to_matrix, yaw_file_stem
+from .pose_math import tool_z_axis_base
 from .recording import (
     build_record,
     detect_objects,
@@ -135,6 +137,95 @@ def write_motion_command_preview(args: Namespace, targets: Dict[str, object]) ->
     return output_path
 
 
+def angle_between_deg(left: List[float], right: List[float]) -> float:
+    dot = sum(float(a) * float(b) for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(float(value) * float(value) for value in left))
+    right_norm = math.sqrt(sum(float(value) * float(value) for value in right))
+    if left_norm <= 0.0 or right_norm <= 0.0:
+        return 180.0
+    dot = max(-1.0, min(1.0, dot / (left_norm * right_norm)))
+    return math.degrees(math.acos(dot))
+
+
+def quaternion_distance_deg(left: List[float], right: List[float]) -> float:
+    def normalized(quat: List[float]) -> List[float]:
+        norm = math.sqrt(sum(float(value) * float(value) for value in quat))
+        if norm <= 0.0:
+            raise ValueError("Quaternion norm is zero.")
+        return [float(value) / norm for value in quat]
+
+    left_q = normalized(left)
+    right_q = normalized(right)
+    dot = abs(sum(a * b for a, b in zip(left_q, right_q)))
+    dot = max(-1.0, min(1.0, dot))
+    return math.degrees(2.0 * math.acos(dot))
+
+
+def position_error_m(actual: List[float], target: List[float]) -> float:
+    return math.sqrt(sum((float(actual[i]) - float(target[i])) ** 2 for i in range(3)))
+
+
+def pose_check(args: Namespace, tool_pose: Pose, target_pose: Dict[str, object]) -> Dict[str, object]:
+    actual_position, actual_quat = tool_pose
+    target_position = [float(value) for value in target_pose["tool0_position"]]  # type: ignore[index]
+    target_quat = [float(value) for value in target_pose["tool0_quat"]]  # type: ignore[index]
+    actual_z_axis = tool_z_axis_base(actual_quat)
+    target_z_axis = tool_z_axis_base(target_quat)
+    orientation_error = quaternion_distance_deg(actual_quat, target_quat)
+    z_axis_error = angle_between_deg(actual_z_axis, target_z_axis)
+    position_error = position_error_m(actual_position, target_position)
+    ok = (
+        orientation_error <= float(args.pose_check_orientation_deg)
+        and z_axis_error <= float(args.pose_check_z_axis_deg)
+        and position_error <= float(args.pose_check_position_m)
+    )
+    return {
+        "ok": ok,
+        "orientation_error_deg": orientation_error,
+        "z_axis_error_deg": z_axis_error,
+        "position_error_m": position_error,
+        "actual_tool0_z_axis_base": actual_z_axis,
+        "target_tool0_z_axis_base": target_z_axis,
+        "thresholds": {
+            "orientation_error_deg": float(args.pose_check_orientation_deg),
+            "z_axis_error_deg": float(args.pose_check_z_axis_deg),
+            "position_error_m": float(args.pose_check_position_m),
+        },
+    }
+
+
+def build_pose_failed_record(
+    args: Namespace,
+    yaw_deg: float,
+    tool_pose: Pose,
+    camera_pose: Pose,
+    targets: Dict[str, object],
+    check: Dict[str, object],
+    attempts: int,
+) -> Dict[str, object]:
+    stem = yaw_file_stem(yaw_deg)
+    return {
+        "schema_version": "yaw_rotation_pose_failed_record_v1",
+        "recorded_at_unix": time.time(),
+        "yaw_deg": float(yaw_deg),
+        "target_pose_key": stem,
+        "status": "pose_failed",
+        "reason": "tool0 pose did not reach target tolerance",
+        "attempts": int(attempts),
+        "base_frame": args.base_frame,
+        "tool_frame": args.tool_frame,
+        "camera_frame": args.camera_frame,
+        "target_pose": targets["targets"].get(stem),
+        "tool0_position": [float(v) for v in tool_pose[0]],
+        "tool0_quat": [float(v) for v in tool_pose[1]],
+        "camera_link_position": [float(v) for v in camera_pose[0]],
+        "camera_link_quat": [float(v) for v in camera_pose[1]],
+        "pose_check": check,
+        "point_camera_xyz": None,
+        "point_base_xyz": None,
+    }
+
+
 def build_missed_record(
     args: Namespace,
     yaw_deg: float,
@@ -220,6 +311,37 @@ def capture_yaw_record(
             last_error = tf_error or "no selected detection with base_link point"
             continue
 
+        target_pose = targets["targets"].get(yaw_file_stem(yaw_deg))  # type: ignore[index]
+        check = pose_check(args, tool_pose, target_pose)
+        if not check["ok"]:
+            record = build_pose_failed_record(
+                args,
+                yaw_deg,
+                tool_pose,
+                camera_pose,
+                targets,
+                check,
+                attempt + 1,
+            )
+            stem = yaw_file_stem(yaw_deg)
+            output_path = os.path.join(args.output_dir, stem + "_pose_failed.json")
+            image_path = os.path.join(args.output_dir, stem + "_pose_failed.png")
+            write_json(output_path, record)
+            cv2.imwrite(image_path, annotated)
+            print(
+                "[WARN] pose failed yaw {:.1f}: orientation_error={:.2f}deg "
+                "z_axis_error={:.2f}deg position_error={:.4f}m; saved {} and {}".format(
+                    float(yaw_deg),
+                    float(check["orientation_error_deg"]),
+                    float(check["z_axis_error_deg"]),
+                    float(check["position_error_m"]),
+                    output_path,
+                    image_path,
+                ),
+                flush=True,
+            )
+            return int(last_seq), False
+
         record = build_record(
             args,
             yaw_deg,
@@ -230,6 +352,7 @@ def capture_yaw_record(
             source_camera_pose,
             targets,
         )
+        record["pose_check"] = check
         stem = yaw_file_stem(yaw_deg)
         output_path = os.path.join(args.output_dir, stem + ".json")
         image_path = os.path.join(args.output_dir, stem + ".png")
@@ -273,8 +396,8 @@ def run_auto_record_sequence(
     command_path = write_motion_command_preview(args, targets)
     print("[INFO] saved yaw motion commands:", command_path, flush=True)
     last_seq = first_seq
-    recorded_count = 0
-    missed_count = 0
+    valid_count = 0
+    invalid_count = 0
     for target in target_sequence(targets):
         yaw_deg = float(target["yaw_deg"])
         print("[INFO] code-driven yaw target: {:+.1f} deg".format(yaw_deg), flush=True)
@@ -296,13 +419,13 @@ def run_auto_record_sequence(
             targets,
         )
         if recorded:
-            recorded_count += 1
+            valid_count += 1
         else:
-            missed_count += 1
+            invalid_count += 1
     if not args.execute:
         print("[INFO] plan-only run finished; add --execute to move the robot and write yaw_p*.json records.", flush=True)
     else:
-        print("[INFO] yaw probe finished: recorded={} missed={}".format(recorded_count, missed_count), flush=True)
+        print("[INFO] yaw probe finished: valid={} invalid={}".format(valid_count, invalid_count), flush=True)
 
 
 def run_manual_record_loop(

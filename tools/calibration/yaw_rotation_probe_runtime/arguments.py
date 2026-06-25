@@ -75,6 +75,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-depth-m", type=float, default=0.05)
     parser.add_argument("--max-depth-m", type=float, default=1.50)
     parser.add_argument("--record-attempts", type=int, default=5)
+    parser.add_argument("--pose-check-orientation-deg", type=float, default=2.0)
+    parser.add_argument("--pose-check-z-axis-deg", type=float, default=1.0)
+    parser.add_argument("--pose-check-position-m", type=float, default=0.005)
     parser.add_argument("--preview-ms", type=int, default=800)
     parser.add_argument("--no-window", action="store_true")
     parser.add_argument(
