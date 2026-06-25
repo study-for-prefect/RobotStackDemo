@@ -12,7 +12,7 @@ import numpy as np
 
 from robot_scene_pipeline.io_utils import write_json
 
-from .motion import build_yaw_motion_command, run_yaw_motion_command
+from .motion import build_yaw_motion_command, pump_gui_events, run_yaw_motion_command
 from .pose_math import pose_to_matrix, yaw_file_stem
 from .pose_math import pose_payload, tool_z_axis_base
 from .recording import (
@@ -234,9 +234,10 @@ def build_pose_failed_record(
     targets: Dict[str, object],
     check: Dict[str, object],
     attempts: int,
+    pose_wait_checks: Optional[List[Dict[str, object]]] = None,
 ) -> Dict[str, object]:
     stem = yaw_file_stem(yaw_deg)
-    return {
+    record = {
         "schema_version": "yaw_rotation_pose_failed_record_v1",
         "recorded_at_unix": time.time(),
         "yaw_deg": float(yaw_deg),
@@ -258,6 +259,9 @@ def build_pose_failed_record(
         "point_camera_xyz": None,
         "point_base_xyz": None,
     }
+    if pose_wait_checks is not None:
+        record["pose_wait_checks"] = pose_wait_checks
+    return record
 
 
 def build_missed_record(
@@ -307,31 +311,58 @@ def verify_motion_reached_target(
     subscriber: Any,
     tf_buffer: Any,
     target_pose: Dict[str, object],
-) -> Tuple[bool, Optional[Dict[str, object]]]:
-    try:
-        tool_pose = lookup_pose(
-            tf_buffer,
-            subscriber.node,
-            subscriber._rclpy,
-            args.base_frame,
-            args.tool_frame,
-            args.tf_timeout,
+) -> Tuple[bool, Optional[Dict[str, object]], List[Dict[str, object]]]:
+    deadline = time.time() + max(0.0, float(getattr(args, "post_motion_tf_wait_s", 4.0)))
+    poll_s = max(0.02, float(getattr(args, "post_motion_tf_poll_s", 0.10)))
+    checks = []
+    last_check = None
+    last_error = None
+    while True:
+        try:
+            tool_pose = lookup_pose(
+                tf_buffer,
+                subscriber.node,
+                subscriber._rclpy,
+                args.base_frame,
+                args.tool_frame,
+                args.tf_timeout,
+            )
+            check = pose_check(args, tool_pose, target_pose)
+            checks.append(check)
+            last_check = check
+            if check["ok"]:
+                print(
+                    "[INFO] post-motion pose reached: orientation_error={:.2f}deg "
+                    "z_axis_error={:.2f}deg position_error={:.4f}m".format(
+                        float(check["orientation_error_deg"]),
+                        float(check["z_axis_error_deg"]),
+                        float(check["position_error_m"]),
+                    ),
+                    flush=True,
+                )
+                return True, check, checks
+        except Exception as exc:
+            last_error = exc
+
+        if time.time() >= deadline:
+            break
+        pump_gui_events(args)
+        time.sleep(poll_s)
+
+    if last_check is not None:
+        print(
+            "[INFO] post-motion pose check timed out: ok={} orientation_error={:.2f}deg "
+            "z_axis_error={:.2f}deg position_error={:.4f}m".format(
+                last_check["ok"],
+                float(last_check["orientation_error_deg"]),
+                float(last_check["z_axis_error_deg"]),
+                float(last_check["position_error_m"]),
+            ),
+            flush=True,
         )
-    except Exception as exc:
-        print("[WARN] TF check after yaw motion failed: {}".format(exc), flush=True)
-        return False, None
-    check = pose_check(args, tool_pose, target_pose)
-    print(
-        "[INFO] post-motion pose check: ok={} orientation_error={:.2f}deg "
-        "z_axis_error={:.2f}deg position_error={:.4f}m".format(
-            check["ok"],
-            float(check["orientation_error_deg"]),
-            float(check["z_axis_error_deg"]),
-            float(check["position_error_m"]),
-        ),
-        flush=True,
-    )
-    return bool(check["ok"]), check
+    else:
+        print("[WARN] TF check after yaw motion failed: {}".format(last_error), flush=True)
+    return False, last_check, checks
 
 
 def run_verified_yaw_motion(
@@ -345,6 +376,7 @@ def run_verified_yaw_motion(
         return True
 
     best_check = None
+    args._last_pose_wait_checks = []
     for variant in yaw_motion_arg_variants(args):
         print(
             "[INFO] yaw motion attempt: strategy={} wrist_yaw_sign={} wrist_direction={}".format(
@@ -361,7 +393,8 @@ def run_verified_yaw_motion(
             continue
         if args.motion_settle_s > 0:
             time.sleep(float(args.motion_settle_s))
-        reached, check = verify_motion_reached_target(args, subscriber, tf_buffer, target_pose)
+        reached, check, checks = verify_motion_reached_target(args, subscriber, tf_buffer, target_pose)
+        args._last_pose_wait_checks = checks
         if check is not None:
             best_check = check
         if reached:
@@ -472,6 +505,7 @@ def capture_yaw_record(
             targets,
             last_pose_check,
             attempts,
+            pose_wait_checks=getattr(args, "_last_pose_wait_checks", None),
         )
         output_path = os.path.join(args.output_dir, stem + "_pose_failed.json")
         write_json(output_path, record)

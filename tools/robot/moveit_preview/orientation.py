@@ -1,6 +1,7 @@
 """Tool pose, yaw, quaternion, and offset calculations."""
 
 import math
+from typing import Iterable, List
 
 from geometry_msgs.msg import Point, Pose
 
@@ -11,13 +12,44 @@ from robot_scene_pipeline.grasp_orientation import (
     quaternion_distance_rad,
 )
 
-def tool0_goal_from_tcp(tcp_position_m, quat_xyzw, tcp_offset_tool):
-    try:
-        from tools.tcp_pivot_calibration import tool0_position_for_tcp
-    except ImportError:
-        from tcp_pivot_calibration import tool0_position_for_tcp
+def quaternion_to_matrix_xyzw(quat_xyzw: Iterable[float]) -> List[List[float]]:
+    x, y, z, w = normalize_quaternion_xyzw(quat_xyzw)
+    return [
+        [
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - z * w),
+            2.0 * (x * z + y * w),
+        ],
+        [
+            2.0 * (x * y + z * w),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - x * w),
+        ],
+        [
+            2.0 * (x * z - y * w),
+            2.0 * (y * z + x * w),
+            1.0 - 2.0 * (x * x + y * y),
+        ],
+    ]
 
-    return tool0_position_for_tcp(tcp_position_m, quat_xyzw, tcp_offset_tool)
+
+def rotate_tool_vector_to_base(quat_xyzw: Iterable[float], vector_tool_m: Iterable[float]) -> List[float]:
+    matrix = quaternion_to_matrix_xyzw(quat_xyzw)
+    vector = [float(value) for value in vector_tool_m]
+    return [
+        sum(matrix[row][col] * vector[col] for col in range(3))
+        for row in range(3)
+    ]
+
+
+def tool0_goal_from_tcp(
+    tcp_position_m: Iterable[float],
+    quat_xyzw: Iterable[float],
+    tcp_offset_tool_m: Iterable[float],
+) -> List[float]:
+    tcp_position = [float(value) for value in tcp_position_m]
+    tcp_offset_base = rotate_tool_vector_to_base(quat_xyzw, tcp_offset_tool_m)
+    return [tcp_position[i] - tcp_offset_base[i] for i in range(3)]
 
 
 def add_base_offset(position_m, offset_m):
@@ -235,38 +267,6 @@ def orientation_candidates_for_pre_rotate(step, args, current_quaternion_xyzw):
                 }
             )
     return candidates
-
-
-def tool0_goal_from_approach(approach_position_m, tool_z_offset, tool_offset_base):
-    x, y, z = [float(v) for v in approach_position_m]
-    return [
-        x + float(tool_offset_base[0]),
-        y + float(tool_offset_base[1]),
-        z + float(tool_z_offset) + float(tool_offset_base[2]),
-    ]
-
-
-def yaw_local_offset_to_base(offset_m, yaw_deg):
-    dx, dy, dz = [float(v) for v in offset_m]
-    yaw_rad = math.radians(float(yaw_deg))
-    c = math.cos(yaw_rad)
-    s = math.sin(yaw_rad)
-    return [
-        c * dx - s * dy,
-        s * dx + c * dy,
-        dz,
-    ]
-
-
-def tool_offset_for_step(args, selected_yaw_deg):
-    offset = [float(value) for value in args.tool_offset_base]
-    local_offset = [float(value) for value in args.tool_offset_yaw_local]
-    if any(value != 0.0 for value in local_offset):
-        if selected_yaw_deg is None:
-            raise RuntimeError("--tool-offset-yaw-local requires --orientation-mode object-yaw with valid selected yaw.")
-        rotated = yaw_local_offset_to_base(local_offset, selected_yaw_deg)
-        offset = [offset[i] + rotated[i] for i in range(3)]
-    return offset
 
 
 def validate_goal(goal, args):

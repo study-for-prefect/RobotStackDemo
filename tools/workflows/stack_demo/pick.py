@@ -1,7 +1,6 @@
 """Pick-plan construction, dry-run scene simulation, and pick motion commands."""
 
 import copy
-import math
 from types import SimpleNamespace
 
 from robot_scene_pipeline.xy_correction import apply_step_xy_correction, load_xy_correction
@@ -32,14 +31,6 @@ def plan_envelope(state, step):
             "stop if geometry_center_m or dynamic stack top is invalid",
         ],
     }
-
-
-def yaw_local_xy_to_base(offset_xy, yaw_deg):
-    yaw_rad = math.radians(float(yaw_deg))
-    return [
-        math.cos(yaw_rad) * float(offset_xy[0]) - math.sin(yaw_rad) * float(offset_xy[1]),
-        math.sin(yaw_rad) * float(offset_xy[0]) + math.cos(yaw_rad) * float(offset_xy[1]),
-    ]
 
 
 def apply_selected_grasp_yaw(step, obj):
@@ -124,16 +115,6 @@ def build_offline_pick_plan(state, obj, output_path, args):
         args.square_yaw_snap_tolerance_deg,
     )
     apply_selected_grasp_yaw(step, obj)
-    local_offset = args.grasp_tool_offset_local
-    if local_offset is None:
-        local_offset = [0.0, 0.0]
-    rotated_offset = yaw_local_xy_to_base(local_offset, step["chosen_grasp_yaw_deg"])
-    step["grasp_tool_offset_local_xy_m"] = [float(local_offset[0]), float(local_offset[1])]
-    step["grasp_tool_offset_base_xy_m"] = rotated_offset
-    step["expected_tool0_grasp_xy_base_m"] = [
-        float(step["target_position_m"][0]) + rotated_offset[0],
-        float(step["target_position_m"][1]) + rotated_offset[1],
-    ]
     write_json(output_path, plan)
     return plan
 
@@ -162,9 +143,6 @@ def simulate_placed_state(held_state, held_object, place_step):
 
 
 def pick_motion_command(args, plan_path, path_mode, enable_gripper):
-    local_offset = args.grasp_tool_offset_local
-    if local_offset is None:
-        local_offset = [0.0, 0.0]
     command = [
         args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--plan-json", plan_path, "--path-mode", path_mode,
@@ -179,9 +157,7 @@ def pick_motion_command(args, plan_path, path_mode, enable_gripper):
         "--pre-rotate-acceleration", str(getattr(args, "pre_rotate_acceleration", 0.20)),
         "--max-grasp-yaw-error-deg", str(args.max_grasp_yaw_error_deg),
         "--max-grasp-orientation-error-deg", str(args.max_grasp_orientation_error_deg),
-        "--tool-z-offset", str(args.tool_z_offset),
-        "--tool-offset-base", *[str(value) for value in args.tool_offset_base],
-        "--tool-offset-yaw-local", str(local_offset[0]), str(local_offset[1]), "0",
+        "--tcp-offset-tool", *[str(value) for value in args.tcp_offset_tool],
         "--velocity", str(args.velocity), "--acceleration", str(args.acceleration),
         "--tf-timeout", str(getattr(args, "tf_timeout", 8.0)),
         *moveit_frame_args(args),
@@ -215,8 +191,7 @@ def place_command(args, plan_path):
         "--max-pre-rotate-joint-delta", str(args.max_pre_rotate_joint_delta),
         "--pre-rotate-velocity", str(getattr(args, "pre_rotate_velocity", 0.20)),
         "--pre-rotate-acceleration", str(getattr(args, "pre_rotate_acceleration", 0.20)),
-        "--tool-z-offset", str(args.tool_z_offset),
-        "--tool-offset-base", *[str(value) for value in args.tool_offset_base],
+        "--tcp-offset-tool", *[str(value) for value in args.tcp_offset_tool],
         "--velocity", str(args.velocity), "--acceleration", str(args.acceleration),
         "--place-on-top-velocity", str(args.place_velocity),
         "--place-on-top-acceleration", str(args.place_acceleration),

@@ -16,6 +16,7 @@ from tools.calibration.yaw_rotation_probe_runtime.record_modes import (
 )
 from tools.calibration.yaw_rotation_probe_runtime.pose_math import (
     build_yaw_targets,
+    quaternion_xyzw_to_matrix,
     quaternion_to_rpy_xyzw,
     rpy_to_quaternion_xyzw,
     tool_z_axis_base,
@@ -69,13 +70,13 @@ class YawRotationProbeTests(unittest.TestCase):
 
     def test_hover_target_reconstructs_same_tool0_position(self):
         tool0_position = [0.42, -0.18, 0.36]
-        tool_offset_base = [-0.01, 0.02, 0.0]
-        tool_z_offset = 0.15
-        hover_target = hover_target_from_tool0_position(tool0_position, tool_z_offset, tool_offset_base)
+        tool0_quat = vertical_down_quaternion_for_yaw(30.0)
+        tcp_offset_tool = [-0.015, 0.0, 0.15]
+        hover_target = hover_target_from_tool0_position(tool0_position, tool0_quat, tcp_offset_tool)
+        tcp_offset_base = quaternion_xyzw_to_matrix(tool0_quat).dot(tcp_offset_tool).astype(float).tolist()
         reconstructed_tool0 = [
-            hover_target[0] + tool_offset_base[0],
-            hover_target[1] + tool_offset_base[1],
-            hover_target[2] + tool_z_offset + tool_offset_base[2],
+            hover_target[i] - tcp_offset_base[i]
+            for i in range(3)
         ]
         for actual, expected in zip(reconstructed_tool0, tool0_position):
             self.assertAlmostEqual(actual, expected, places=9)
@@ -87,8 +88,7 @@ class YawRotationProbeTests(unittest.TestCase):
         }
         args = Namespace(
             ros_python="/usr/bin/python3",
-            motion_tool_z_offset=0.15,
-            motion_tool_offset_base=[0.0, 0.0, 0.0],
+            motion_tcp_offset_tool=[-0.015, 0.0, 0.15],
             velocity=0.12,
             acceleration=0.12,
             pre_rotate_velocity=0.2,
@@ -116,7 +116,12 @@ class YawRotationProbeTests(unittest.TestCase):
         self.assertFalse(any(scientific_number.match(value) for value in command))
         hover_index = command.index("--hover-target-base") + 1
         hover_target = [float(value) for value in command[hover_index:hover_index + 3]]
-        for actual, expected in zip(hover_target, [0.4, -0.2, 0.2]):
+        tcp_offset_base = quaternion_xyzw_to_matrix(target["tool0_quat"]).dot([-0.015, 0.0, 0.15])
+        expected_hover = [
+            float(target["tool0_position"][i]) + float(tcp_offset_base[i])
+            for i in range(3)
+        ]
+        for actual, expected in zip(hover_target, expected_hover):
             self.assertAlmostEqual(actual, expected, places=9)
 
     def test_missed_record_keeps_yaw_sequence_analysis_fields(self):

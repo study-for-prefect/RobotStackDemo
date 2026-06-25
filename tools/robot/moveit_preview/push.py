@@ -9,7 +9,7 @@ from robot_scene_pipeline.grasp_orientation import normalize_quaternion_xyzw
 from tools.robot.push_primitives import build_push_targets
 
 from .execution import plan_and_maybe_execute_motion, plan_motion_trajectory
-from .orientation import tool0_goal_from_approach, transform_position_quat
+from .orientation import tool0_goal_from_tcp, transform_position_quat
 from .trajectory import joint_state_from_trajectory, max_joint_delta
 
 
@@ -20,7 +20,8 @@ def load_push_plan(path: str) -> Dict[str, Any]:
 
 def _push_stage_goals(push_plan: dict, args: Any) -> List[Tuple[str, List[float], bool]]:
     targets = build_push_targets(push_plan)
-    tool_offset = [float(value) for value in args.tool_offset_base]
+    push_quat = normalize_quaternion_xyzw(args.quat_xyzw)
+    tcp_offset_tool = [float(value) for value in args.tcp_offset_tool]
     stages = [
         ("pre_push", targets["pre_push"], False),
         ("contact", targets["contact"], True),
@@ -30,7 +31,7 @@ def _push_stage_goals(push_plan: dict, args: Any) -> List[Tuple[str, List[float]
     return [
         (
             name,
-            tool0_goal_from_approach(target, args.tool_z_offset, tool_offset),
+            tool0_goal_from_tcp(target, push_quat, tcp_offset_tool),
             cartesian,
         )
         for name, target, cartesian in stages

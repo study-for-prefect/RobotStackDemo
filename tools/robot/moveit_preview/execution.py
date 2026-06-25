@@ -20,6 +20,7 @@ from .orientation import (
     orientation_command_quaternion,
     pose_payload,
     shortest_yaw_delta_deg,
+    tool0_goal_from_tcp,
     transform_position_quat,
     validate_goal,
     xyz_delta,
@@ -377,19 +378,14 @@ def run_hover_only(node, args, planning_start_state):
         raise RuntimeError("--hover-only requires --hover-orientation-xyzw QX QY QZ QW.")
 
     hover_target = [float(value) for value in args.hover_target_base]
-    tool_offset = [float(value) for value in args.tool_offset_base]
-    effective_tool_z_offset = float(args.tool_z_offset) + tool_offset[2]
-    if args.execute and effective_tool_z_offset < 0.08:
+    tcp_offset_tool = [float(value) for value in args.tcp_offset_tool]
+    if args.execute and abs(tcp_offset_tool[2]) < 0.08:
         raise RuntimeError(
-            "Hover-only refused: effective tool Z offset {:.3f} m is too small. "
-            "Use the same --tool-z-offset as real grasp execution.".format(effective_tool_z_offset)
+            "Hover-only refused: TCP tool Z offset {:.3f} m is too small. "
+            "Use the same --tcp-offset-tool as real grasp execution.".format(tcp_offset_tool[2])
         )
-    tool_goal = [
-        hover_target[0] + tool_offset[0],
-        hover_target[1] + tool_offset[1],
-        hover_target[2] + effective_tool_z_offset,
-    ]
     hover_quat = normalize_quaternion_xyzw(args.hover_orientation_xyzw)
+    tool_goal = tool0_goal_from_tcp(hover_target, hover_quat, tcp_offset_tool)
     validate_goal(tool_goal, args)
 
     current_tool = node.current_tool_transform(timeout=args.tf_timeout)
@@ -398,10 +394,9 @@ def run_hover_only(node, args, planning_start_state):
     orientation_error_deg = math.degrees(orientation_error_rad)
     node.get_logger().info("Hover-only current_tool0_pose={}".format(pose_payload(current_pos, current_quat)))
     node.get_logger().info(
-        "Hover-only target_base={} tool_z_offset={:.4f} tool_offset_base={} -> tool0_goal={} target_orientation={} orientation_error_deg={:.2f}".format(
+        "Hover-only tcp_target_base={} tcp_offset_tool={} -> tool0_goal={} target_orientation={} orientation_error_deg={:.2f}".format(
             [round(v, 4) for v in hover_target],
-            float(args.tool_z_offset),
-            [round(v, 4) for v in tool_offset],
+            [round(v, 4) for v in tcp_offset_tool],
             [round(v, 4) for v in tool_goal],
             [round(v, 5) for v in hover_quat],
             orientation_error_deg,

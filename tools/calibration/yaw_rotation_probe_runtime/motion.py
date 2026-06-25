@@ -7,6 +7,8 @@ from typing import Dict, Iterable, List
 
 from tools.monitoring.realtime_monitor.constants import PROJECT_ROOT
 
+from .pose_math import quaternion_xyzw_to_matrix
+
 
 def cli_float(value: float) -> str:
     """Format floats so argparse never confuses tiny negative values for flags."""
@@ -20,17 +22,15 @@ def cli_floats(values: Iterable[float]) -> List[str]:
 
 def hover_target_from_tool0_position(
     tool0_position_m: Iterable[float],
-    tool_z_offset_m: float,
-    tool_offset_base_m: Iterable[float],
+    tool0_quat_xyzw: Iterable[float],
+    tcp_offset_tool_m: Iterable[float],
 ) -> List[float]:
-    """Return a hover target that makes moveit_preview keep tool0 XYZ unchanged."""
+    """Return the TCP target that makes moveit_preview keep tool0 pose unchanged."""
     position = [float(value) for value in tool0_position_m]
-    offset = [float(value) for value in tool_offset_base_m]
-    return [
-        position[0] - offset[0],
-        position[1] - offset[1],
-        position[2] - float(tool_z_offset_m) - offset[2],
-    ]
+    matrix = quaternion_xyzw_to_matrix(tool0_quat_xyzw)
+    offset = [float(value) for value in tcp_offset_tool_m]
+    tcp_offset_base = matrix.dot(offset).astype(float).tolist()
+    return [position[i] + tcp_offset_base[i] for i in range(3)]
 
 
 def build_yaw_motion_command(args: Namespace, target_pose: Dict[str, object]) -> List[str]:
@@ -38,8 +38,8 @@ def build_yaw_motion_command(args: Namespace, target_pose: Dict[str, object]) ->
     tool0_quat = [float(value) for value in target_pose["tool0_quat"]]  # type: ignore[index]
     hover_target = hover_target_from_tool0_position(
         tool0_position,
-        args.motion_tool_z_offset,
-        args.motion_tool_offset_base,
+        tool0_quat,
+        args.motion_tcp_offset_tool,
     )
     command = [
         args.ros_python,
@@ -49,10 +49,8 @@ def build_yaw_motion_command(args: Namespace, target_pose: Dict[str, object]) ->
         *cli_floats(hover_target),
         "--hover-orientation-xyzw",
         *cli_floats(tool0_quat),
-        "--tool-z-offset",
-        cli_float(args.motion_tool_z_offset),
-        "--tool-offset-base",
-        *cli_floats(args.motion_tool_offset_base),
+        "--tcp-offset-tool",
+        *cli_floats(args.motion_tcp_offset_tool),
         "--velocity",
         cli_float(args.velocity),
         "--acceleration",

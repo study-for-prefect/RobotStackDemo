@@ -38,9 +38,7 @@ def yaw_dataset(base_error, local_error):
         "phase": "yaw",
         "error_convention": "observed_gripper_center_minus_physical_object_center",
         "collection_offsets": {
-            "tool_offset_base": [-0.015, 0.0, 0.0],
-            "tool_offset_yaw_local": [0.0, 0.0, 0.0],
-            "tool_z_offset": 0.15,
+            "tcp_offset_tool_m": [-0.015, 0.0, 0.15],
         },
         "samples": samples + copy.deepcopy(samples),
     }
@@ -59,13 +57,13 @@ class XYBiasDiagnosisTest(unittest.TestCase):
             atol=1e-12,
         )
         np.testing.assert_allclose(
-            model["suggested_updated_tool_offset_base_m"],
-            [-0.018, 0.002, 0.0],
+            model["suggested_base_offset_delta_m"],
+            [-0.003, 0.002],
             atol=1e-12,
         )
         np.testing.assert_allclose(
-            model["suggested_updated_tool_offset_yaw_local_m"],
-            [-0.0012, -0.0007, 0.0],
+            model["suggested_updated_tcp_offset_tool_m"],
+            [-0.0162, -0.0007, 0.15],
             atol=1e-12,
         )
         self.assertIsNone(report["workspace_model"])

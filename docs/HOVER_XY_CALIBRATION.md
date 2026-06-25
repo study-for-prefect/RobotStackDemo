@@ -81,7 +81,7 @@ python3 tools/calibration/xy_bias_diagnosis.py collect \
   --repeats 3 \
   --hover-height 0.08 \
   --known-object-height-m 0.0235 \
-  --tool-offset-base -0.015 0 0 \
+  --tcp-offset-tool -0.015 0 0.15 \
   --pre-rotate-wrist-yaw-sign negative \
   --execute
 ```
@@ -90,7 +90,7 @@ The report separates:
 
 - `base_error_m`
 - `yaw_local_error_m`
-- suggested incremental base and tool-local offset changes
+- suggested incremental fixed-bias and TCP tool-offset changes
 
 ## Phase 2: Workspace Test
 
@@ -106,7 +106,7 @@ python3 tools/calibration/xy_bias_diagnosis.py collect \
   --repeats 3 \
   --hover-height 0.08 \
   --known-object-height-m 0.0235 \
-  --tool-offset-base -0.015 0 0 \
+  --tcp-offset-tool -0.015 0 0.15 \
   --execute
 ```
 
@@ -140,7 +140,7 @@ Do not apply fitted values immediately to production grasping.
 
 The generated corrections are incremental relative to the offsets recorded in
 `samples.json`. For the yaw test, the report also prints the resulting updated
-`--tool-offset-base` and `--tool-offset-yaw-local` values.
+`--tcp-offset-tool` value.
 
 Each sample records `pointcloud_source`, `geometry_estimation_method`, and
 whether depth geometry was observable. This makes

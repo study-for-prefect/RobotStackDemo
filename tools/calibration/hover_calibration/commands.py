@@ -9,15 +9,14 @@ def run(command):
     subprocess.run(command, cwd=PROJECT_ROOT, check=True)
 
 
-def moveit_hover_command(args, hover_position, hover_quat, tool_offset_base):
+def moveit_hover_command(args, hover_position, hover_quat):
     command = [
         args.ros_python,
         "tools/robot/moveit_plan_preview.py",
         "--hover-only",
         "--hover-target-base", *[str(value) for value in hover_position],
         "--hover-orientation-xyzw", *[str(value) for value in hover_quat],
-        "--tool-z-offset", str(args.tool_z_offset),
-        "--tool-offset-base", *[str(value) for value in tool_offset_base],
+        "--tcp-offset-tool", *[str(value) for value in args.tcp_offset_tool],
         "--safe-pre-rotate-height", str(args.safe_pre_rotate_height),
         "--base-link", args.base_frame,
         "--end-effector", args.tool_frame,

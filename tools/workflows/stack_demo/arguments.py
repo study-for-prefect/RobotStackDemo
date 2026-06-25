@@ -122,15 +122,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--object-offset-tool", nargs=2, type=float, default=[0.0, 0.0])
     parser.add_argument("--place-bias-base", nargs=2, type=float, default=[0.0, 0.0])
     parser.add_argument("--max-place-bias-base-m", type=float, default=0.01)
-    parser.add_argument("--tool-z-offset", type=float, default=0.15)
-    parser.add_argument("--tool-offset-base", nargs=3, type=float, default=[-0.015, 0.0, 0.0])
-    parser.add_argument(
-        "--grasp-tool-offset-local",
-        nargs=2,
-        type=float,
-        default=None,
-        help="Tool0 XY offset from the visual grasp center in the selected grasp-yaw frame.",
-    )
+    parser.add_argument("--tcp-offset-tool", nargs=3, type=float, default=[-0.015, 0.0, 0.15])
     parser.add_argument("--velocity", type=float, default=0.08)
     parser.add_argument("--acceleration", type=float, default=0.08)
     parser.add_argument("--pre-rotate-velocity", type=float, default=0.20)

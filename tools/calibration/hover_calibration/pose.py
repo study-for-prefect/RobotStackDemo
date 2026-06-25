@@ -105,22 +105,37 @@ def hover_orientation(args, target, current_tool0_pose):
     return downward_quaternion_for_yaw(DEFAULT_DOWNWARD_QUAT_XYZW, yaw), yaw, "invalid_yaw_fixed_hover_yaw"
 
 
-def yaw_local_offset_to_base(offset, yaw_deg):
-    yaw_rad = math.radians(float(yaw_deg))
-    dx, dy, dz = [float(value) for value in offset]
+def quaternion_to_matrix_xyzw(quat_xyzw):
+    x, y, z, w = normalize_quaternion_xyzw(quat_xyzw)
     return [
-        math.cos(yaw_rad) * dx - math.sin(yaw_rad) * dy,
-        math.sin(yaw_rad) * dx + math.cos(yaw_rad) * dy,
-        dz,
+        [
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - z * w),
+            2.0 * (x * z + y * w),
+        ],
+        [
+            2.0 * (x * y + z * w),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - x * w),
+        ],
+        [
+            2.0 * (x * z - y * w),
+            2.0 * (y * z + x * w),
+            1.0 - 2.0 * (x * x + y * y),
+        ],
     ]
 
 
-def effective_tool_offset_base(args, yaw_used):
-    base_offset = [float(value) for value in args.tool_offset_base]
-    local_offset = [float(value) for value in args.tool_offset_yaw_local]
-    if not any(abs(value) > 0.0 for value in local_offset):
-        return base_offset, [0.0, 0.0, 0.0]
-    if yaw_used is None:
-        raise RuntimeError("--tool-offset-yaw-local requires a selected fixed/detected yaw.")
-    rotated = yaw_local_offset_to_base(local_offset, yaw_used)
-    return [base_offset[i] + rotated[i] for i in range(3)], rotated
+def rotate_tool_vector_to_base(quat_xyzw, vector_tool_m):
+    matrix = quaternion_to_matrix_xyzw(quat_xyzw)
+    vector = [float(value) for value in vector_tool_m]
+    return [
+        sum(matrix[row][col] * vector[col] for col in range(3))
+        for row in range(3)
+    ]
+
+
+def tool0_goal_from_tcp(tcp_position_m, quat_xyzw, tcp_offset_tool_m):
+    tcp_position = [float(value) for value in tcp_position_m]
+    tcp_offset_base = rotate_tool_vector_to_base(quat_xyzw, tcp_offset_tool_m)
+    return [tcp_position[i] - tcp_offset_base[i] for i in range(3)]

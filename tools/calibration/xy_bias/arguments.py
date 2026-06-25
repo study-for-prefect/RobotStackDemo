@@ -30,9 +30,7 @@ def parse_args():
     collect.add_argument("--detector-config", default="config/yolo_detector.json")
     collect.add_argument("--conda-env", default="yolo")
     collect.add_argument("--ros-python", default=sys.executable)
-    collect.add_argument("--tool-z-offset", type=float, default=0.15)
-    collect.add_argument("--tool-offset-base", nargs=3, type=float, default=[-0.015, 0.0, 0.0])
-    collect.add_argument("--tool-offset-yaw-local", nargs=3, type=float, default=[0.0, 0.0, 0.0])
+    collect.add_argument("--tcp-offset-tool", nargs=3, type=float, default=[-0.015, 0.0, 0.15])
     collect.add_argument(
         "--pre-rotate-wrist-yaw-sign",
         choices=("positive", "negative"),

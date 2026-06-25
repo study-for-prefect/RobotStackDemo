@@ -210,7 +210,6 @@ def test_selected_grasp_yaw_is_written_to_pick_plan():
         grasp_axis="long",
         gripper_yaw_offset_deg=0.0,
         square_yaw_snap_tolerance_deg=5.0,
-        grasp_tool_offset_local=None,
     )
     with tempfile.TemporaryDirectory() as tmpdir:
         output_path = os.path.join(tmpdir, "pick_plan.json")

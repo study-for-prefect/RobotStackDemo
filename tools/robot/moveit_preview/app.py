@@ -24,9 +24,7 @@ from .orientation import (
     gripper_yaw_error_deg,
     orientation_for_step,
     shortest_yaw_delta_deg,
-    tool0_goal_from_approach,
     tool0_goal_from_tcp,
-    tool_offset_for_step,
     transform_position_quat,
 )
 from .plan_io import load_joint_pose, load_plan, load_tcp_offset
@@ -87,7 +85,8 @@ def main() -> Optional[int]:
         or push_only
         else load_plan(args.plan_json)
     )
-    tcp_offset_tool = load_tcp_offset(args.tcp_calibration_json)
+    calibrated_tcp_offset_tool = load_tcp_offset(args.tcp_calibration_json)
+    tcp_offset_tool = calibrated_tcp_offset_tool or [float(value) for value in args.tcp_offset_tool]
     ready_joint_pose = load_joint_pose(args.ready_joint_pose_json)
     if args.diagnostic_yaw_deg:
         if args.path_mode != "approach":
@@ -119,10 +118,10 @@ def main() -> Optional[int]:
     print("Max joint delta: motion={:.3f}, pre_rotate={:.3f}".format(args.max_joint_delta, args.max_pre_rotate_joint_delta))
     if ready_joint_pose is not None:
         print("Ready joint pose: {}".format(args.ready_joint_pose_json))
-    if tcp_offset_tool is not None:
+    if calibrated_tcp_offset_tool is not None:
         print("TCP calibration: {} offset_tool={}".format(args.tcp_calibration_json, tcp_offset_tool))
     else:
-        print("TCP calibration: disabled; using legacy base-frame tool offsets")
+        print("TCP offset tool0->TCP: {}".format(tcp_offset_tool))
 
     rclpy.init(args=None)
     node = MoveItPreviewNode(args)
@@ -489,17 +488,11 @@ def main() -> Optional[int]:
                                 args.max_grasp_orientation_error_deg,
                             )
                         )
-                if tcp_offset_tool is not None:
-                    tcp_target = add_base_offset(plan_position, args.tcp_target_offset_base)
-                    tool_goal = tool0_goal_from_tcp(tcp_target, quat_xyzw, tcp_offset_tool)
-                    effective_tool_offset = None
-                else:
-                    tcp_target = plan_position
-                    effective_tool_offset = tool_offset_for_step(args, step_selected_yaw_deg)
-                    tool_goal = tool0_goal_from_approach(plan_position, args.tool_z_offset, effective_tool_offset)
+                tcp_target = add_base_offset(plan_position, args.tcp_target_offset_base)
+                tool_goal = tool0_goal_from_tcp(tcp_target, quat_xyzw, tcp_offset_tool)
 
                 log_message = (
-                    "Step {} {} {}: object={} ref={} plan_position={} tcp_target={} tool_offset={} -> tool0_goal={}".format(
+                    "Step {} {} {}: object={} ref={} plan_position={} tcp_target={} tcp_offset_tool={} -> tool0_goal={}".format(
                         step.get("step"),
                         step.get("action"),
                         command["name"],
@@ -507,7 +500,7 @@ def main() -> Optional[int]:
                         step.get("reference_label"),
                         [round(v, 4) for v in plan_position],
                         [round(v, 4) for v in tcp_target],
-                        None if effective_tool_offset is None else [round(v, 4) for v in effective_tool_offset],
+                        [round(v, 4) for v in tcp_offset_tool],
                         [round(v, 4) for v in tool_goal],
                     )
                 )

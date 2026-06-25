@@ -58,7 +58,7 @@ def fit_yaw_model(yaw, error):
         "base_error_m": params[:2].tolist(),
         "yaw_local_error_m": params[2:].tolist(),
         "suggested_base_offset_delta_m": (-params[:2]).tolist(),
-        "suggested_tool_offset_yaw_local_delta_m": (-params[2:]).tolist(),
+        "suggested_tcp_offset_tool_delta_xy_m": (-params[2:]).tolist(),
         "rms_residual_mm": float(np.sqrt(np.mean(residual ** 2)) * 1000.0),
         "max_residual_mm": float(np.max(np.linalg.norm(residual, axis=1)) * 1000.0),
     }
@@ -144,18 +144,9 @@ def analyze_dataset(dataset):
         perception_source_counts[source] = perception_source_counts.get(source, 0) + 1
     collection_offsets = dataset.get("collection_offsets") or {}
     if yaw_fit is not None:
-        base = np.asarray(collection_offsets.get("tool_offset_base", [0.0, 0.0, 0.0]), dtype=float)
-        local = np.asarray(
-            collection_offsets.get("tool_offset_yaw_local", [0.0, 0.0, 0.0]),
-            dtype=float,
-        )
-        base[:2] += np.asarray(yaw_fit["suggested_base_offset_delta_m"], dtype=float)
-        local[:2] += np.asarray(
-            yaw_fit["suggested_tool_offset_yaw_local_delta_m"],
-            dtype=float,
-        )
-        yaw_fit["suggested_updated_tool_offset_base_m"] = base.tolist()
-        yaw_fit["suggested_updated_tool_offset_yaw_local_m"] = local.tolist()
+        tcp_offset = np.asarray(collection_offsets.get("tcp_offset_tool_m", [0.0, 0.0, 0.0]), dtype=float)
+        tcp_offset[:2] += np.asarray(yaw_fit["suggested_tcp_offset_tool_delta_xy_m"], dtype=float)
+        yaw_fit["suggested_updated_tcp_offset_tool_m"] = tcp_offset.tolist()
     return {
         "schema_version": "xy_bias_diagnosis_report_v1",
         "sample_count": len(samples),
@@ -205,19 +196,18 @@ def print_report(report):
             flush=True,
         )
         print(
-            "suggested incremental base delta mm={} local delta mm={}".format(
+            "suggested incremental fixed-bias delta mm={} tcp-tool delta xy mm={}".format(
                 [round(1000.0 * value, 3) for value in model["suggested_base_offset_delta_m"]],
                 [
                     round(1000.0 * value, 3)
-                    for value in model["suggested_tool_offset_yaw_local_delta_m"]
+                    for value in model["suggested_tcp_offset_tool_delta_xy_m"]
                 ],
             ),
             flush=True,
         )
         print(
-            "suggested updated tool offsets: base={} yaw_local={}".format(
-                model["suggested_updated_tool_offset_base_m"],
-                model["suggested_updated_tool_offset_yaw_local_m"],
+            "suggested updated tcp_offset_tool={}".format(
+                model["suggested_updated_tcp_offset_tool_m"],
             ),
             flush=True,
         )

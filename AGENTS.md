@@ -165,4 +165,12 @@ Add new files only when responsibility separation requires it.
 
 Explain every new file added.
 
+
+## Robotics Standards
+
+Code must follow common ROS 2 / robotics conventions: SI units, explicit coordinate frames, clear TF direction, and dry-run before hardware execution.
+
+If a change does not meet robotics conventions, state the mismatch clearly and give a warning instead of hiding it.
+
+
 让用户最终可以有读懂代码的能力

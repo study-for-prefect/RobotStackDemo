@@ -32,8 +32,7 @@ def parse_args():
     parser.add_argument("--left-direction-sign", choices=("positive", "negative"), default="positive")
     parser.add_argument("--front-back-axis", choices=("x", "y"), default="x")
     parser.add_argument("--front-direction-sign", choices=("positive", "negative"), default="positive")
-    parser.add_argument("--tool-z-offset", type=float, default=0.15)
-    parser.add_argument("--tool-offset-base", nargs=3, type=float, default=[-0.015, 0.0, 0.0])
+    parser.add_argument("--tcp-offset-tool", nargs=3, type=float, default=[-0.015, 0.0, 0.15])
     parser.add_argument("--grasp-axis", choices=("long", "short"), default="long")
     parser.add_argument("--yaw-offset-deg", type=float, default=0.0)
     parser.add_argument(

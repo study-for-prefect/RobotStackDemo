@@ -18,19 +18,12 @@ def parse_args():
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--yes", action="store_true")
     parser.add_argument(
-        "--tool-z-offset",
-        type=float,
-        default=0.15,
-        help="Existing stack-demo tool0 Z offset from the hover/TCP target. Keep this consistent with real grasp execution.",
-    )
-    parser.add_argument("--tool-offset-base", nargs=3, type=float, default=[0.0, 0.0, 0.0])
-    parser.add_argument(
-        "--tool-offset-yaw-local",
+        "--tcp-offset-tool",
         nargs=3,
         type=float,
-        default=[0.0, 0.0, 0.0],
-        metavar=("DX", "DY", "DZ"),
-        help="Tool-local offset rotated into base_link by the selected grasp yaw.",
+        default=[-0.015, 0.0, 0.15],
+        metavar=("X", "Y", "Z"),
+        help="tool0->TCP/gripper-center translation in tool0 coordinates.",
     )
     parser.add_argument(
         "--hover-orientation-mode",

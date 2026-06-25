@@ -177,19 +177,6 @@ def build_corrected_plan(
             if key in second_step:
                 corrected_step[key] = second_step[key]
         corrected_step["yaw_source"] = "second_snapshot_{}".format(second_step.get("yaw_source") or "detected")
-    local_offset = corrected_step.get("grasp_tool_offset_local_xy_m")
-    final_yaw = corrected_step.get("chosen_grasp_yaw_deg")
-    if isinstance(local_offset, list) and len(local_offset) >= 2 and final_yaw is not None:
-        yaw_rad = math.radians(float(final_yaw))
-        rotated_offset = [
-            math.cos(yaw_rad) * float(local_offset[0]) - math.sin(yaw_rad) * float(local_offset[1]),
-            math.sin(yaw_rad) * float(local_offset[0]) + math.cos(yaw_rad) * float(local_offset[1]),
-        ]
-        corrected_step["grasp_tool_offset_base_xy_m"] = rotated_offset
-        corrected_step["expected_tool0_grasp_xy_base_m"] = [
-            corrected_xy[0] + rotated_offset[0],
-            corrected_xy[1] + rotated_offset[1],
-        ]
     write_json(output_path, corrected)
 
     report = {

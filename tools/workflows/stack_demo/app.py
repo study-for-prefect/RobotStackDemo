@@ -327,8 +327,7 @@ def main() -> int:
                 "\nCycle {} pick corrected by second target snapshot; grasp immediately before base approach: "
                 "target_id={} label={} first_center={} second_center={} "
                 "first_object_yaw={} second_object_yaw={} final_grasp_yaw={} "
-                "grasp_tool_offset_local={} grasp_tool_offset_base={} "
-                "expected_tool0_grasp_xy={} detected_base_id={} detected_base_center={} "
+                "detected_base_id={} detected_base_center={} "
                 "detected_base_top_z={} stack_average_center={} stack_yaw={} place_pose={}".format(
                     index,
                     held_object.get("id"),
@@ -338,9 +337,6 @@ def main() -> int:
                     held_object.get("table_yaw_deg"),
                     second_object.get("table_yaw_deg"),
                     pick_step.get("chosen_grasp_yaw_deg"),
-                    pick_step.get("grasp_tool_offset_local_xy_m"),
-                    pick_step.get("grasp_tool_offset_base_xy_m"),
-                    pick_step.get("expected_tool0_grasp_xy_base_m"),
                     final_stack_state.get("placement_base_object_id"),
                     final_stack_state.get("placement_base_center_xy_m"),
                     final_stack_state.get("placement_base_top_z_m"),

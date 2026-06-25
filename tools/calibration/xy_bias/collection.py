@@ -35,12 +35,8 @@ def hover_command(args, output_dir, yaw_deg):
         str(yaw_deg),
         "--known-object-height-m",
         str(args.known_object_height_m),
-        "--tool-z-offset",
-        str(args.tool_z_offset),
-        "--tool-offset-base",
-        *[str(value) for value in args.tool_offset_base],
-        "--tool-offset-yaw-local",
-        *[str(value) for value in args.tool_offset_yaw_local],
+        "--tcp-offset-tool",
+        *[str(value) for value in args.tcp_offset_tool],
         "--pre-rotate-strategy",
         "joint-wrist3",
         "--pre-rotate-wrist-yaw-sign",
@@ -130,9 +126,7 @@ def new_dataset(args):
         "error_convention": "observed_gripper_center_minus_physical_object_center",
         "units": {"xy": "meter", "measured_error": "millimeter", "yaw": "degree"},
         "collection_offsets": {
-            "tool_offset_base": [float(value) for value in args.tool_offset_base],
-            "tool_offset_yaw_local": [float(value) for value in args.tool_offset_yaw_local],
-            "tool_z_offset": float(args.tool_z_offset),
+            "tcp_offset_tool_m": [float(value) for value in args.tcp_offset_tool],
         },
         "created_at": time.time(),
         "samples": [],
@@ -178,9 +172,7 @@ def validate_dataset_compatibility(dataset, args):
             )
     existing_offsets = dataset.get("collection_offsets") or {}
     requested_offsets = {
-        "tool_offset_base": [float(value) for value in args.tool_offset_base],
-        "tool_offset_yaw_local": [float(value) for value in args.tool_offset_yaw_local],
-        "tool_z_offset": float(args.tool_z_offset),
+        "tcp_offset_tool_m": [float(value) for value in args.tcp_offset_tool],
     }
     if existing_offsets != requested_offsets:
         raise ValueError(

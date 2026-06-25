@@ -48,7 +48,7 @@ def parse_args():
         type=float,
         default=None,
         metavar=("X", "Y", "Z"),
-        help="Hover target point in base_link. --tool-offset-base is added to produce the tool0 goal.",
+        help="Hover TCP target point in base_link. --tcp-offset-tool is used to produce the tool0 goal.",
     )
     parser.add_argument(
         "--hover-orientation-xyzw",
@@ -89,30 +89,18 @@ def parse_args():
         default=0.0,
         help="Stretch trajectory timestamps so consecutive points are at least this many seconds apart.",
     )
-    parser.add_argument("--tool-z-offset", type=float, default=0.15, help="Add this to plan z for tool0/flange pose.")
     parser.add_argument(
-        "--tool-offset-base",
+        "--tcp-offset-tool",
         nargs=3,
         type=float,
-        default=[0.0, 0.0, 0.0],
-        metavar=("DX", "DY", "DZ"),
-        help="Additional base_link offset added to tool0 goal after z offset. Use this to compensate gripper/TCP XY offset.",
-    )
-    parser.add_argument(
-        "--tool-offset-yaw-local",
-        nargs=3,
-        type=float,
-        default=[0.0, 0.0, 0.0],
-        metavar=("DX", "DY", "DZ"),
-        help=(
-            "Additional offset in the selected yaw local XY frame. It is rotated into base_link "
-            "by the selected grasp yaw, then added to the legacy tool0 goal."
-        ),
+        default=[-0.015, 0.0, 0.15],
+        metavar=("X", "Y", "Z"),
+        help="tool0->TCP/gripper-center translation in tool0 coordinates.",
     )
     parser.add_argument(
         "--tcp-calibration-json",
         default="",
-        help="Use calibrated tool0->TCP translation. This overrides --tool-z-offset and --tool-offset-base.",
+        help="Use calibrated tool0->TCP translation. This overrides --tcp-offset-tool.",
     )
     parser.add_argument(
         "--tcp-target-offset-base",

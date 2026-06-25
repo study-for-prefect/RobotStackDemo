@@ -1,6 +1,8 @@
 """Top-level hover-only calibration workflow."""
 
 import os
+import subprocess
+import sys
 import time
 
 from robot_scene_pipeline.grasp_orientation import quaternion_distance_rad
@@ -8,7 +10,7 @@ from robot_scene_pipeline.io_utils import project_path, write_json
 
 from .arguments import parse_args
 from .commands import moveit_hover_command, run
-from .pose import effective_tool_offset_base, hover_orientation, pose_payload
+from .pose import hover_orientation, pose_payload, tool0_goal_from_tcp
 from .scene import choose_target, load_json, matching_objects, snapshot_command
 from .tf_lookup import lookup_tool_pose
 
@@ -38,15 +40,11 @@ def main() -> int:
 
     current_tool0_pose_before = lookup_tool_pose(args.base_frame, args.tool_frame, args.tf_timeout)
     hover_quat, yaw_used, yaw_source = hover_orientation(args, target, current_tool0_pose_before)
-    effective_offset, rotated_local_offset = effective_tool_offset_base(args, yaw_used)
     center = [float(value) for value in target["geometry_center_m"]]
     top_z = float(target["top_z_base_m"])
     hover_position = [center[0], center[1], top_z + float(args.hover_height)]
-    tool0_goal_position = [
-        hover_position[0] + effective_offset[0],
-        hover_position[1] + effective_offset[1],
-        hover_position[2] + float(args.tool_z_offset) + effective_offset[2],
-    ]
+    tcp_offset_tool = [float(value) for value in args.tcp_offset_tool]
+    tool0_goal_position = tool0_goal_from_tcp(hover_position, hover_quat, tcp_offset_tool)
 
     record = {
         "label": target.get("label"),
@@ -68,11 +66,7 @@ def main() -> int:
         "tool0_goal_position_base": tool0_goal_position,
         "current_tool0_pose_before": current_tool0_pose_before,
         "actual_tool0_pose_after": None,
-        "current_tool_offset_base": [float(value) for value in args.tool_offset_base],
-        "tool_offset_yaw_local": [float(value) for value in args.tool_offset_yaw_local],
-        "rotated_tool_offset_yaw_local_base": rotated_local_offset,
-        "effective_tool_offset_base": effective_offset,
-        "tool_z_offset": float(args.tool_z_offset),
+        "tcp_offset_tool_m": tcp_offset_tool,
         "hover_height": float(args.hover_height),
         "hover_orientation_mode": args.hover_orientation_mode,
         "safe_pre_rotate_height": float(args.safe_pre_rotate_height),
@@ -84,7 +78,7 @@ def main() -> int:
     }
     write_json(os.path.join(args.output_dir, "hover_record_before_move.json"), record)
 
-    command = moveit_hover_command(args, hover_position, hover_quat, effective_offset)
+    command = moveit_hover_command(args, hover_position, hover_quat)
     record["moveit_command"] = command
     try:
         run(command)

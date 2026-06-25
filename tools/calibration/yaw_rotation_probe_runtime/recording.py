@@ -43,6 +43,10 @@ def lookup_pose(
     last_error = None
     while time.time() < deadline:
         try:
+            try:
+                rclpy.spin_once(node, timeout_sec=0.02)
+            except Exception as exc:
+                last_error = exc
             transform = buffer.lookup_transform(
                 base_frame,
                 child_frame,
@@ -52,7 +56,10 @@ def lookup_pose(
             return transform_to_pose(transform)
         except Exception as exc:
             last_error = exc
-            rclpy.spin_once(node, timeout_sec=0.02)
+            try:
+                rclpy.spin_once(node, timeout_sec=0.02)
+            except Exception as spin_exc:
+                last_error = spin_exc
     raise RuntimeError("TF lookup failed: {} <- {}: {}".format(base_frame, child_frame, last_error))
 
 
