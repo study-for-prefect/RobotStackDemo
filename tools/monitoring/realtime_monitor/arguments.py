@@ -9,6 +9,7 @@ from .constants import PROJECT_ROOT
 
 DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_POINT_MODE = "direct"
+DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
 
 def parse_args():
     root = Path(PROJECT_ROOT)
@@ -47,8 +48,8 @@ def parse_args():
     parser.add_argument("--show-depth", action="store_true")
 
     # TF bridge output:
-    # python3 tools/robot/tf_lookup_json.py --base-frame base_link --camera-frame camera_color_optical_frame --output /tmp/scene_tf_base_camera.json
-    parser.add_argument("--tf-json", default="/tmp/scene_tf_base_camera.json")
+    # python3 tools/robot/tf_lookup_json.py --base-frame base_link --camera-frame camera_color_optical_frame --output /tmp/scene_tf_base_color_optical.json
+    parser.add_argument("--tf-json", default=DEFAULT_TF_JSON)
     parser.add_argument("--tf-reload-s", type=float, default=0.2)
     parser.add_argument("--base-frame", default="base_link")
     parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)

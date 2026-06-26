@@ -9,6 +9,7 @@ import numpy as np
 
 DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_POINT_MODE = "direct"
+DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
 
 
 def normalize_frame_name(frame):
@@ -68,7 +69,7 @@ def add_tf_args(parser):
     parser.add_argument("--base-frame", default="base_link")
     parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)
     parser.add_argument("--tf-timeout", type=float, default=2.0)
-    parser.add_argument("--tf-json", default="/tmp/scene_tf_base_camera.json", help="Bypass ROS2 rclpy by reading static JSON.")
+    parser.add_argument("--tf-json", default=DEFAULT_TF_JSON, help="Bypass ROS2 rclpy by reading static JSON.")
     parser.add_argument(
         "--tf-point-mode",
         choices=("direct", "optical-to-camera-link"),

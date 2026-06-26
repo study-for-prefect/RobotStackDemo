@@ -3,6 +3,7 @@
 import argparse
 
 DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
+DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Two-stage visual pick with pure base-link XY correction.")
@@ -17,7 +18,7 @@ def parse_args():
     parser.add_argument("--model", default="qwen2.5vl:7b-q4_K_M")
     parser.add_argument("--first-dir", default="/tmp/current_scene")
     parser.add_argument("--second-dir", default="/tmp/current_scene_second")
-    parser.add_argument("--tf-json", default="/tmp/scene_tf_base_camera.json")
+    parser.add_argument("--tf-json", default=DEFAULT_TF_JSON)
     parser.add_argument("--base-frame", default="base_link")
     parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)
     parser.add_argument("--ready-pose-json", default="config/rectangle_ready_pose.json")

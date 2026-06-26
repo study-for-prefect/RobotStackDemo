@@ -6,6 +6,7 @@ import os
 from .constants import PROJECT_ROOT
 
 DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
+DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a per-block closed-loop stack demo.")
@@ -60,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--detector-imgsz", type=int, default=960)
     parser.add_argument("--detector-iou", type=float, default=0.45)
     parser.add_argument("--detector-device", default="cuda:0")
-    parser.add_argument("--tf-json", default="/tmp/scene_tf_base_camera.json")
+    parser.add_argument("--tf-json", default=DEFAULT_TF_JSON)
     parser.add_argument("--base-frame", default="base_link")
     parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)
     parser.add_argument("--tool-frame", default="tool0")

@@ -5,6 +5,8 @@ import sys
 
 from .constants import DEFAULT_OUTPUT_DIR
 
+DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Diagnose base-fixed, yaw-local TCP, and workspace-dependent XY bias."
@@ -26,7 +28,7 @@ def parse_args():
     collect.add_argument("--workspace-yaw", type=float, default=0.0)
     collect.add_argument("--hover-height", type=float, default=0.08)
     collect.add_argument("--known-object-height-m", type=float, default=0.0)
-    collect.add_argument("--tf-json", default="/tmp/scene_tf_base_camera.json")
+    collect.add_argument("--tf-json", default=DEFAULT_TF_JSON)
     collect.add_argument("--detector-config", default="config/yolo_detector.json")
     collect.add_argument("--conda-env", default="yolo")
     collect.add_argument("--ros-python", default=sys.executable)

@@ -110,7 +110,7 @@ Estimate the tabletop plane and per-object point-cloud dimensions/yaw:
 ```bash
 conda run -n scene_graph_benchmark python -m robot_scene_pipeline.snapshot_pipeline \
   --use-tf \
-  --tf-json /tmp/scene_tf_base_camera.json \
+  --tf-json /tmp/scene_tf_base_color_optical.json \
   --camera-frame camera_color_optical_frame \
   --tf-point-mode direct \
   --estimate-tabletop \
