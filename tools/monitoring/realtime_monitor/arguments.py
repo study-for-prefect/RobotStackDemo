@@ -7,6 +7,9 @@ from robot_scene_pipeline.ros_topic_capture import add_ros_topic_args
 
 from .constants import PROJECT_ROOT
 
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
+DEFAULT_TF_POINT_MODE = "direct"
+
 def parse_args():
     root = Path(PROJECT_ROOT)
     parser = argparse.ArgumentParser("Realtime YOLO-seg monitor for RealSense with base_link 3D coordinates")
@@ -44,16 +47,20 @@ def parse_args():
     parser.add_argument("--show-depth", action="store_true")
 
     # TF bridge output:
-    # python3 tools/robot/tf_lookup_json.py --base-frame base_link --camera-frame camera_link --output /tmp/scene_tf_base_camera.json
+    # python3 tools/robot/tf_lookup_json.py --base-frame base_link --camera-frame camera_color_optical_frame --output /tmp/scene_tf_base_camera.json
     parser.add_argument("--tf-json", default="/tmp/scene_tf_base_camera.json")
     parser.add_argument("--tf-reload-s", type=float, default=0.2)
     parser.add_argument("--base-frame", default="base_link")
-    parser.add_argument("--camera-frame", default="camera_link")
+    parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)
     parser.add_argument(
         "--tf-point-mode",
         choices=("optical-to-camera-link", "direct"),
-        default="optical-to-camera-link",
-        help="RealSense deprojection is optical-frame XYZ. Use optical-to-camera-link when tf-json is base_link<-camera_link.",
+        default=DEFAULT_TF_POINT_MODE,
+        help=(
+            "RealSense deprojection is optical-frame XYZ. Use direct when "
+            "tf-json is base_link<-camera_color_optical_frame; "
+            "optical-to-camera-link is legacy for base_link<-camera_link."
+        ),
     )
     parser.add_argument("--depth-sample-radius", type=int, default=3)
     parser.add_argument("--min-depth-m", type=float, default=0.05)

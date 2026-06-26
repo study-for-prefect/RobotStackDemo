@@ -9,6 +9,9 @@ from tools.monitoring.realtime_monitor.constants import PROJECT_ROOT
 
 from .pose_math import DEFAULT_YAWS_DEG
 
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
+DEFAULT_TF_POINT_MODE = "direct"
+
 
 def parse_args(argv=None) -> argparse.Namespace:
     root = Path(PROJECT_ROOT)
@@ -29,7 +32,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     add_ros_topic_args(parser)
     parser.add_argument("--base-frame", default="base_link")
     parser.add_argument("--tool-frame", default="tool0")
-    parser.add_argument("--camera-frame", default="camera_link")
+    parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)
     parser.add_argument("--tf-timeout", type=float, default=2.0)
     parser.add_argument("--tool0-position", nargs=3, type=float, default=None)
     parser.add_argument(
@@ -84,8 +87,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--tf-point-mode",
         choices=("optical-to-camera-link", "direct"),
-        default="optical-to-camera-link",
-        help="Depth deprojection returns optical XYZ. Use optical-to-camera-link with base<-camera_link TF.",
+        default=DEFAULT_TF_POINT_MODE,
+        help=(
+            "Depth deprojection returns optical XYZ. Use direct with "
+            "base_link<-camera_color_optical_frame TF; optical-to-camera-link "
+            "is legacy for base_link<-camera_link TF."
+        ),
     )
     parser.add_argument("--show-depth", action="store_true")
     return parser.parse_args(argv)

@@ -5,6 +5,8 @@ import os
 
 from .constants import PROJECT_ROOT
 
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a per-block closed-loop stack demo.")
     parser.add_argument("--instruction", default="把积木按指定顺序叠起来")
@@ -60,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--detector-device", default="cuda:0")
     parser.add_argument("--tf-json", default="/tmp/scene_tf_base_camera.json")
     parser.add_argument("--base-frame", default="base_link")
-    parser.add_argument("--camera-frame", default="camera_link")
+    parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)
     parser.add_argument("--tool-frame", default="tool0")
     parser.add_argument("--ready-pose-json", default="config/rectangle_ready_pose.json")
     parser.add_argument("--init-stable-wait-s", type=float, default=1.0)

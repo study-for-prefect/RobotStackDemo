@@ -139,7 +139,7 @@ def deproject_depth_bbox(depth_frame, intrinsics, bbox, stride=1, max_depth_m=2.
     return np.asarray(points, dtype=float)
 
 
-def transform_points(points, matrix=None, point_mode="optical-to-camera-link"):
+def transform_points(points, matrix=None, point_mode="direct"):
     points = np.asarray(points, dtype=float)
     if not len(points):
         return points.reshape((-1, 3))
@@ -169,7 +169,7 @@ def project_mask_to_plane_height(
     *,
     stride=1,
     transform_matrix=None,
-    point_mode="optical-to-camera-link",
+    point_mode="direct",
 ):
     mask_bool = np.asarray(mask_bool, dtype=bool)
     bounds = mask_bounds(mask_bool)
@@ -257,7 +257,7 @@ def build_object_pointcloud(
     max_depth_m=2.0,
     mask_erode_px=2,
     transform_matrix=None,
-    point_mode="optical-to-camera-link",
+    point_mode="direct",
     plane=None,
     min_height_m=0.006,
     max_height_m=0.50,

@@ -5,6 +5,8 @@ import sys
 
 from .constants import DEFAULT_OUTPUT_DIR
 
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Move to a hover-only calibration pose above a detected block.")
     parser.add_argument("--label", required=True, help="Target label substring, e.g. green, red, yellow.")
@@ -13,7 +15,7 @@ def parse_args():
     parser.add_argument("--use-tf", action="store_true")
     parser.add_argument("--tf-json", default="/tmp/scene_tf_base_camera.json")
     parser.add_argument("--base-frame", default="base_link")
-    parser.add_argument("--camera-frame", default="camera_link")
+    parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)
     parser.add_argument("--tool-frame", default="tool0")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--yes", action="store_true")

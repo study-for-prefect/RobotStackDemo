@@ -12,6 +12,7 @@ from robot_scene_pipeline.depth_geometry import (
 )
 from robot_scene_pipeline.tabletop_geometry import attach_tabletop_geometry
 from robot_scene_pipeline.tf_transform import (
+    DEFAULT_TF_POINT_MODE,
     attach_base_coordinates,
     resolved_transform_matrix,
     transform_summary,
@@ -63,7 +64,7 @@ def run_one_sample(args, detector, sample_index, session):
             args.camera_frame,
             args.tf_timeout,
             getattr(args, "tf_json", ""),
-            getattr(args, "tf_point_mode", "optical-to-camera-link"),
+            getattr(args, "tf_point_mode", DEFAULT_TF_POINT_MODE),
         )
         transform_matrix = resolved_transform_matrix(transform)
         tf_payload.update({"status": "ok", "transform": transform_summary(transform)})

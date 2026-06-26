@@ -83,6 +83,7 @@ def print_missing_target(stage, args, private_state_path):
 
 
 def camera_vector_to_base(tf_json_path, camera_vector):
+    """Rotate a vector from the TF JSON child frame into base_link."""
     payload = load_json(tf_json_path)
     matrix = payload.get("matrix_4x4")
     if not isinstance(matrix, list) or len(matrix) < 3:
@@ -94,6 +95,4 @@ def camera_vector_to_base(tf_json_path, camera_vector):
 
 
 def camera_optical_vector_to_base(tf_json_path, optical_vector):
-    x_opt, y_opt, z_opt = [float(value) for value in optical_vector]
-    camera_link_vector = [z_opt, -x_opt, -y_opt]
-    return camera_vector_to_base(tf_json_path, camera_link_vector)
+    return camera_vector_to_base(tf_json_path, [float(value) for value in optical_vector])

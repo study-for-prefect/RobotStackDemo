@@ -31,12 +31,15 @@ Verify the TF chain after the robot driver or `robot_state_publisher` is running
 ```bash
 python -m robot_scene_pipeline.tf_transform \
   --base-frame base_link \
-  --camera-frame camera_link
+  --camera-frame camera_color_optical_frame
 ```
 
-The `--camera-frame` must match the coordinate convention of the 3D points from
-RealSense deprojection. If the calibration uses ROS optical-frame axes, publish
-and use an optical frame such as `camera_color_optical_frame`.
+The default RGB-D topic path uses `/aligned_depth_to_color` and color
+`camera_info`, so RealSense deprojection produces points in
+`camera_color_optical_frame`. Use `base_link <- camera_color_optical_frame`
+directly and keep `--tf-point-mode direct`. Do not manually convert optical XYZ
+to `camera_link` unless you are intentionally running the legacy
+`base_link <- camera_link` path.
 
 ## Offline Detector Test
 
@@ -97,7 +100,7 @@ Use TF to add base-frame coordinates:
 conda run -n scene_graph_benchmark python -m robot_scene_pipeline.snapshot_pipeline \
   --use-tf \
   --base-frame base_link \
-  --camera-frame camera_link \
+  --camera-frame camera_color_optical_frame \
   --instruction "把绿色方块放到红色方块左边" \
   --output-dir /tmp/robot_scene_pipeline
 ```
@@ -108,7 +111,8 @@ Estimate the tabletop plane and per-object point-cloud dimensions/yaw:
 conda run -n scene_graph_benchmark python -m robot_scene_pipeline.snapshot_pipeline \
   --use-tf \
   --tf-json /tmp/scene_tf_base_camera.json \
-  --tf-point-mode optical-to-camera-link \
+  --camera-frame camera_color_optical_frame \
+  --tf-point-mode direct \
   --estimate-tabletop \
   --skip-llm \
   --output-dir /tmp/robot_scene_geometry
@@ -127,7 +131,7 @@ python3 tools/workflows/stack_demo_pipeline.py \
 The integrated flow is:
 
 1. Move to the configured ready pose and open the gripper.
-2. Refresh `base_link <- camera_link` TF.
+2. Refresh `base_link <- camera_color_optical_frame` TF.
 3. Capture the first RGB-D snapshot, estimate tabletop geometry/yaw, run the
    LLM, and compile `robot_execution_plan.json`.
 4. Read the first planned `pick` target from the LLM plan and build a

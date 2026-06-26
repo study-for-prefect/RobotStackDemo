@@ -7,14 +7,26 @@ import time
 import numpy as np
 
 
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
+DEFAULT_TF_POINT_MODE = "direct"
+
+
 def add_tf_args(parser):
     parser.add_argument("--use-tf", action="store_true", help="Transform camera 3D points into the robot base frame.")
     parser.add_argument("--base-frame", default="base_link")
-    parser.add_argument("--camera-frame", default="camera_link")
+    parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)
     parser.add_argument("--tf-timeout", type=float, default=2.0)
-    # 新增绕过 ROS2 动态库的 JSON 桥接参数与坐标系修正模式
     parser.add_argument("--tf-json", default="/tmp/scene_tf_base_camera.json", help="Bypass ROS2 rclpy by reading static JSON.")
-    parser.add_argument("--tf-point-mode", choices=("direct", "optical-to-camera-link"), default="optical-to-camera-link")
+    parser.add_argument(
+        "--tf-point-mode",
+        choices=("direct", "optical-to-camera-link"),
+        default=DEFAULT_TF_POINT_MODE,
+        help=(
+            "How to interpret deprojected depth points before applying TF. "
+            "Use direct with base_link<-camera_color_optical_frame; "
+            "optical-to-camera-link is kept only for legacy base_link<-camera_link JSON."
+        ),
+    )
 
 
 def quaternion_to_matrix(x, y, z, w):
@@ -88,7 +100,7 @@ def lookup_transform_matrix(base_frame, camera_frame, timeout_sec):
         rclpy.shutdown()
 
 
-def attach_base_coordinates(detections, base_frame, camera_frame, timeout_sec, tf_json="", point_mode="optical-to-camera-link"):
+def attach_base_coordinates(detections, base_frame, camera_frame, timeout_sec, tf_json="", point_mode=DEFAULT_TF_POINT_MODE):
     if tf_json:
         if not os.path.exists(tf_json):
             raise RuntimeError(
@@ -112,8 +124,10 @@ def attach_base_coordinates(detections, base_frame, camera_frame, timeout_sec, t
         if point_mode == "optical-to-camera-link":
             x_opt, y_opt, z_opt = point
             point_tf = [z_opt, -x_opt, -y_opt]
-        else:
+        elif point_mode == "direct":
             point_tf = point
+        else:
+            raise ValueError("Unsupported point mode: {}".format(point_mode))
 
         det["center_3d_base_m"] = apply_transform(matrix, point_tf)
         det["base_coordinate_valid"] = True
@@ -125,7 +139,7 @@ def transform_summary(transform):
     if isinstance(transform, dict):
         return {
             "parent_frame": transform.get("parent_frame", "base_link"),
-            "child_frame": transform.get("child_frame", "camera_link"),
+            "child_frame": transform.get("child_frame", DEFAULT_CAMERA_FRAME),
             "translation": transform.get("translation", [0.0, 0.0, 0.0]),
             "matrix_4x4": transform.get("matrix_4x4", [])
         }
@@ -142,7 +156,7 @@ def transform_summary(transform):
 def parse_args():
     parser = argparse.ArgumentParser(description="Verify the TF chain used by robot_scene_pipeline.")
     parser.add_argument("--base-frame", default="base_link")
-    parser.add_argument("--camera-frame", default="camera_link")
+    parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)
     parser.add_argument("--tf-timeout", type=float, default=5.0)
     return parser.parse_args()
 

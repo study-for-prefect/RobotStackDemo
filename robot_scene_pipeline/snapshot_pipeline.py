@@ -22,7 +22,13 @@ from .llm_scene_reasoner import (
 from .realsense_capture import add_realsense_args, capture_rgbd
 from .ros_topic_capture import capture_rgbd_from_ros_topics
 from .tabletop_geometry import add_tabletop_args, attach_tabletop_geometry
-from .tf_transform import add_tf_args, attach_base_coordinates, resolved_transform_matrix, transform_summary
+from .tf_transform import (
+    DEFAULT_TF_POINT_MODE,
+    add_tf_args,
+    attach_base_coordinates,
+    resolved_transform_matrix,
+    transform_summary,
+)
 
 
 DEFAULT_OUT = "/tmp/robot_scene_pipeline"
@@ -233,7 +239,7 @@ def main():
             args.camera_frame,
             args.tf_timeout,
             getattr(args, "tf_json", ""),
-            getattr(args, "tf_point_mode", "optical-to-camera-link")
+            getattr(args, "tf_point_mode", DEFAULT_TF_POINT_MODE)
         )
         transform_matrix = resolved_transform_matrix(transform)
         tf_payload.update({"status": "ok", "transform": transform_summary(transform)})

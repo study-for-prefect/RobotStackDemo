@@ -19,12 +19,13 @@ from tf2_ros import Buffer, TransformListener
 
 
 DEFAULT_OUTPUT = "/tmp/scene_tf_base_camera.json"
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Write base<-camera TF as JSON.")
     parser.add_argument("--base-frame", default="base_link")
-    parser.add_argument("--camera-frame", default="camera_link")
+    parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)
     parser.add_argument("--tool-frame", default="tool0")
     parser.add_argument("--require-tool", action="store_true")
     parser.add_argument(

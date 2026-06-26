@@ -6,6 +6,7 @@ import numpy as np
 from robot_scene_pipeline.ros_topic_capture import CameraIntrinsics
 from robot_scene_pipeline.tabletop_geometry import deproject_depth_roi
 from robot_scene_pipeline.instance_pointcloud import transform_points
+from robot_scene_pipeline.tf_transform import apply_transform
 from tools.monitoring.realtime_monitor.transforms import optical_to_camera_link
 
 
@@ -43,6 +44,23 @@ class CameraFrameTransformTests(unittest.TestCase):
 
         np.testing.assert_allclose(converted, [[0.80, -0.10, -0.20]], atol=1e-12)
         np.testing.assert_allclose(direct, converted, atol=1e-12)
+
+    def test_pointcloud_transform_default_is_direct_optical_frame(self):
+        points_optical = np.array([[0.10, 0.20, 0.80]], dtype=float)
+        identity = np.eye(4, dtype=float)
+
+        transformed = transform_points(points_optical, matrix=identity)
+
+        np.testing.assert_allclose(transformed, points_optical, atol=1e-12)
+
+    def test_direct_tf_uses_optical_frame_matrix_without_axis_conversion(self):
+        matrix = np.eye(4, dtype=float)
+        matrix[:3, 3] = [0.3, -0.2, 0.1]
+        point_optical = [0.10, 0.20, 0.80]
+
+        transformed = apply_transform(matrix, point_optical)
+
+        np.testing.assert_allclose(transformed, [0.40, 0.0, 0.90], atol=1e-12)
 
     def test_ros_topic_intrinsics_do_not_call_realsense_sdk_deproject(self):
         class NativeIntrinsics:

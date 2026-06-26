@@ -13,6 +13,7 @@ from .instance_pointcloud import (
     resize_mask_to_image,
     transform_points,
 )
+from .tf_transform import DEFAULT_TF_POINT_MODE
 
 
 def add_tabletop_args(parser):
@@ -115,20 +116,6 @@ def deproject_depth_roi(depth_frame, intrinsics, roi=None, stride=1, max_depth_m
     if not points:
         return np.empty((0, 3), dtype=float)
     return np.asarray(points, dtype=float)
-
-
-def transform_points(points, matrix=None, point_mode="optical-to-camera-link"):
-    points = np.asarray(points, dtype=float)
-    if not len(points):
-        return points.reshape((-1, 3))
-    if matrix is None:
-        return points.copy()
-    if point_mode == "optical-to-camera-link":
-        points = np.column_stack([points[:, 2], -points[:, 0], -points[:, 1]])
-    elif point_mode != "direct":
-        raise ValueError("Unsupported point mode: {}".format(point_mode))
-    homogeneous = np.column_stack([points, np.ones(len(points), dtype=float)])
-    return homogeneous.dot(np.asarray(matrix, dtype=float).T)[:, :3]
 
 
 def orient_normal(normal, orientation_hint):
@@ -483,7 +470,7 @@ def estimate_local_support_surface(
     top_z_base,
     *,
     transform_matrix=None,
-    point_mode="optical-to-camera-link",
+    point_mode=DEFAULT_TF_POINT_MODE,
     max_depth_m=2.0,
     stride=2,
     expand_px=24,
@@ -683,7 +670,7 @@ def attach_tabletop_geometry(detections, depth_frame, intrinsics, args, transfor
     plane_points = transform_points(
         plane_points_optical,
         matrix=transform_matrix,
-        point_mode=getattr(args, "tf_point_mode", "optical-to-camera-link"),
+        point_mode=getattr(args, "tf_point_mode", DEFAULT_TF_POINT_MODE),
     )
     if not len(plane_points):
         raise ValueError("No valid depth points were available for table plane estimation.")
@@ -714,7 +701,7 @@ def attach_tabletop_geometry(detections, depth_frame, intrinsics, args, transfor
             max_depth_m=args.plane_max_depth_m,
             mask_erode_px=getattr(args, "object_mask_erode_px", 2),
             transform_matrix=transform_matrix,
-            point_mode=getattr(args, "tf_point_mode", "optical-to-camera-link"),
+            point_mode=getattr(args, "tf_point_mode", DEFAULT_TF_POINT_MODE),
             plane=plane,
             min_height_m=args.object_min_height_m,
             max_height_m=args.object_max_height_m,
@@ -760,7 +747,7 @@ def attach_tabletop_geometry(detections, depth_frame, intrinsics, args, transfor
                 det,
                 geometry["top_z_base_m"],
                 transform_matrix=transform_matrix,
-                point_mode=getattr(args, "tf_point_mode", "optical-to-camera-link"),
+                point_mode=getattr(args, "tf_point_mode", DEFAULT_TF_POINT_MODE),
                 max_depth_m=args.plane_max_depth_m,
                 stride=args.object_point_stride,
                 expand_px=getattr(args, "object_support_ring_expand_px", 24),

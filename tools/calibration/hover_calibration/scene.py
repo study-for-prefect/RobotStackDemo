@@ -2,6 +2,8 @@
 
 import json
 
+DEFAULT_TF_POINT_MODE = "direct"
+
 def snapshot_command(args, snapshot_dir):
     command = [
         "conda", "run", "-n", args.conda_env, "python", "-m",
@@ -12,7 +14,7 @@ def snapshot_command(args, snapshot_dir):
         "--detector-config", args.detector_config,
         "--base-frame", args.base_frame,
         "--camera-frame", args.camera_frame,
-        "--tf-point-mode", "optical-to-camera-link",
+        "--tf-point-mode", DEFAULT_TF_POINT_MODE,
         "--object-mask-erode-px", str(args.object_mask_erode_px),
         "--object-mask-dilate-fallback-px", str(args.object_mask_dilate_fallback_px),
         "--object-min-points", str(args.object_min_points),

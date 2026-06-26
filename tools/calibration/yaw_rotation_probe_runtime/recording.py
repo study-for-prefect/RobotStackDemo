@@ -251,7 +251,7 @@ def build_record(
         "base_frame": args.base_frame,
         "tool_frame": args.tool_frame,
         "camera_frame": args.camera_frame,
-        "point_camera_frame": args.camera_frame if args.tf_point_mode == "optical-to-camera-link" else "camera_optical_frame",
+        "point_camera_frame": args.camera_frame,
         "tool0_position": [float(v) for v in tool_position],
         "tool0_quat": [float(v) for v in tool_quat],
         "tool0_pose": pose_payload(tool_position, tool_quat),

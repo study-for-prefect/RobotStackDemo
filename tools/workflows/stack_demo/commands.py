@@ -9,6 +9,9 @@ from tools.workflows.two_stage_visual_pick import camera_optical_vector_to_base
 
 from .constants import PROJECT_ROOT
 
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
+DEFAULT_TF_POINT_MODE = "direct"
+
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -28,7 +31,7 @@ def tf_lookup_command(args, require_tool=True):
         "--base-frame",
         getattr(args, "base_frame", "base_link"),
         "--camera-frame",
-        getattr(args, "camera_frame", "camera_link"),
+        getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME),
         "--tool-frame",
         getattr(args, "tool_frame", "tool0"),
         "--timeout",
@@ -209,8 +212,8 @@ def snapshot_command(args, output_dir, stack_reasoning=False):
         "--output-dir", output_dir,
         "--use-tf", "--tf-json", args.tf_json,
         "--base-frame", getattr(args, "base_frame", "base_link"),
-        "--camera-frame", getattr(args, "camera_frame", "camera_link"),
-        "--tf-point-mode", "optical-to-camera-link",
+        "--camera-frame", getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME),
+        "--tf-point-mode", DEFAULT_TF_POINT_MODE,
         "--estimate-tabletop",
         "--detector-weight", args.detector_weight,
         "--score-thresh", str(args.score_thresh),
