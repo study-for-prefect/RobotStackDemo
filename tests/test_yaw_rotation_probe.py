@@ -14,6 +14,10 @@ from tools.calibration.yaw_rotation_probe_runtime.record_modes import (
     pose_check,
     yaw_motion_arg_variants,
 )
+from tools.calibration.yaw_rotation_probe_runtime.recording import (
+    select_detection,
+    selection_failure_reason,
+)
 from tools.calibration.yaw_rotation_probe_runtime.pose_math import (
     build_yaw_targets,
     quaternion_xyzw_to_matrix,
@@ -209,6 +213,41 @@ class YawRotationProbeTests(unittest.TestCase):
     def test_default_pose_orientation_threshold_is_five_degrees(self):
         args = parse_args(["--output-dir", "/tmp/yaw_probe_args_test"])
         self.assertEqual(args.pose_check_orientation_deg, 5.0)
+
+    def test_select_detection_falls_back_to_single_base_valid_detection(self):
+        detections = [
+            {
+                "id": 3,
+                "label": "red_block",
+                "confidence": 0.91,
+                "area_px": 1200,
+                "point_base_xyz": [0.2, 0.1, 0.03],
+            }
+        ]
+
+        selected = select_detection(detections, "yellow")
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["id"], 3)
+        self.assertIn("selection_warning", selected)
+
+    def test_selection_failure_reason_reports_label_filter_mismatch(self):
+        detections = [
+            {
+                "id": 1,
+                "label": "red_block",
+                "point_base_xyz": [0.2, 0.1, 0.03],
+            },
+            {
+                "id": 2,
+                "label": "green_block",
+                "point_base_xyz": [0.3, 0.1, 0.03],
+            },
+        ]
+
+        reason = selection_failure_reason(detections, "yellow")
+
+        self.assertIn("none matches target label filter 'yellow'", reason)
 
     def test_yaw_motion_variants_include_pose_fallback(self):
         args = Namespace(

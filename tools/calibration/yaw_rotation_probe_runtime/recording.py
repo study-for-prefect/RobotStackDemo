@@ -170,13 +170,41 @@ def detect_objects(
 
 def select_detection(detections: List[Dict[str, object]], label_filter: str) -> Optional[Dict[str, object]]:
     label_filter = str(label_filter or "").strip().lower()
-    candidates = detections
+    base_candidates = [det for det in detections if det.get("point_base_xyz") is not None]
+    candidates = base_candidates
     if label_filter:
-        candidates = [det for det in detections if label_filter in str(det.get("label", "")).lower()]
-    candidates = [det for det in candidates if det.get("point_base_xyz") is not None]
+        candidates = [det for det in base_candidates if label_filter in str(det.get("label", "")).lower()]
+        if not candidates and len(base_candidates) == 1:
+            fallback = dict(base_candidates[0])
+            fallback["selection_warning"] = (
+                "target label filter '{}' matched no detections; selected the only base-valid detection".format(
+                    label_filter
+                )
+            )
+            return fallback
     if not candidates:
         return None
     return max(candidates, key=lambda det: (float(det.get("confidence", 0.0)), int(det.get("area_px", 0))))
+
+
+def selection_failure_reason(detections: List[Dict[str, object]], label_filter: str) -> str:
+    label_filter = str(label_filter or "").strip().lower()
+    base_candidates = [det for det in detections if det.get("point_base_xyz") is not None]
+    labels = sorted({str(det.get("label", "")) for det in detections})
+    if not detections:
+        return "no detections from model"
+    if not base_candidates:
+        return "detections exist but none has a valid base_link point; labels={}".format(labels)
+    if label_filter:
+        matching = [det for det in base_candidates if label_filter in str(det.get("label", "")).lower()]
+        if not matching:
+            return (
+                "base-valid detections exist but none matches target label filter '{}'; labels={}".format(
+                    label_filter,
+                    labels,
+                )
+            )
+    return "no selected detection with base_link point"
 
 
 def draw_detections(image: np.ndarray, detections: List[Dict[str, object]], selected_id: Optional[int]) -> None:
@@ -285,6 +313,7 @@ def build_record(
                 "depth_m",
                 "point_camera_frame",
                 "tf_point_mode",
+                "selection_warning",
             )
         },
         "target_pose": targets["targets"].get(stem),

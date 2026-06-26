@@ -22,6 +22,7 @@ from .recording import (
     lookup_pose,
     parse_record_yaw,
     select_detection,
+    selection_failure_reason,
 )
 
 
@@ -493,7 +494,7 @@ def capture_yaw_record(
             continue
 
         if selected is None:
-            last_error = "no selected detection with base_link point"
+            last_error = selection_failure_reason(detections, args.target_label_contains)
             continue
 
         record = build_record(
