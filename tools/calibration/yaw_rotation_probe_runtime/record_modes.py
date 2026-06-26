@@ -61,7 +61,7 @@ def current_pose_and_detection(
     frame: Any,
     ignore_zone: List[int],
     tf_timeout: float,
-) -> Tuple[Optional[Pose], Optional[Pose], Optional[Dict[str, object]], np.ndarray, Optional[str]]:
+) -> Tuple[Optional[Pose], Optional[Pose], Optional[Dict[str, object]], List[Dict[str, object]], np.ndarray, Optional[str]]:
     tf_error = None
     latest_tool_pose = None
     latest_camera_pose = None
@@ -112,7 +112,7 @@ def current_pose_and_detection(
             (0, 0, 255),
             2,
         )
-    return latest_tool_pose, latest_camera_pose, selected, annotated, tf_error
+    return latest_tool_pose, latest_camera_pose, selected, detections, annotated, tf_error
 
 
 def write_motion_command_preview(args: Namespace, targets: Dict[str, object]) -> str:
@@ -248,10 +248,15 @@ def build_pose_failed_record(
         "base_frame": args.base_frame,
         "tool_frame": args.tool_frame,
         "camera_frame": args.camera_frame,
+        "tf_point_mode": getattr(args, "tf_point_mode", "direct"),
         "target_pose": targets["targets"].get(stem),
         "tool0_position": [float(v) for v in tool_pose[0]],
         "tool0_quat": [float(v) for v in tool_pose[1]],
         "tool0_pose": pose_payload(tool_pose[0], tool_pose[1]),
+        "camera_pose_frame": args.camera_frame,
+        "camera_frame_position": [float(v) for v in camera_pose[0]],
+        "camera_frame_quat": [float(v) for v in camera_pose[1]],
+        "camera_frame_pose": pose_payload(camera_pose[0], camera_pose[1]),
         "camera_link_position": [float(v) for v in camera_pose[0]],
         "camera_link_quat": [float(v) for v in camera_pose[1]],
         "camera_link_pose": pose_payload(camera_pose[0], camera_pose[1]),
@@ -273,6 +278,8 @@ def build_missed_record(
     targets: Dict[str, object],
     attempts: int,
     check: Optional[Dict[str, object]] = None,
+    tf_error: Optional[str] = None,
+    detections: Optional[List[Dict[str, object]]] = None,
 ) -> Dict[str, object]:
     stem = yaw_file_stem(yaw_deg)
     record = {
@@ -286,20 +293,29 @@ def build_missed_record(
         "base_frame": args.base_frame,
         "tool_frame": args.tool_frame,
         "camera_frame": args.camera_frame,
+        "tf_point_mode": getattr(args, "tf_point_mode", "direct"),
+        "camera_pose_frame": args.camera_frame,
         "target_pose": targets["targets"].get(stem),
         "tool0_position": None,
         "tool0_quat": None,
+        "camera_frame_position": None,
+        "camera_frame_quat": None,
         "camera_link_position": None,
         "camera_link_quat": None,
         "point_camera_xyz": None,
         "point_base_xyz": None,
         "pose_check": check,
+        "tf_error": tf_error,
+        "detections": detections or [],
     }
     if tool_pose is not None:
         record["tool0_position"] = [float(v) for v in tool_pose[0]]
         record["tool0_quat"] = [float(v) for v in tool_pose[1]]
         record["tool0_pose"] = pose_payload(tool_pose[0], tool_pose[1])
     if camera_pose is not None:
+        record["camera_frame_position"] = [float(v) for v in camera_pose[0]]
+        record["camera_frame_quat"] = [float(v) for v in camera_pose[1]]
+        record["camera_frame_pose"] = pose_payload(camera_pose[0], camera_pose[1])
         record["camera_link_position"] = [float(v) for v in camera_pose[0]]
         record["camera_link_quat"] = [float(v) for v in camera_pose[1]]
         record["camera_link_pose"] = pose_payload(camera_pose[0], camera_pose[1])
@@ -427,12 +443,14 @@ def capture_yaw_record(
     last_camera_pose = None
     last_annotated = None
     last_pose_check = None
+    last_tf_error = None
+    last_detections: List[Dict[str, object]] = []
     attempts = max(1, int(args.record_attempts))
     target_pose = targets["targets"].get(yaw_file_stem(yaw_deg))  # type: ignore[index]
     for attempt in range(attempts):
         frame = subscriber.wait_for_frame(float(args.frame_timeout_ms) / 1000.0, last_seq, require_depth=True)
         last_seq = frame.color_seq
-        tool_pose, camera_pose, selected, annotated, tf_error = current_pose_and_detection(
+        tool_pose, camera_pose, selected, detections, annotated, tf_error = current_pose_and_detection(
             args,
             model,
             subscriber,
@@ -444,6 +462,8 @@ def capture_yaw_record(
         last_tool_pose = tool_pose
         last_camera_pose = camera_pose
         last_annotated = annotated
+        last_tf_error = tf_error
+        last_detections = detections
         status = "AUTO yaw={:+.1f} attempt={}/{} selected={}".format(
             float(yaw_deg),
             attempt + 1,
@@ -537,6 +557,8 @@ def capture_yaw_record(
         targets,
         attempts,
         check=last_pose_check,
+        tf_error=last_tf_error,
+        detections=last_detections,
     )
     output_path = os.path.join(args.output_dir, stem + "_missed.json")
     write_json(output_path, record)
@@ -624,7 +646,7 @@ def run_manual_record_loop(
         )
         pending_frame = None
         last_seq = frame.color_seq
-        tool_pose, camera_pose, selected, annotated, _tf_error = current_pose_and_detection(
+        tool_pose, camera_pose, selected, _detections, annotated, _tf_error = current_pose_and_detection(
             args,
             model,
             subscriber,

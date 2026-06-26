@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from robot_scene_pipeline.depth_geometry import deproject_pixel_to_point
+from robot_scene_pipeline.tf_transform import validate_point_mode_for_frame
 from tools.monitoring.realtime_monitor.display import (
     box_intersection_area,
     draw_lines,
@@ -103,6 +104,8 @@ def detect_objects(
     transform_base_camera: Optional[np.ndarray],
     ignore_zone: List[int],
 ) -> List[Dict[str, object]]:
+    tf_point_mode = getattr(args, "tf_point_mode", "direct")
+    validate_point_mode_for_frame(args.camera_frame, tf_point_mode)
     results = model.predict(
         source=frame_bgr,
         conf=args.conf,
@@ -141,7 +144,7 @@ def detect_objects(
                 deproject_pixel_to_point(intrinsics, [float(cx), float(cy)], float(depth_m)),
                 dtype=float,
             )
-            point_camera = optical_to_camera_link(point_optical) if args.tf_point_mode == "optical-to-camera-link" else point_optical
+            point_camera = optical_to_camera_link(point_optical) if tf_point_mode == "optical-to-camera-link" else point_optical
             if transform_base_camera is not None:
                 point_base = transform_point(transform_base_camera, point_camera)
 
@@ -155,6 +158,8 @@ def detect_objects(
                 "center_px": [int(cx), int(cy)],
                 "area_px": int(area),
                 "depth_m": float(depth_m),
+                "point_camera_frame": args.camera_frame,
+                "tf_point_mode": tf_point_mode,
                 "point_optical_xyz": finite_list(point_optical),
                 "point_camera_xyz": finite_list(point_camera),
                 "point_base_xyz": finite_list(point_base),
@@ -243,6 +248,7 @@ def build_record(
     tool_position, tool_quat = tool_pose
     camera_position, camera_quat = camera_pose
     stem = yaw_file_stem(yaw_deg)
+    tf_point_mode = getattr(args, "tf_point_mode", "direct")
     return {
         "schema_version": "yaw_rotation_record_v1",
         "recorded_at_unix": time.time(),
@@ -251,10 +257,15 @@ def build_record(
         "base_frame": args.base_frame,
         "tool_frame": args.tool_frame,
         "camera_frame": args.camera_frame,
+        "tf_point_mode": tf_point_mode,
         "point_camera_frame": args.camera_frame,
         "tool0_position": [float(v) for v in tool_position],
         "tool0_quat": [float(v) for v in tool_quat],
         "tool0_pose": pose_payload(tool_position, tool_quat),
+        "camera_pose_frame": args.camera_frame,
+        "camera_frame_position": [float(v) for v in camera_position],
+        "camera_frame_quat": [float(v) for v in camera_quat],
+        "camera_frame_pose": pose_payload(camera_position, camera_quat),
         "camera_link_position": [float(v) for v in camera_position],
         "camera_link_quat": [float(v) for v in camera_quat],
         "camera_link_pose": pose_payload(camera_position, camera_quat),
@@ -263,7 +274,18 @@ def build_record(
         "point_optical_xyz": selected.get("point_optical_xyz"),
         "detection": {
             key: selected.get(key)
-            for key in ("id", "label", "label_id", "confidence", "bbox", "center_px", "area_px", "depth_m")
+            for key in (
+                "id",
+                "label",
+                "label_id",
+                "confidence",
+                "bbox",
+                "center_px",
+                "area_px",
+                "depth_m",
+                "point_camera_frame",
+                "tf_point_mode",
+            )
         },
         "target_pose": targets["targets"].get(stem),
         "checks": {
