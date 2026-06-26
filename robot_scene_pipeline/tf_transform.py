@@ -11,6 +11,58 @@ DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_POINT_MODE = "direct"
 
 
+def normalize_frame_name(frame):
+    return str(frame or "").strip().lstrip("/")
+
+
+def frame_matches(actual, requested):
+    actual = normalize_frame_name(actual)
+    requested = normalize_frame_name(requested)
+    return bool(actual and requested and (actual == requested or actual.endswith("/" + requested)))
+
+
+def frame_leaf(frame):
+    return normalize_frame_name(frame).split("/")[-1]
+
+
+def validate_point_mode_for_frame(camera_frame, point_mode):
+    frame = frame_leaf(camera_frame)
+    if point_mode == "direct":
+        if not frame.endswith("optical_frame"):
+            raise RuntimeError(
+                "--tf-point-mode direct requires an optical camera frame because depth deprojection returns "
+                "optical XYZ. Got --camera-frame {}.".format(camera_frame)
+            )
+    elif point_mode == "optical-to-camera-link":
+        if frame != "camera_link":
+            raise RuntimeError(
+                "--tf-point-mode optical-to-camera-link requires --camera-frame camera_link. "
+                "Got --camera-frame {}.".format(camera_frame)
+            )
+    else:
+        raise ValueError("Unsupported point mode: {}".format(point_mode))
+
+
+def validate_tf_json_frames(payload, base_frame, camera_frame, tf_json):
+    parent_frame = payload.get("parent_frame")
+    child_frame = payload.get("child_frame")
+    if parent_frame is not None and not frame_matches(parent_frame, base_frame):
+        raise RuntimeError(
+            "TF JSON parent_frame mismatch in {}: expected {}, got {}. "
+            "Regenerate it with tools/robot/tf_lookup_json.py using the same --base-frame.".format(
+                tf_json, base_frame, parent_frame
+            )
+        )
+    if child_frame is not None and not frame_matches(child_frame, camera_frame):
+        raise RuntimeError(
+            "TF JSON child_frame mismatch in {}: expected {}, got {}. "
+            "Regenerate it, for example: python3 tools/robot/tf_lookup_json.py "
+            "--base-frame {} --camera-frame {} --output {} --once".format(
+                tf_json, camera_frame, child_frame, base_frame, camera_frame, tf_json
+            )
+        )
+
+
 def add_tf_args(parser):
     parser.add_argument("--use-tf", action="store_true", help="Transform camera 3D points into the robot base frame.")
     parser.add_argument("--base-frame", default="base_link")
@@ -101,6 +153,7 @@ def lookup_transform_matrix(base_frame, camera_frame, timeout_sec):
 
 
 def attach_base_coordinates(detections, base_frame, camera_frame, timeout_sec, tf_json="", point_mode=DEFAULT_TF_POINT_MODE):
+    validate_point_mode_for_frame(camera_frame, point_mode)
     if tf_json:
         if not os.path.exists(tf_json):
             raise RuntimeError(
@@ -109,6 +162,7 @@ def attach_base_coordinates(detections, base_frame, camera_frame, timeout_sec, t
             )
         with open(tf_json, "r", encoding="utf-8") as f:
             payload = json.load(f)
+        validate_tf_json_frames(payload, base_frame, camera_frame, tf_json)
         matrix = np.array(payload["matrix_4x4"], dtype=float)
         transform_obj = payload
     else:

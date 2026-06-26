@@ -1,3 +1,5 @@
+import json
+import tempfile
 import unittest
 from unittest import mock
 
@@ -6,7 +8,7 @@ import numpy as np
 from robot_scene_pipeline.ros_topic_capture import CameraIntrinsics
 from robot_scene_pipeline.tabletop_geometry import deproject_depth_roi
 from robot_scene_pipeline.instance_pointcloud import transform_points
-from robot_scene_pipeline.tf_transform import apply_transform
+from robot_scene_pipeline.tf_transform import apply_transform, attach_base_coordinates
 from tools.monitoring.realtime_monitor.transforms import optical_to_camera_link
 
 
@@ -61,6 +63,37 @@ class CameraFrameTransformTests(unittest.TestCase):
         transformed = apply_transform(matrix, point_optical)
 
         np.testing.assert_allclose(transformed, [0.40, 0.0, 0.90], atol=1e-12)
+
+    def test_tf_json_child_frame_must_match_requested_camera_frame(self):
+        payload = {
+            "parent_frame": "base_link",
+            "child_frame": "camera_link",
+            "matrix_4x4": np.eye(4, dtype=float).tolist(),
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as tmp:
+            json.dump(payload, tmp)
+            tmp.flush()
+
+            with self.assertRaisesRegex(RuntimeError, "child_frame mismatch"):
+                attach_base_coordinates(
+                    [{"center_3d_m": [0.10, 0.20, 0.80]}],
+                    "base_link",
+                    "camera_color_optical_frame",
+                    0.1,
+                    tf_json=tmp.name,
+                    point_mode="direct",
+                )
+
+    def test_direct_point_mode_rejects_camera_link_frame(self):
+        with self.assertRaisesRegex(RuntimeError, "direct requires an optical camera frame"):
+            attach_base_coordinates(
+                [{"center_3d_m": [0.10, 0.20, 0.80]}],
+                "base_link",
+                "camera_link",
+                0.1,
+                tf_json="",
+                point_mode="direct",
+            )
 
     def test_ros_topic_intrinsics_do_not_call_realsense_sdk_deproject(self):
         class NativeIntrinsics:
