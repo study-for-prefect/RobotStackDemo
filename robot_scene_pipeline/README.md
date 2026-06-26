@@ -97,6 +97,16 @@ conda run -n scene_graph_benchmark python -m robot_scene_pipeline.snapshot_pipel
 Use TF to add base-frame coordinates:
 
 ```bash
+python3 tools/robot/tf_lookup_json.py \
+  --base-frame base_link \
+  --camera-frame camera_color_optical_frame \
+  --tool-frame tool0 \
+  --require-tool \
+  --timeout 8 \
+  --output /tmp/scene_tf_base_color_optical.json
+```
+
+```bash
 conda run -n scene_graph_benchmark python -m robot_scene_pipeline.snapshot_pipeline \
   --use-tf \
   --base-frame base_link \
