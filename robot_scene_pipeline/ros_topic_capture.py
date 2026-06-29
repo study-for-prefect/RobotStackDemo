@@ -26,6 +26,7 @@ class CameraIntrinsics:
     fy: float
     ppx: float
     ppy: float
+    frame_id: str = ""
     model: str = "plumb_bob"
     coeffs: tuple = ()
 
@@ -140,6 +141,7 @@ def intrinsics_from_camera_info(msg: Any) -> CameraIntrinsics:
         fy=float(k[4]),
         ppx=float(k[2]),
         ppy=float(k[5]),
+        frame_id=str(getattr(getattr(msg, "header", None), "frame_id", "") or ""),
         model=str(getattr(msg, "distortion_model", "plumb_bob")),
         coeffs=tuple(float(value) for value in getattr(msg, "d", [])),
     )
@@ -234,6 +236,9 @@ class RosRgbdSubscriber:
         self.color_seq = 0
         self.color_stamp = None
         self.depth_stamp = None
+        self.color_frame_id = ""
+        self.depth_frame_id = ""
+        self.camera_info_frame_id = ""
         self.last_error = None
 
         self.node.create_subscription(Image, self.color_topic, self._on_color, qos_profile_sensor_data)
@@ -249,6 +254,7 @@ class RosRgbdSubscriber:
         try:
             self.color_bgr = decode_color_image(msg)
             self.color_stamp = _stamp_to_float(msg.header)
+            self.color_frame_id = str(getattr(msg.header, "frame_id", "") or "")
             self.color_seq += 1
             self.last_error = None
         except Exception as exc:
@@ -258,6 +264,7 @@ class RosRgbdSubscriber:
         try:
             self.depth_frame = TopicDepthFrame(decode_depth_image_m(msg, self.depth_scale_m))
             self.depth_stamp = _stamp_to_float(msg.header)
+            self.depth_frame_id = str(getattr(msg.header, "frame_id", "") or "")
             self.last_error = None
         except Exception as exc:
             self.last_error = "depth decode failed: {}".format(exc)
@@ -265,6 +272,7 @@ class RosRgbdSubscriber:
     def _on_camera_info(self, msg):
         try:
             self.intrinsics = intrinsics_from_camera_info(msg)
+            self.camera_info_frame_id = self.intrinsics.frame_id
             self.last_error = None
         except Exception as exc:
             self.last_error = "camera_info decode failed: {}".format(exc)
@@ -318,6 +326,10 @@ class RosRgbdSubscriber:
             "depth_scale_m_per_unit": self.depth_scale_m,
             "color_stamp": self.color_stamp,
             "depth_stamp": self.depth_stamp,
+            "color_frame_id": self.color_frame_id,
+            "depth_frame_id": self.depth_frame_id,
+            "camera_info_frame_id": self.camera_info_frame_id,
+            "coordinate_frame": self.camera_info_frame_id or self.depth_frame_id or self.color_frame_id,
         }
         return RosRgbdFrame(
             frame_bgr=frame_bgr,

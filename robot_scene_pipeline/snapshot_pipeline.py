@@ -26,6 +26,7 @@ from .tf_transform import (
     DEFAULT_TF_POINT_MODE,
     add_tf_args,
     attach_base_coordinates,
+    frame_matches,
     resolved_transform_matrix,
     transform_summary,
 )
@@ -151,6 +152,44 @@ def capture_or_load_snapshot(args):
     return capture_rgbd(args)
 
 
+def _profile_coordinate_frame(used_profile, intrinsics):
+    frame = str((used_profile or {}).get("coordinate_frame") or "").strip()
+    if frame:
+        return frame
+    return str(getattr(intrinsics, "frame_id", "") or "").strip()
+
+
+def _sync_camera_frame_with_source(args, used_profile, intrinsics):
+    source_frame = _profile_coordinate_frame(used_profile, intrinsics)
+    if not source_frame or not getattr(args, "use_tf", False):
+        return
+    if getattr(args, "tf_point_mode", DEFAULT_TF_POINT_MODE) != "direct":
+        return
+    if not cli_flag_present("--tf-json"):
+        if frame_matches(source_frame, "camera_depth_optical_frame"):
+            args.tf_json = "/tmp/scene_tf_base_depth_optical.json"
+        elif frame_matches(source_frame, "camera_color_optical_frame"):
+            args.tf_json = "/tmp/scene_tf_base_color_optical.json"
+    camera_frame_was_explicit = cli_flag_present("--camera-frame")
+    if camera_frame_was_explicit:
+        if not frame_matches(source_frame, args.camera_frame):
+            raise RuntimeError(
+                "Point source frame is {}, but --camera-frame is {}. "
+                "With --tf-point-mode direct, regenerate/pass TF JSON for the same optical frame.".format(
+                    source_frame, args.camera_frame
+                )
+            )
+        return
+    if not frame_matches(source_frame, args.camera_frame):
+        print(
+            "[TF] camera_frame inferred from RGB-D source: {} -> {}".format(
+                args.camera_frame, source_frame
+            ),
+            flush=True,
+        )
+        args.camera_frame = source_frame
+
+
 def compile_execution_plan(args, decision_text, private_state, output_path):
     from tools.planning.decision_to_execution import compile_plan
 
@@ -203,6 +242,7 @@ def main():
     execution_plan_path = os.path.join(args.output_dir, "robot_execution_plan.json")
 
     frame_bgr, depth_frame, intrinsics, used_profile = capture_or_load_snapshot(args)
+    _sync_camera_frame_with_source(args, used_profile, intrinsics)
     cv2.imwrite(snapshot_path, frame_bgr)
     print("Saved snapshot: {}".format(snapshot_path), flush=True)
 

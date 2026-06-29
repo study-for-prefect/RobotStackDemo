@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from robot_scene_pipeline.depth_geometry import deproject_pixel_to_point
+from robot_scene_pipeline.tf_transform import frame_matches
 
 from .arguments import parse_args
 from .constants import PROJECT_ROOT
@@ -27,6 +28,47 @@ from .transforms import (
     transform_point,
 )
 from .stream import start_realtime_stream
+
+
+def _cli_flag_present(*flags: str) -> bool:
+    present = set(sys.argv[1:])
+    return any(flag in present for flag in flags)
+
+
+def _profile_coordinate_frame(frame_data) -> str:
+    profile = getattr(frame_data, "profile", {}) or {}
+    frame = str(profile.get("coordinate_frame") or "").strip()
+    if frame:
+        return frame
+    return str(getattr(getattr(frame_data, "intrinsics", None), "frame_id", "") or "").strip()
+
+
+def _sync_camera_frame_with_source(args, frame_data) -> None:
+    source_frame = _profile_coordinate_frame(frame_data)
+    if not source_frame or args.tf_point_mode != "direct":
+        return
+    if not _cli_flag_present("--tf-json"):
+        if frame_matches(source_frame, "camera_depth_optical_frame"):
+            args.tf_json = "/tmp/scene_tf_base_depth_optical.json"
+        elif frame_matches(source_frame, "camera_color_optical_frame"):
+            args.tf_json = "/tmp/scene_tf_base_color_optical.json"
+    if _cli_flag_present("--camera-frame"):
+        if not frame_matches(source_frame, args.camera_frame):
+            raise RuntimeError(
+                "Point source frame is {}, but --camera-frame is {}. "
+                "With --tf-point-mode direct, use a TF JSON for the same optical frame.".format(
+                    source_frame, args.camera_frame
+                )
+            )
+        return
+    if not frame_matches(source_frame, args.camera_frame):
+        print(
+            "[TF] camera_frame inferred from RGB-D source: {} -> {}".format(
+                args.camera_frame, source_frame
+            ),
+            flush=True,
+        )
+        args.camera_frame = source_frame
 
 def main() -> None:
     args = parse_args()
@@ -54,12 +96,15 @@ def main() -> None:
         first_frame = stream.read(args)
         if first_frame is None:
             raise RuntimeError("No RGB-D frame received.")
+        _sync_camera_frame_with_source(args, first_frame)
     except Exception:
         stream.close()
         raise
     color_width = int(first_frame.profile.get("color_width") or first_frame.frame_bgr.shape[1])
     color_height = int(first_frame.profile.get("color_height") or first_frame.frame_bgr.shape[0])
     ignore_zone = args.ignore_zone or auto_ignore_zone(color_width, color_height)
+    print("[INFO] effective camera_frame:", args.camera_frame)
+    print("[INFO] effective tf_json:", args.tf_json)
     print("[INFO] ignore_zone:", ignore_zone)
     print("[INFO] weight:", args.weight)
     print("[INFO] conf/iou:", args.conf, args.iou)
@@ -67,7 +112,7 @@ def main() -> None:
     print("[INFO] estimate_tabletop:", args.estimate_tabletop)
     print("[INFO] known_block_height_m:", args.known_block_height_m)
 
-    tf_cache = TfJsonCache(args.tf_json, args.tf_reload_s)
+    tf_cache = TfJsonCache(args.tf_json, args.tf_reload_s, args.base_frame, args.camera_frame)
     tf_cache.update(force=True)
 
     last_t = time.time()

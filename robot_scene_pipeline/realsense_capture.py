@@ -340,6 +340,8 @@ def capture_color_only(rs, args):
             "depth_available": False,
             "stable_frames": max(1, int(getattr(args, "stable_frames", 1))),
             "best_color_sharpness": round(float(best_score), 3),
+            "coordinate_frame": "camera_color_optical_frame",
+            "camera_info_frame_id": "camera_color_optical_frame",
         }
         return frame_bgr, None, intrinsics, used_profile
     finally:
@@ -400,6 +402,9 @@ def capture_rgbd_with_profile(rs, args, width, height, depth_width, depth_height
             "depth_profile_requested": [depth_width, depth_height, fps],
             "aligned_depth_width": depth_frame.get_width(),
             "aligned_depth_height": depth_frame.get_height(),
+            "coordinate_frame": "camera_color_optical_frame",
+            "camera_info_frame_id": "camera_color_optical_frame",
+            "depth_frame_id": "camera_color_optical_frame",
         }
         return frame_bgr, depth_frame, intrinsics, used_profile
     finally:

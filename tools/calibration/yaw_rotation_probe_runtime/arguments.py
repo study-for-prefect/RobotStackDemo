@@ -9,7 +9,7 @@ from tools.monitoring.realtime_monitor.constants import PROJECT_ROOT
 
 from .pose_math import DEFAULT_YAWS_DEG
 
-DEFAULT_CAMERA_FRAME = "camera_depth_optical_frame"
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_POINT_MODE = "direct"
 
 
@@ -90,7 +90,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=DEFAULT_TF_POINT_MODE,
         help=(
             "Depth deprojection returns optical XYZ. Use direct with "
-            "base_link<-camera_depth_optical_frame TF; optical-to-camera-link "
+            "base_link<-the optical frame reported by camera_info; optical-to-camera-link "
             "is legacy for base_link<-camera_link TF."
         ),
     )

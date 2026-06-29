@@ -10,7 +10,7 @@ from .scene import (
     target_visible,
 )
 
-DEFAULT_CAMERA_FRAME = "camera_depth_optical_frame"
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_POINT_MODE = "direct"
 
 def tf_lookup_command(args):

@@ -46,6 +46,9 @@ class RealSenseRealtimeStream:
             "depth_height": self.depth_height,
             "fps": self.fps,
             "usb_type_descriptor": self.usb_type,
+            "coordinate_frame": "camera_color_optical_frame",
+            "camera_info_frame_id": "camera_color_optical_frame",
+            "depth_frame_id": "camera_color_optical_frame",
         }
         return RealtimeFrame(np.asanyarray(color_frame.get_data()), depth_frame, intrinsics, profile)
 

@@ -6,6 +6,16 @@ from pathlib import Path
 
 import numpy as np
 
+def normalize_frame_name(frame):
+    return str(frame or "").strip().lstrip("/")
+
+
+def frame_matches(actual, requested):
+    actual = normalize_frame_name(actual)
+    requested = normalize_frame_name(requested)
+    return bool(actual and requested and (actual == requested or actual.endswith("/" + requested)))
+
+
 def quat_xyzw_to_rot(q):
     q = np.asarray(q, dtype=np.float64).reshape(4)
     x, y, z, w = q
@@ -114,13 +124,31 @@ def find_transform_matrix(obj):
 
 
 class TfJsonCache:
-    def __init__(self, path, reload_s):
+    def __init__(self, path, reload_s, base_frame=None, camera_frame=None):
         self.path = Path(path) if path else None
         self.reload_s = float(reload_s)
+        self.base_frame = base_frame
+        self.camera_frame = camera_frame
         self.last_check = 0.0
         self.last_mtime = None
         self.T = None
         self.error = "not loaded"
+
+    def validate_frames(self, data):
+        parent_frame = data.get("parent_frame") if isinstance(data, dict) else None
+        child_frame = data.get("child_frame") if isinstance(data, dict) else None
+        if self.base_frame and parent_frame and not frame_matches(parent_frame, self.base_frame):
+            raise RuntimeError(
+                "TF JSON parent_frame mismatch: expected {}, got {}".format(
+                    self.base_frame, parent_frame
+                )
+            )
+        if self.camera_frame and child_frame and not frame_matches(child_frame, self.camera_frame):
+            raise RuntimeError(
+                "TF JSON child_frame mismatch: expected {}, got {}".format(
+                    self.camera_frame, child_frame
+                )
+            )
 
     def update(self, force=False):
         if self.path is None:
@@ -145,6 +173,7 @@ class TfJsonCache:
             with self.path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
 
+            self.validate_frames(data)
             self.T = find_transform_matrix(data)
             self.last_mtime = mtime
             self.error = None

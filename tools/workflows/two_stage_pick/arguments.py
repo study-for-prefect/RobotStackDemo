@@ -2,8 +2,8 @@
 
 import argparse
 
-DEFAULT_CAMERA_FRAME = "camera_depth_optical_frame"
-DEFAULT_TF_JSON = "/tmp/scene_tf_base_depth_optical.json"
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
+DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Two-stage visual pick with pure base-link XY correction.")
