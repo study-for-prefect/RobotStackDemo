@@ -5,8 +5,8 @@ import os
 
 from .constants import PROJECT_ROOT
 
-DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
-DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
+DEFAULT_CAMERA_FRAME = "camera_depth_optical_frame"
+DEFAULT_TF_JSON = "/tmp/scene_tf_base_depth_optical.json"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a per-block closed-loop stack demo.")

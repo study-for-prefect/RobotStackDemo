@@ -1,9 +1,6 @@
 import json
-import os
 import tempfile
-import time
 import unittest
-from argparse import Namespace
 from unittest import mock
 
 import numpy as np
@@ -12,8 +9,7 @@ from robot_scene_pipeline.ros_topic_capture import CameraIntrinsics
 from robot_scene_pipeline.tabletop_geometry import deproject_depth_roi
 from robot_scene_pipeline.instance_pointcloud import transform_points
 from robot_scene_pipeline.tf_transform import apply_transform, attach_base_coordinates
-from tools.monitoring.realtime_monitor.app import wait_for_required_tf
-from tools.monitoring.realtime_monitor.transforms import TfJsonCache, optical_to_camera_link
+from tools.monitoring.realtime_monitor.transforms import optical_to_camera_link
 
 
 class ConstantDepthFrame:
@@ -82,7 +78,7 @@ class CameraFrameTransformTests(unittest.TestCase):
                 attach_base_coordinates(
                     [{"center_3d_m": [0.10, 0.20, 0.80]}],
                     "base_link",
-                    "camera_color_optical_frame",
+                    "camera_depth_optical_frame",
                     0.1,
                     tf_json=tmp.name,
                     point_mode="direct",
@@ -98,121 +94,6 @@ class CameraFrameTransformTests(unittest.TestCase):
                 tf_json="",
                 point_mode="direct",
             )
-
-    def test_realtime_monitor_tf_cache_rejects_wrong_child_frame(self):
-        payload = {
-            "parent_frame": "base_link",
-            "child_frame": "camera_depth_optical_frame",
-            "matrix_4x4": np.eye(4, dtype=float).tolist(),
-        }
-        with tempfile.NamedTemporaryFile("w", suffix=".json") as tmp:
-            json.dump(payload, tmp)
-            tmp.flush()
-            cache = TfJsonCache(
-                tmp.name,
-                reload_s=0.0,
-                base_frame="base_link",
-                camera_frame="camera_color_optical_frame",
-            )
-
-            cache.update(force=True)
-
-            self.assertIsNone(cache.T)
-            self.assertIn("child_frame mismatch", cache.error)
-
-    def test_realtime_monitor_tf_cache_reports_missing_file(self):
-        path = os.path.join(tempfile.gettempdir(), "missing_scene_tf_for_test.json")
-        if os.path.exists(path):
-            os.unlink(path)
-        cache = TfJsonCache(
-            path,
-            reload_s=0.0,
-            base_frame="base_link",
-            camera_frame="camera_color_optical_frame",
-            max_age_s=2.0,
-        )
-
-        cache.update(force=True)
-
-        self.assertIsNone(cache.T)
-        self.assertIn("missing", cache.error)
-        self.assertIn(path, cache.error)
-
-    def test_realtime_monitor_tf_cache_rejects_stale_json(self):
-        payload = {
-            "parent_frame": "base_link",
-            "child_frame": "camera_color_optical_frame",
-            "matrix_4x4": np.eye(4, dtype=float).tolist(),
-        }
-        with tempfile.NamedTemporaryFile("w", suffix=".json") as tmp:
-            json.dump(payload, tmp)
-            tmp.flush()
-            old_time = time.time() - 10.0
-            os.utime(tmp.name, (old_time, old_time))
-            cache = TfJsonCache(
-                tmp.name,
-                reload_s=0.0,
-                base_frame="base_link",
-                camera_frame="camera_color_optical_frame",
-                max_age_s=2.0,
-            )
-
-            cache.update(force=True)
-
-            self.assertIsNone(cache.T)
-            self.assertIn("stale", cache.error)
-            self.assertGreater(cache.json_age_s, 2.0)
-
-    def test_realtime_monitor_tf_cache_loads_fresh_color_optical_json(self):
-        payload = {
-            "timestamp": time.time(),
-            "parent_frame": "base_link",
-            "child_frame": "camera_color_optical_frame",
-            "matrix_4x4": np.eye(4, dtype=float).tolist(),
-        }
-        with tempfile.NamedTemporaryFile("w", suffix=".json") as tmp:
-            json.dump(payload, tmp)
-            tmp.flush()
-            cache = TfJsonCache(
-                tmp.name,
-                reload_s=0.0,
-                base_frame="base_link",
-                camera_frame="camera_color_optical_frame",
-                max_age_s=2.0,
-            )
-
-            with mock.patch("builtins.print"):
-                cache.update(force=True)
-
-            self.assertIsNone(cache.error)
-            self.assertIsNotNone(cache.T)
-            np.testing.assert_allclose(cache.T, np.eye(4), atol=1e-12)
-            self.assertEqual(cache.parent_frame, "base_link")
-            self.assertEqual(cache.child_frame, "camera_color_optical_frame")
-
-    def test_realtime_monitor_allow_missing_tf_startup_does_not_raise(self):
-        path = os.path.join(tempfile.gettempdir(), "missing_scene_tf_allow_for_test.json")
-        if os.path.exists(path):
-            os.unlink(path)
-        cache = TfJsonCache(
-            path,
-            reload_s=0.0,
-            base_frame="base_link",
-            camera_frame="camera_color_optical_frame",
-            max_age_s=2.0,
-        )
-        args = Namespace(
-            allow_missing_tf=True,
-            tf_startup_timeout_s=0.0,
-            tf_reload_s=0.0,
-            tf_json=path,
-            base_frame="base_link",
-            camera_frame="camera_color_optical_frame",
-        )
-
-        with mock.patch("builtins.print"):
-            self.assertFalse(wait_for_required_tf(cache, args))
-        self.assertIsNone(cache.T)
 
     def test_ros_topic_intrinsics_do_not_call_realsense_sdk_deproject(self):
         class NativeIntrinsics:

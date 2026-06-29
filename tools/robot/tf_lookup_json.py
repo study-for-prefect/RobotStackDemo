@@ -18,8 +18,8 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 
 
-DEFAULT_OUTPUT = "/tmp/scene_tf_base_color_optical.json"
-DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
+DEFAULT_OUTPUT = "/tmp/scene_tf_base_depth_optical.json"
+DEFAULT_CAMERA_FRAME = "camera_depth_optical_frame"
 
 
 def parse_args():
