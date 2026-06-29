@@ -7,9 +7,9 @@ import time
 import numpy as np
 
 
-DEFAULT_CAMERA_FRAME = "camera_depth_optical_frame"
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_POINT_MODE = "direct"
-DEFAULT_TF_JSON = "/tmp/scene_tf_base_depth_optical.json"
+DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
 
 
 def normalize_frame_name(frame):
@@ -76,7 +76,7 @@ def add_tf_args(parser):
         default=DEFAULT_TF_POINT_MODE,
         help=(
             "How to interpret deprojected depth points before applying TF. "
-            "Use direct with base_link<-camera_depth_optical_frame; "
+            "Use direct with base_link<-camera_color_optical_frame for aligned_depth_to_color; "
             "optical-to-camera-link is kept only for legacy base_link<-camera_link JSON."
         ),
     )

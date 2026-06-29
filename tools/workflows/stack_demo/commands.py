@@ -9,7 +9,7 @@ from tools.workflows.two_stage_visual_pick import camera_optical_vector_to_base
 
 from .constants import PROJECT_ROOT
 
-DEFAULT_CAMERA_FRAME = "camera_depth_optical_frame"
+DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_POINT_MODE = "direct"
 
 def load_json(path):

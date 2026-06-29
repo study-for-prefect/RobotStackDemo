@@ -2,6 +2,7 @@
 
 import sys
 import time
+from argparse import Namespace
 from pathlib import Path
 
 import cv2
@@ -28,6 +29,53 @@ from .transforms import (
 )
 from .stream import start_realtime_stream
 
+
+def _tf_status_text(tf_cache: TfJsonCache, args: Namespace) -> str:
+    if tf_cache.error:
+        return "TF error: {}".format(tf_cache.error)
+    age = " age={:.2f}s".format(tf_cache.json_age_s) if tf_cache.json_age_s is not None else ""
+    return "TF ok: {}<-{}{} path={}".format(args.base_frame, args.camera_frame, age, args.tf_json)
+
+
+def _tf_status_key(tf_cache: TfJsonCache, args: Namespace) -> str:
+    if not tf_cache.error:
+        return "ok:{}<-{}:{}".format(args.base_frame, args.camera_frame, args.tf_json)
+    return "error:" + str(tf_cache.error).split(": age ", 1)[0]
+
+
+def _print_tf_status_if_changed(tf_cache: TfJsonCache, args: Namespace, last_status: str) -> str:
+    status_key = _tf_status_key(tf_cache, args)
+    status = _tf_status_text(tf_cache, args)
+    if status_key != last_status:
+        prefix = "[WARN]" if tf_cache.error else "[INFO]"
+        print("{} {}".format(prefix, status), flush=True)
+    return status_key
+
+
+def wait_for_required_tf(tf_cache: TfJsonCache, args: Namespace) -> bool:
+    deadline = time.time() + max(0.0, float(args.tf_startup_timeout_s))
+    last_status = ""
+    while True:
+        tf_cache.update(force=True)
+        last_status = _print_tf_status_if_changed(tf_cache, args, last_status)
+        if tf_cache.T is not None and not tf_cache.error:
+            return True
+        if getattr(args, "allow_missing_tf", False):
+            print("[WARN] continuing without base_link TF because --allow-missing-tf is set", flush=True)
+            return False
+        if time.time() >= deadline:
+            raise RuntimeError(
+                "Realtime monitor requires a valid TF JSON for base coordinates. "
+                "{}. Expected {}<-{} from path {}".format(
+                    tf_cache.error,
+                    args.base_frame,
+                    args.camera_frame,
+                    args.tf_json,
+                )
+            )
+        time.sleep(min(0.2, max(0.01, float(args.tf_reload_s))))
+
+
 def main() -> None:
     args = parse_args()
     args.known_object_height_m = args.known_block_height_m
@@ -50,6 +98,17 @@ def main() -> None:
     print("[INFO] tf_expected:", "{}<-{}".format(args.base_frame, args.camera_frame))
     print("[INFO] tf_point_mode:", args.tf_point_mode)
 
+    tf_cache = TfJsonCache(
+        args.tf_json,
+        args.tf_reload_s,
+        base_frame=args.base_frame,
+        camera_frame=args.camera_frame,
+        max_age_s=args.tf_max_age_s,
+    )
+    last_tf_status = ""
+    wait_for_required_tf(tf_cache, args)
+    last_tf_status = _tf_status_key(tf_cache, args)
+
     stream = start_realtime_stream(args)
     try:
         first_frame = stream.read(args)
@@ -68,14 +127,6 @@ def main() -> None:
     print("[INFO] estimate_tabletop:", args.estimate_tabletop)
     print("[INFO] known_block_height_m:", args.known_block_height_m)
 
-    tf_cache = TfJsonCache(
-        args.tf_json,
-        args.tf_reload_s,
-        base_frame=args.base_frame,
-        camera_frame=args.camera_frame,
-    )
-    tf_cache.update(force=True)
-
     last_t = time.time()
     fps_smooth = 0.0
 
@@ -88,6 +139,7 @@ def main() -> None:
                 continue
 
             tf_cache.update(force=False)
+            last_tf_status = _print_tf_status_if_changed(tf_cache, args, last_tf_status)
             T_base_camera = tf_cache.T
 
             intr = frame_data.intrinsics

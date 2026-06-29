@@ -114,15 +114,25 @@ def find_transform_matrix(obj):
 
 
 class TfJsonCache:
-    def __init__(self, path, reload_s, base_frame=None, camera_frame=None):
+    def __init__(self, path, reload_s, base_frame=None, camera_frame=None, max_age_s=None):
         self.path = Path(path) if path else None
         self.reload_s = float(reload_s)
+        self.max_age_s = None if max_age_s is None else float(max_age_s)
         self.base_frame = str(base_frame or "").lstrip("/")
         self.camera_frame = str(camera_frame or "").lstrip("/")
         self.last_check = 0.0
         self.last_mtime = None
         self.T = None
         self.error = "not loaded"
+        self.last_loaded_timestamp = None
+        self.json_age_s = None
+        self.parent_frame = None
+        self.child_frame = None
+
+    def _set_error(self, message):
+        self.T = None
+        self.error = message
+        return self.T
 
     def _frame_matches(self, actual, requested):
         actual = str(actual or "").lstrip("/")
@@ -132,19 +142,39 @@ class TfJsonCache:
     def _validate_frames(self, data):
         parent_frame = data.get("parent_frame") if isinstance(data, dict) else None
         child_frame = data.get("child_frame") if isinstance(data, dict) else None
+        self.parent_frame = parent_frame
+        self.child_frame = child_frame
         if self.base_frame and parent_frame and not self._frame_matches(parent_frame, self.base_frame):
             raise ValueError(
-                "parent_frame mismatch: expected {}, got {}".format(self.base_frame, parent_frame)
+                "parent_frame mismatch in {}: expected {}, got {}".format(
+                    self.path,
+                    self.base_frame,
+                    parent_frame,
+                )
             )
         if self.camera_frame and child_frame and not self._frame_matches(child_frame, self.camera_frame):
             raise ValueError(
-                "child_frame mismatch: expected {}, got {}".format(self.camera_frame, child_frame)
+                "child_frame mismatch in {}: expected {}, got {}".format(
+                    self.path,
+                    self.camera_frame,
+                    child_frame,
+                )
+            )
+
+    def _validate_age(self, mtime, now):
+        self.json_age_s = float(now - mtime)
+        if self.max_age_s is not None and self.json_age_s > self.max_age_s:
+            raise ValueError(
+                "stale {}: age {:.2f}s exceeds max {:.2f}s; keep tools/robot/tf_lookup_json.py running".format(
+                    self.path,
+                    self.json_age_s,
+                    self.max_age_s,
+                )
             )
 
     def update(self, force=False):
         if self.path is None:
-            self.error = "disabled"
-            return self.T
+            return self._set_error("disabled")
 
         now = time.time()
         if not force and now - self.last_check < self.reload_s:
@@ -153,10 +183,10 @@ class TfJsonCache:
 
         try:
             if not self.path.exists():
-                self.error = f"missing {self.path}"
-                return self.T
+                return self._set_error(f"missing {self.path}")
 
             mtime = self.path.stat().st_mtime
+            self._validate_age(mtime, now)
             if not force and self.last_mtime == mtime and self.T is not None:
                 self.error = None
                 return self.T
@@ -167,10 +197,11 @@ class TfJsonCache:
             self._validate_frames(data)
             self.T = find_transform_matrix(data)
             self.last_mtime = mtime
+            self.last_loaded_timestamp = data.get("timestamp", mtime) if isinstance(data, dict) else mtime
             self.error = None
             print(f"[TF] loaded {self.path}", flush=True)
         except Exception as exc:
-            self.error = str(exc)
+            self._set_error(str(exc))
 
         return self.T
 

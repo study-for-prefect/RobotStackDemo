@@ -31,15 +31,16 @@ Verify the TF chain after the robot driver or `robot_state_publisher` is running
 ```bash
 python -m robot_scene_pipeline.tf_transform \
   --base-frame base_link \
-  --camera-frame camera_depth_optical_frame
+  --camera-frame camera_color_optical_frame
 ```
 
-The default depth deprojection path treats measured points as optical-frame XYZ
-from `camera_depth_optical_frame`. Use `base_link <- camera_depth_optical_frame`
-directly and keep `--tf-point-mode direct`. This preserves the standard optical
-axes without adding the `camera_color_optical_frame` 15 mm internal RGB offset.
-Do not manually convert optical XYZ to `camera_link` unless you are intentionally
-running the legacy `base_link <- camera_link` path.
+The default topic path uses `aligned_depth_to_color` plus `color/camera_info`,
+so measured points are optical-frame XYZ from `camera_color_optical_frame`. Use
+`base_link <- camera_color_optical_frame` directly and keep `--tf-point-mode
+direct`. Use `camera_depth_optical_frame` only when you switch to an unaligned
+depth image and depth camera_info. Do not manually convert optical XYZ to
+`camera_link` unless you are intentionally running the legacy
+`base_link <- camera_link` path.
 
 ## Offline Detector Test
 
@@ -99,18 +100,18 @@ Use TF to add base-frame coordinates:
 ```bash
 python3 tools/robot/tf_lookup_json.py \
   --base-frame base_link \
-  --camera-frame camera_depth_optical_frame \
+  --camera-frame camera_color_optical_frame \
   --tool-frame tool0 \
   --require-tool \
   --timeout 8 \
-  --output /tmp/scene_tf_base_depth_optical.json
+  --output /tmp/scene_tf_base_color_optical.json
 ```
 
 ```bash
 conda run -n scene_graph_benchmark python -m robot_scene_pipeline.snapshot_pipeline \
   --use-tf \
   --base-frame base_link \
-  --camera-frame camera_depth_optical_frame \
+  --camera-frame camera_color_optical_frame \
   --instruction "把绿色方块放到红色方块左边" \
   --output-dir /tmp/robot_scene_pipeline
 ```
@@ -120,8 +121,8 @@ Estimate the tabletop plane and per-object point-cloud dimensions/yaw:
 ```bash
 conda run -n scene_graph_benchmark python -m robot_scene_pipeline.snapshot_pipeline \
   --use-tf \
-  --tf-json /tmp/scene_tf_base_depth_optical.json \
-  --camera-frame camera_depth_optical_frame \
+  --tf-json /tmp/scene_tf_base_color_optical.json \
+  --camera-frame camera_color_optical_frame \
   --tf-point-mode direct \
   --estimate-tabletop \
   --skip-llm \
@@ -141,7 +142,7 @@ python3 tools/workflows/stack_demo_pipeline.py \
 The integrated flow is:
 
 1. Move to the configured ready pose and open the gripper.
-2. Refresh `base_link <- camera_depth_optical_frame` TF.
+2. Refresh `base_link <- camera_color_optical_frame` TF.
 3. Capture the first RGB-D snapshot, estimate tabletop geometry/yaw, run the
    LLM, and compile `robot_execution_plan.json`.
 4. Read the first planned `pick` target from the LLM plan and build a
