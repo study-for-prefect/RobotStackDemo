@@ -121,11 +121,19 @@ def main() -> None:
             args.camera_frame,
             args.tf_timeout,
         )
+        camera_link_pose = lookup_pose(
+            tf_buffer,
+            subscriber.node,
+            subscriber._rclpy,
+            args.base_frame,
+            "camera_link",
+            args.tf_timeout,
+        )
         targets = build_yaw_targets(
             tool_pose[0],
             tool_pose[1],
-            camera_pose[0],
-            camera_pose[1],
+            camera_link_pose[0],
+            camera_link_pose[1],
             yaw_values_deg=args.yaw_values_deg,
             reference_tool0_position_m=current_tool_pose[0],
             reference_tool0_quat_xyzw=current_tool_pose[1],
@@ -135,6 +143,7 @@ def main() -> None:
                 "base_frame": args.base_frame,
                 "tool_frame": args.tool_frame,
                 "camera_frame": args.camera_frame,
+                "camera_link_frame": "camera_link",
                 "output_dir": args.output_dir,
                 "record_mode": args.record_mode,
                 "code_driven_motion": args.record_mode == "auto",
@@ -155,6 +164,7 @@ def main() -> None:
                 ignore_zone,
                 tool_pose,
                 camera_pose,
+                camera_link_pose,
                 targets,
             )
         else:
@@ -168,6 +178,7 @@ def main() -> None:
                 ignore_zone,
                 tool_pose,
                 camera_pose,
+                camera_link_pose,
                 targets,
             )
     finally:

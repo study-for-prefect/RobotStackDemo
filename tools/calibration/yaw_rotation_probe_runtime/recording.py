@@ -269,12 +269,15 @@ def build_record(
     selected: Dict[str, object],
     tool_pose: Tuple[List[float], List[float]],
     camera_pose: Tuple[List[float], List[float]],
+    camera_link_pose: Tuple[List[float], List[float]],
     source_tool_pose: Tuple[List[float], List[float]],
     source_camera_pose: Tuple[List[float], List[float]],
+    source_camera_link_pose: Tuple[List[float], List[float]],
     targets: Dict[str, object],
 ) -> Dict[str, object]:
     tool_position, tool_quat = tool_pose
     camera_position, camera_quat = camera_pose
+    camera_link_position, camera_link_quat = camera_link_pose
     stem = yaw_file_stem(yaw_deg)
     tf_point_mode = getattr(args, "tf_point_mode", "direct")
     return {
@@ -294,9 +297,9 @@ def build_record(
         "camera_frame_position": [float(v) for v in camera_position],
         "camera_frame_quat": [float(v) for v in camera_quat],
         "camera_frame_pose": pose_payload(camera_position, camera_quat),
-        "camera_link_position": [float(v) for v in camera_position],
-        "camera_link_quat": [float(v) for v in camera_quat],
-        "camera_link_pose": pose_payload(camera_position, camera_quat),
+        "camera_link_position": [float(v) for v in camera_link_position],
+        "camera_link_quat": [float(v) for v in camera_link_quat],
+        "camera_link_pose": pose_payload(camera_link_position, camera_link_quat),
         "point_camera_xyz": selected.get("point_camera_xyz"),
         "point_base_xyz": selected.get("point_base_xyz"),
         "point_optical_xyz": selected.get("point_optical_xyz"),
@@ -319,6 +322,12 @@ def build_record(
         "target_pose": targets["targets"].get(stem),
         "checks": {
             "tool0": pose_checks(tool_position, tool_quat, source_tool_pose[0], source_tool_pose[1]),
-            "camera_link": pose_checks(camera_position, camera_quat, source_camera_pose[0], source_camera_pose[1]),
+            "camera_frame": pose_checks(camera_position, camera_quat, source_camera_pose[0], source_camera_pose[1]),
+            "camera_link": pose_checks(
+                camera_link_position,
+                camera_link_quat,
+                source_camera_link_pose[0],
+                source_camera_link_pose[1],
+            ),
         },
     }

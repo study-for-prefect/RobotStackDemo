@@ -62,10 +62,11 @@ def current_pose_and_detection(
     frame: Any,
     ignore_zone: List[int],
     tf_timeout: float,
-) -> Tuple[Optional[Pose], Optional[Pose], Optional[Dict[str, object]], List[Dict[str, object]], np.ndarray, Optional[str]]:
+) -> Tuple[Optional[Pose], Optional[Pose], Optional[Pose], Optional[Dict[str, object]], List[Dict[str, object]], np.ndarray, Optional[str]]:
     tf_error = None
     latest_tool_pose = None
     latest_camera_pose = None
+    latest_camera_link_pose = None
     transform_base_camera = None
     try:
         latest_tool_pose = lookup_pose(
@@ -82,6 +83,14 @@ def current_pose_and_detection(
             subscriber._rclpy,
             args.base_frame,
             args.camera_frame,
+            tf_timeout,
+        )
+        latest_camera_link_pose = lookup_pose(
+            tf_buffer,
+            subscriber.node,
+            subscriber._rclpy,
+            args.base_frame,
+            "camera_link",
             tf_timeout,
         )
         transform_base_camera = pose_to_matrix(latest_camera_pose[0], latest_camera_pose[1])
@@ -113,7 +122,7 @@ def current_pose_and_detection(
             (0, 0, 255),
             2,
         )
-    return latest_tool_pose, latest_camera_pose, selected, detections, annotated, tf_error
+    return latest_tool_pose, latest_camera_pose, latest_camera_link_pose, selected, detections, annotated, tf_error
 
 
 def write_motion_command_preview(args: Namespace, targets: Dict[str, object]) -> str:
@@ -232,6 +241,7 @@ def build_pose_failed_record(
     yaw_deg: float,
     tool_pose: Pose,
     camera_pose: Pose,
+    camera_link_pose: Pose,
     targets: Dict[str, object],
     check: Dict[str, object],
     attempts: int,
@@ -258,9 +268,9 @@ def build_pose_failed_record(
         "camera_frame_position": [float(v) for v in camera_pose[0]],
         "camera_frame_quat": [float(v) for v in camera_pose[1]],
         "camera_frame_pose": pose_payload(camera_pose[0], camera_pose[1]),
-        "camera_link_position": [float(v) for v in camera_pose[0]],
-        "camera_link_quat": [float(v) for v in camera_pose[1]],
-        "camera_link_pose": pose_payload(camera_pose[0], camera_pose[1]),
+        "camera_link_position": [float(v) for v in camera_link_pose[0]],
+        "camera_link_quat": [float(v) for v in camera_link_pose[1]],
+        "camera_link_pose": pose_payload(camera_link_pose[0], camera_link_pose[1]),
         "pose_check": check,
         "point_camera_xyz": None,
         "point_base_xyz": None,
@@ -276,6 +286,7 @@ def build_missed_record(
     reason: str,
     tool_pose: Optional[Pose],
     camera_pose: Optional[Pose],
+    camera_link_pose: Optional[Pose],
     targets: Dict[str, object],
     attempts: int,
     check: Optional[Dict[str, object]] = None,
@@ -317,9 +328,10 @@ def build_missed_record(
         record["camera_frame_position"] = [float(v) for v in camera_pose[0]]
         record["camera_frame_quat"] = [float(v) for v in camera_pose[1]]
         record["camera_frame_pose"] = pose_payload(camera_pose[0], camera_pose[1])
-        record["camera_link_position"] = [float(v) for v in camera_pose[0]]
-        record["camera_link_quat"] = [float(v) for v in camera_pose[1]]
-        record["camera_link_pose"] = pose_payload(camera_pose[0], camera_pose[1])
+    if camera_link_pose is not None:
+        record["camera_link_position"] = [float(v) for v in camera_link_pose[0]]
+        record["camera_link_quat"] = [float(v) for v in camera_link_pose[1]]
+        record["camera_link_pose"] = pose_payload(camera_link_pose[0], camera_link_pose[1])
     return record
 
 
@@ -437,11 +449,13 @@ def capture_yaw_record(
     yaw_deg: float,
     source_tool_pose: Pose,
     source_camera_pose: Pose,
+    source_camera_link_pose: Pose,
     targets: Dict[str, object],
 ) -> Tuple[int, bool]:
     last_error = "no attempt"
     last_tool_pose = None
     last_camera_pose = None
+    last_camera_link_pose = None
     last_annotated = None
     last_pose_check = None
     last_tf_error = None
@@ -451,7 +465,7 @@ def capture_yaw_record(
     for attempt in range(attempts):
         frame = subscriber.wait_for_frame(float(args.frame_timeout_ms) / 1000.0, last_seq, require_depth=True)
         last_seq = frame.color_seq
-        tool_pose, camera_pose, selected, detections, annotated, tf_error = current_pose_and_detection(
+        tool_pose, camera_pose, camera_link_pose, selected, detections, annotated, tf_error = current_pose_and_detection(
             args,
             model,
             subscriber,
@@ -462,6 +476,7 @@ def capture_yaw_record(
         )
         last_tool_pose = tool_pose
         last_camera_pose = camera_pose
+        last_camera_link_pose = camera_link_pose
         last_annotated = annotated
         last_tf_error = tf_error
         last_detections = detections
@@ -476,7 +491,7 @@ def capture_yaw_record(
         key = show_view(args, view, args.preview_ms if selected is not None else 1)
         if key in (27, ord("q")):
             raise KeyboardInterrupt("yaw probe interrupted by user")
-        if tool_pose is None or camera_pose is None:
+        if tool_pose is None or camera_pose is None or camera_link_pose is None:
             last_error = tf_error or "TF pose unavailable"
             continue
 
@@ -503,8 +518,10 @@ def capture_yaw_record(
             selected,
             tool_pose,
             camera_pose,
+            camera_link_pose,
             source_tool_pose,
             source_camera_pose,
+            source_camera_link_pose,
             targets,
         )
         record["pose_check"] = check
@@ -517,12 +534,19 @@ def capture_yaw_record(
         return int(last_seq), True
 
     stem = yaw_file_stem(yaw_deg)
-    if last_pose_check is not None and not last_pose_check.get("ok") and last_tool_pose is not None and last_camera_pose is not None:
+    if (
+        last_pose_check is not None
+        and not last_pose_check.get("ok")
+        and last_tool_pose is not None
+        and last_camera_pose is not None
+        and last_camera_link_pose is not None
+    ):
         record = build_pose_failed_record(
             args,
             yaw_deg,
             last_tool_pose,
             last_camera_pose,
+            last_camera_link_pose,
             targets,
             last_pose_check,
             attempts,
@@ -555,6 +579,7 @@ def capture_yaw_record(
         last_error,
         last_tool_pose,
         last_camera_pose,
+        last_camera_link_pose,
         targets,
         attempts,
         check=last_pose_check,
@@ -581,6 +606,7 @@ def run_auto_record_sequence(
     ignore_zone: List[int],
     source_tool_pose: Pose,
     source_camera_pose: Pose,
+    source_camera_link_pose: Pose,
     targets: Dict[str, object],
 ) -> None:
     command_path = write_motion_command_preview(args, targets)
@@ -606,6 +632,7 @@ def run_auto_record_sequence(
             yaw_deg,
             source_tool_pose,
             source_camera_pose,
+            source_camera_link_pose,
             targets,
         )
         if recorded:
@@ -628,6 +655,7 @@ def run_manual_record_loop(
     ignore_zone: List[int],
     source_tool_pose: Pose,
     source_camera_pose: Pose,
+    source_camera_link_pose: Pose,
     targets: Dict[str, object],
 ) -> None:
     pending_frame = first_frame
@@ -637,6 +665,7 @@ def run_manual_record_loop(
     latest_selected = None
     latest_tool_pose = source_tool_pose
     latest_camera_pose = source_camera_pose
+    latest_camera_link_pose = source_camera_link_pose
     print("[INFO] manual compatibility mode: press r to record a typed yaw, q/esc to quit")
 
     while True:
@@ -647,7 +676,7 @@ def run_manual_record_loop(
         )
         pending_frame = None
         last_seq = frame.color_seq
-        tool_pose, camera_pose, selected, _detections, annotated, _tf_error = current_pose_and_detection(
+        tool_pose, camera_pose, camera_link_pose, selected, _detections, annotated, _tf_error = current_pose_and_detection(
             args,
             model,
             subscriber,
@@ -661,6 +690,8 @@ def run_manual_record_loop(
             latest_tool_pose = tool_pose
         if camera_pose is not None:
             latest_camera_pose = camera_pose
+        if camera_link_pose is not None:
+            latest_camera_link_pose = camera_link_pose
 
         now = time.time()
         dt = now - last_time
@@ -695,8 +726,10 @@ def run_manual_record_loop(
             latest_selected,
             latest_tool_pose,
             latest_camera_pose,
+            latest_camera_link_pose,
             source_tool_pose,
             source_camera_pose,
+            source_camera_link_pose,
             targets,
         )
         output_path = os.path.join(args.output_dir, yaw_file_stem(yaw_deg) + ".json")
