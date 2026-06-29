@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from robot_scene_pipeline.io_utils import write_json
+from robot_scene_pipeline.tabletop_geometry import attach_tabletop_geometry
 
 from .motion import build_yaw_motion_command, pump_gui_events, run_yaw_motion_command
 from .pose_math import pose_to_matrix, yaw_file_stem
@@ -27,6 +28,29 @@ from .recording import (
 
 
 Pose = Tuple[List[float], List[float]]
+
+
+def prefer_geometry_center(detections: List[Dict[str, object]]) -> None:
+    for det in detections:
+        geometry_center = det.get("geometry_center_m")
+        if det.get("pointcloud_geometry_valid") and geometry_center is not None:
+            det["sample_base_xyz"] = det.get("point_base_xyz")
+            det["point_base_xyz"] = geometry_center
+            det["point_base_source"] = "geometry_center_m"
+        else:
+            det["point_base_source"] = "bbox_center_depth"
+
+
+def public_detection_records(detections: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    output = []
+    for det in detections:
+        item = {
+            key: value
+            for key, value in det.items()
+            if not str(key).startswith("_") and key not in ("mask", "segmentation_mask")
+        }
+        output.append(item)
+    return output
 
 
 def target_sequence(targets: Dict[str, object]) -> List[Dict[str, object]]:
@@ -106,6 +130,19 @@ def current_pose_and_detection(
         transform_base_camera,
         ignore_zone,
     )
+    if getattr(args, "estimate_tabletop", False) and transform_base_camera is not None and detections:
+        try:
+            detections, _table_plane = attach_tabletop_geometry(
+                detections,
+                frame.depth_frame,
+                frame.intrinsics,
+                args,
+                transform_matrix=transform_base_camera,
+            )
+        except Exception as exc:
+            detail = "geometry error: {}".format(str(exc)[:110])
+            tf_error = detail if tf_error is None else "{}; {}".format(tf_error, detail)
+    prefer_geometry_center(detections)
     selected = select_detection(detections, args.target_label_contains)
     selected_id = None if selected is None else int(selected["id"])
 
@@ -584,7 +621,7 @@ def capture_yaw_record(
         attempts,
         check=last_pose_check,
         tf_error=last_tf_error,
-        detections=last_detections,
+        detections=public_detection_records(last_detections),
     )
     output_path = os.path.join(args.output_dir, stem + "_missed.json")
     write_json(output_path, record)

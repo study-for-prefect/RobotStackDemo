@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 
 from robot_scene_pipeline.ros_topic_capture import add_ros_topic_args
+from robot_scene_pipeline.tabletop_geometry import add_tabletop_args
 from tools.monitoring.realtime_monitor.constants import PROJECT_ROOT
 
 from .pose_math import DEFAULT_YAWS_DEG
@@ -95,4 +96,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--show-depth", action="store_true")
+    add_tabletop_args(parser)
+    parser.set_defaults(estimate_tabletop=True)
+    parser.add_argument("--no-estimate-tabletop", dest="estimate_tabletop", action="store_false")
     return parser.parse_args(argv)

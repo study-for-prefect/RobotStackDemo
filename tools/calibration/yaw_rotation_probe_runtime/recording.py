@@ -125,7 +125,13 @@ def detect_objects(
     boxes = result.boxes.xyxy.detach().cpu().numpy()
     confs = result.boxes.conf.detach().cpu().numpy()
     clss = result.boxes.cls.detach().cpu().numpy().astype(int)
-    for box, confidence, cls_id in zip(boxes, confs, clss):
+    masks_np = None
+    mask_polygons = None
+    if getattr(result, "masks", None) is not None and result.masks is not None:
+        masks_np = result.masks.data.detach().cpu().numpy()
+        mask_polygons = result.masks.xy
+
+    for index, (box, confidence, cls_id) in enumerate(zip(boxes, confs, clss)):
         x1, y1, x2, y2 = box.astype(int).tolist()
         area = max(0, x2 - x1) * max(0, y2 - y1)
         if area < int(args.min_area) or area > int(args.max_area):
@@ -148,29 +154,53 @@ def detect_objects(
             if transform_base_camera is not None:
                 point_base = transform_point(transform_base_camera, point_camera)
 
-        detections.append(
-            {
-                "id": len(detections),
-                "label": label_name(model.names, int(cls_id)),
-                "label_id": int(cls_id),
-                "confidence": float(confidence),
-                "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                "center_px": [int(cx), int(cy)],
-                "area_px": int(area),
-                "depth_m": float(depth_m),
-                "point_camera_frame": args.camera_frame,
-                "tf_point_mode": tf_point_mode,
-                "point_optical_xyz": finite_list(point_optical),
-                "point_camera_xyz": finite_list(point_camera),
-                "point_base_xyz": finite_list(point_base),
-            }
-        )
+        det = {
+            "id": len(detections),
+            "label": label_name(model.names, int(cls_id)),
+            "label_id": int(cls_id),
+            "confidence": float(confidence),
+            "bbox": [float(x1), float(y1), float(x2), float(y2)],
+            "center_px": [int(cx), int(cy)],
+            "area_px": int(area),
+            "depth_m": float(depth_m),
+            "point_camera_frame": args.camera_frame,
+            "tf_point_mode": tf_point_mode,
+            "point_optical_xyz": finite_list(point_optical),
+            "point_camera_xyz": finite_list(point_camera),
+            "point_base_xyz": finite_list(point_base),
+        }
+        if masks_np is not None and index < masks_np.shape[0]:
+            mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+            polygon = mask_polygons[index] if mask_polygons is not None and index < len(mask_polygons) else None
+            if polygon is not None and len(polygon) >= 3:
+                polygon = np.asarray(polygon, dtype=np.float32)
+                polygon[:, 0] = np.clip(polygon[:, 0], 0, frame_bgr.shape[1] - 1)
+                polygon[:, 1] = np.clip(polygon[:, 1], 0, frame_bgr.shape[0] - 1)
+                cv2.fillPoly(mask, [np.round(polygon).astype(np.int32)], 1)
+                det["mask_source"] = "polygon"
+            else:
+                mask = cv2.resize(
+                    masks_np[index].astype(np.float32),
+                    (frame_bgr.shape[1], frame_bgr.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                ) > 0.5
+                det["mask_source"] = "resized_tensor"
+            det["_mask_bool"] = mask.astype(bool)
+            det["has_mask"] = True
+            det["mask_area_px"] = int(np.count_nonzero(det["_mask_bool"]))
+        else:
+            det["has_mask"] = False
+        detections.append(det)
     return detections
 
 
 def select_detection(detections: List[Dict[str, object]], label_filter: str) -> Optional[Dict[str, object]]:
     label_filter = str(label_filter or "").strip().lower()
-    base_candidates = [det for det in detections if det.get("point_base_xyz") is not None]
+    geometry_candidates = [
+        det for det in detections
+        if det.get("pointcloud_geometry_valid") and det.get("geometry_center_m") is not None
+    ]
+    base_candidates = geometry_candidates or [det for det in detections if det.get("point_base_xyz") is not None]
     candidates = base_candidates
     if label_filter:
         candidates = [det for det in base_candidates if label_filter in str(det.get("label", "")).lower()]
@@ -302,7 +332,18 @@ def build_record(
         "camera_link_pose": pose_payload(camera_link_position, camera_link_quat),
         "point_camera_xyz": selected.get("point_camera_xyz"),
         "point_base_xyz": selected.get("point_base_xyz"),
+        "point_base_source": selected.get("point_base_source"),
+        "sample_base_xyz": selected.get("sample_base_xyz"),
         "point_optical_xyz": selected.get("point_optical_xyz"),
+        "geometry_center_m": selected.get("geometry_center_m"),
+        "center_on_table_m": selected.get("center_on_table_m"),
+        "top_surface_center_m": selected.get("top_surface_center_m"),
+        "top_z_base_m": selected.get("top_z_base_m"),
+        "dimensions_m": selected.get("dimensions_m"),
+        "pointcloud_geometry_valid": bool(selected.get("pointcloud_geometry_valid")),
+        "pointcloud_source": selected.get("pointcloud_source"),
+        "pointcloud_point_count": selected.get("pointcloud_point_count"),
+        "geometry_frame": selected.get("geometry_frame"),
         "detection": {
             key: selected.get(key)
             for key in (
@@ -316,6 +357,17 @@ def build_record(
                 "depth_m",
                 "point_camera_frame",
                 "tf_point_mode",
+                "point_base_source",
+                "sample_base_xyz",
+                "geometry_center_m",
+                "center_on_table_m",
+                "top_surface_center_m",
+                "top_z_base_m",
+                "dimensions_m",
+                "pointcloud_geometry_valid",
+                "pointcloud_source",
+                "pointcloud_point_count",
+                "geometry_frame",
                 "selection_warning",
             )
         },
