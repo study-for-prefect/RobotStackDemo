@@ -47,6 +47,7 @@ def main() -> None:
     print("[INFO] loaded:", weight)
     print("[INFO] names:", model.names)
     print("[INFO] tf_json:", args.tf_json)
+    print("[INFO] tf_expected:", "{}<-{}".format(args.base_frame, args.camera_frame))
     print("[INFO] tf_point_mode:", args.tf_point_mode)
 
     stream = start_realtime_stream(args)
@@ -67,7 +68,12 @@ def main() -> None:
     print("[INFO] estimate_tabletop:", args.estimate_tabletop)
     print("[INFO] known_block_height_m:", args.known_block_height_m)
 
-    tf_cache = TfJsonCache(args.tf_json, args.tf_reload_s)
+    tf_cache = TfJsonCache(
+        args.tf_json,
+        args.tf_reload_s,
+        base_frame=args.base_frame,
+        camera_frame=args.camera_frame,
+    )
     tf_cache.update(force=True)
 
     last_t = time.time()

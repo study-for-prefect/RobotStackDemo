@@ -114,13 +114,32 @@ def find_transform_matrix(obj):
 
 
 class TfJsonCache:
-    def __init__(self, path, reload_s):
+    def __init__(self, path, reload_s, base_frame=None, camera_frame=None):
         self.path = Path(path) if path else None
         self.reload_s = float(reload_s)
+        self.base_frame = str(base_frame or "").lstrip("/")
+        self.camera_frame = str(camera_frame or "").lstrip("/")
         self.last_check = 0.0
         self.last_mtime = None
         self.T = None
         self.error = "not loaded"
+
+    def _frame_matches(self, actual, requested):
+        actual = str(actual or "").lstrip("/")
+        requested = str(requested or "").lstrip("/")
+        return bool(actual and requested and (actual == requested or actual.endswith("/" + requested)))
+
+    def _validate_frames(self, data):
+        parent_frame = data.get("parent_frame") if isinstance(data, dict) else None
+        child_frame = data.get("child_frame") if isinstance(data, dict) else None
+        if self.base_frame and parent_frame and not self._frame_matches(parent_frame, self.base_frame):
+            raise ValueError(
+                "parent_frame mismatch: expected {}, got {}".format(self.base_frame, parent_frame)
+            )
+        if self.camera_frame and child_frame and not self._frame_matches(child_frame, self.camera_frame):
+            raise ValueError(
+                "child_frame mismatch: expected {}, got {}".format(self.camera_frame, child_frame)
+            )
 
     def update(self, force=False):
         if self.path is None:
@@ -145,6 +164,7 @@ class TfJsonCache:
             with self.path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
 
+            self._validate_frames(data)
             self.T = find_transform_matrix(data)
             self.last_mtime = mtime
             self.error = None

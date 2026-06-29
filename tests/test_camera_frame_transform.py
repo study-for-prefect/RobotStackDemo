@@ -9,7 +9,7 @@ from robot_scene_pipeline.ros_topic_capture import CameraIntrinsics
 from robot_scene_pipeline.tabletop_geometry import deproject_depth_roi
 from robot_scene_pipeline.instance_pointcloud import transform_points
 from robot_scene_pipeline.tf_transform import apply_transform, attach_base_coordinates
-from tools.monitoring.realtime_monitor.transforms import optical_to_camera_link
+from tools.monitoring.realtime_monitor.transforms import TfJsonCache, optical_to_camera_link
 
 
 class ConstantDepthFrame:
@@ -94,6 +94,27 @@ class CameraFrameTransformTests(unittest.TestCase):
                 tf_json="",
                 point_mode="direct",
             )
+
+    def test_realtime_monitor_tf_cache_rejects_wrong_child_frame(self):
+        payload = {
+            "parent_frame": "base_link",
+            "child_frame": "camera_color_optical_frame",
+            "matrix_4x4": np.eye(4, dtype=float).tolist(),
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as tmp:
+            json.dump(payload, tmp)
+            tmp.flush()
+            cache = TfJsonCache(
+                tmp.name,
+                reload_s=0.0,
+                base_frame="base_link",
+                camera_frame="camera_depth_optical_frame",
+            )
+
+            cache.update(force=True)
+
+            self.assertIsNone(cache.T)
+            self.assertIn("child_frame mismatch", cache.error)
 
     def test_ros_topic_intrinsics_do_not_call_realsense_sdk_deproject(self):
         class NativeIntrinsics:
