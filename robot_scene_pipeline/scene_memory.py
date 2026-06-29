@@ -305,10 +305,18 @@ def mark_pushed(
     distance_m: float,
     reason: str = "clear_obstacle",
     result: str = "executed",
+    observed_delta_m: Optional[float] = None,
+    unblocked_target: Optional[bool] = None,
+    affected_future_targets: Optional[List[str]] = None,
+    affected_place_regions: Optional[List[str]] = None,
 ) -> Memory:
     obj = memory["objects"][obj_id]
     obj["role"] = "obstacle"
     obj["state"] = "free"
+    expected_delta_m = float(distance_m)
+    final_result = result
+    if observed_delta_m is not None and observed_delta_m < 0.5 * expected_delta_m:
+        final_result = "failure"
 
     memory["action_history"].append({
         "step_index": memory.get("step_index", 0),
@@ -316,8 +324,13 @@ def mark_pushed(
         "object": obj_id,
         "direction_base": direction_base,
         "distance_m": distance_m,
+        "expected_delta_m": expected_delta_m,
+        "observed_delta_m": observed_delta_m,
         "reason": reason,
-        "result": result,
+        "result": final_result,
+        "unblocked_target": unblocked_target,
+        "affected_future_targets": affected_future_targets or [],
+        "affected_place_regions": affected_place_regions or [],
     })
 
     return memory

@@ -9,6 +9,9 @@ from robot_scene_pipeline.geometry_relations import (
     object_xy_aabb,
     xy_aabb_overlap,
 )
+from robot_scene_pipeline.push_grasp_joint_evaluator import (
+    evaluate_push_grasp_joint_candidates,
+)
 
 
 ObjectDict = Dict[str, Any]
@@ -68,7 +71,6 @@ def candidate_push_directions(obstacle: ObjectDict, target: ObjectDict) -> List[
         ("away_from_target", away),
         ("perpendicular_left", [-away[1], away[0]]),
         ("perpendicular_right", [away[1], -away[0]]),
-        ("toward_opposite_side", [-away[0], -away[1]]),
         ("base_positive_x", [1.0, 0.0]),
         ("base_negative_x", [-1.0, 0.0]),
         ("base_positive_y", [0.0, 1.0]),
@@ -235,28 +237,82 @@ def evaluate_push_candidates(
     push_candidates: Iterable[RelationDict],
     distance_m: float,
     table_bounds: Optional[dict] = None,
+    qwen_candidates: Optional[Iterable[dict]] = None,
+    future_targets: Optional[Iterable[ObjectDict]] = None,
+    future_place_regions: Optional[Iterable[dict]] = None,
+    protected_objects: Optional[Iterable[ObjectDict]] = None,
+    memory: Optional[dict] = None,
+    lift_m: float = 0.05,
+    contact_z_offset_m: float = 0.015,
 ) -> dict:
-    candidate_results = [
-        select_push_direction(
-            current_state,
-            held_object,
-            relation,
-            distance_m=distance_m,
-            table_bounds=table_bounds,
-        )
-        for relation in push_candidates
-    ]
-    feasible = [
-        result
-        for result in candidate_results
-        if result.get("selected_direction") is not None
-    ]
-    feasible.sort(
-        key=lambda result: -float(result["selected_direction"]["score"])
+    relations = list(push_candidates)
+    obstacle_ids = []
+    relation_by_obstacle = {}
+    for relation in relations:
+        obstacle_id = relation.get("subject")
+        if obstacle_id is None or str(obstacle_id) in relation_by_obstacle:
+            continue
+        obstacle_ids.append(obstacle_id)
+        relation_by_obstacle[str(obstacle_id)] = relation
+
+    joint = evaluate_push_grasp_joint_candidates(
+        current_state,
+        held_object,
+        obstacle_ids,
+        qwen_candidates=qwen_candidates or [],
+        future_targets=future_targets or [],
+        future_place_regions=future_place_regions or [],
+        protected_objects=protected_objects or [],
+        memory=memory,
+        table_bounds=table_bounds,
+        lift_m=lift_m,
+        contact_z_offset_m=contact_z_offset_m,
     )
+    candidate_results = []
+    for relation in relations:
+        obstacle_id = str(relation.get("subject"))
+        evaluations = [
+            item for item in joint["candidates"]
+            if str(item.get("obstacle_id")) == obstacle_id
+        ]
+        feasible = [item for item in evaluations if item.get("feasible")]
+        feasible.sort(key=lambda item: -float(item.get("score", 0.0)))
+        selected = None
+        if feasible:
+            best = feasible[0]
+            selected = {
+                "source": best.get("source"),
+                "direction_base": best.get("direction_base"),
+                "distance_m": best.get("distance_m", distance_m),
+                "feasible": True,
+                "score": best.get("score", 0.0),
+                "reason": best.get("reason"),
+                "predicted_selected_grasp_yaw_deg": best.get("predicted_selected_grasp_yaw_deg"),
+            }
+        candidate_results.append(
+            {
+                "relation": relation,
+                "obstacle": object_by_string_id(current_state.get("objects", []), relation.get("subject")),
+                "evaluations": evaluations,
+                "selected_direction": selected,
+            }
+        )
+    selected_candidate = joint.get("selected_candidate")
+    selected_result = None
+    if selected_candidate is not None:
+        selected_relation = relation_by_obstacle.get(str(selected_candidate.get("obstacle_id")))
+        if selected_relation is not None:
+            selected_result = next(
+                (
+                    result for result in candidate_results
+                    if str(result["relation"].get("subject")) == str(selected_candidate.get("obstacle_id"))
+                ),
+                None,
+            )
     return {
         "candidate_results": candidate_results,
-        "selected_result": feasible[0] if feasible else None,
+        "selected_result": selected_result,
+        "joint_evaluation": joint,
     }
 
 

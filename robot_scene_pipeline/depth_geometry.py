@@ -8,7 +8,7 @@ def add_depth_args(parser):
     parser.add_argument("--depth-window", type=int, default=7)
 
 
-def coordinate_convention(camera_frame="realsense_color_optical_frame"):
+def coordinate_convention(camera_frame="camera_depth_optical_frame"):
     return {
         "frame": camera_frame,
         "unit": "meter",
@@ -195,7 +195,7 @@ def public_object(det):
 
 
 def build_private_state(args, detections, snapshot_path, annotated_path, used_profile, table_plane=None):
-    camera_frame = getattr(args, "camera_frame", "realsense_color_optical_frame")
+    camera_frame = getattr(args, "camera_frame", "camera_depth_optical_frame")
     base_frame = getattr(args, "base_frame", None)
     return {
         "schema_version": "private_scene_state_v1",

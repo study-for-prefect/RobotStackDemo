@@ -5,7 +5,7 @@ import sys
 
 from .constants import DEFAULT_OUTPUT_DIR
 
-DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
+DEFAULT_TF_JSON = "/tmp/scene_tf_base_depth_optical.json"
 
 def parse_args():
     parser = argparse.ArgumentParser(

@@ -58,6 +58,22 @@ from .scene import (
 )
 
 
+def _future_place_regions(base_object, previous_stack_xy, args):
+    center = previous_stack_xy or base_object.get("geometry_center_m")
+    size = base_object.get("dimensions_m") or [0.04, 0.04, 0.03]
+    if not isinstance(center, list) or len(center) < 2:
+        return []
+    radius = 0.5 * max(float(size[0]), float(size[1])) + float(args.min_pick_place_xy_distance_m)
+    return [
+        {
+            "id": "stack_future_place_region",
+            "center_base_m": [float(center[0]), float(center[1]), 0.0],
+            "radius_m": radius,
+            "source": "current_stack_or_base_center",
+        }
+    ]
+
+
 def main() -> int:
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -169,6 +185,8 @@ def main() -> int:
                 held_object,
                 base_id,
                 previous_locked_stack,
+                future_targets=[held_templates[target_id] for target_id in order[index:]],
+                future_place_regions=_future_place_regions(base_object, previous_stack_xy, args),
             )
             pre_pick_excluded_ids, pre_pick_excluded_xy = target_exclusion_for_pre_pick(held_object)
             current_base_object, stack_state = estimate_current_stack(

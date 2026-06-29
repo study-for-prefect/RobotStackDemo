@@ -78,7 +78,7 @@ class CameraFrameTransformTests(unittest.TestCase):
                 attach_base_coordinates(
                     [{"center_3d_m": [0.10, 0.20, 0.80]}],
                     "base_link",
-                    "camera_color_optical_frame",
+                    "camera_depth_optical_frame",
                     0.1,
                     tf_json=tmp.name,
                     point_mode="direct",
