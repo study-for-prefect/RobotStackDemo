@@ -12,6 +12,13 @@ from .constants import PROJECT_ROOT
 DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_POINT_MODE = "direct"
 
+def perception_camera_frame(args):
+    camera_frame = str(getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME) or DEFAULT_CAMERA_FRAME).lstrip("/")
+    if camera_frame == "camera_link":
+        return DEFAULT_CAMERA_FRAME
+    return camera_frame
+
+
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -31,7 +38,7 @@ def tf_lookup_command(args, require_tool=True):
         "--base-frame",
         getattr(args, "base_frame", "base_link"),
         "--camera-frame",
-        getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME),
+        perception_camera_frame(args),
         "--tool-frame",
         getattr(args, "tool_frame", "tool0"),
         "--timeout",
@@ -212,7 +219,7 @@ def snapshot_command(args, output_dir, stack_reasoning=False):
         "--output-dir", output_dir,
         "--use-tf", "--tf-json", args.tf_json,
         "--base-frame", getattr(args, "base_frame", "base_link"),
-        "--camera-frame", getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME),
+        "--camera-frame", perception_camera_frame(args),
         "--tf-point-mode", DEFAULT_TF_POINT_MODE,
         "--estimate-tabletop",
         "--detector-weight", args.detector_weight,

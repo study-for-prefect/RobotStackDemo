@@ -80,6 +80,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--min-depth-m", type=float, default=0.05)
     parser.add_argument("--max-depth-m", type=float, default=1.50)
     parser.add_argument("--record-attempts", type=int, default=5)
+    parser.add_argument("--record-samples", type=int, default=5)
+    parser.add_argument("--record-min-samples", type=int, default=3)
+    parser.add_argument("--record-sample-delay-s", type=float, default=0.05)
     parser.add_argument("--pose-check-orientation-deg", type=float, default=5.0)
     parser.add_argument("--pose-check-z-axis-deg", type=float, default=1.0)
     parser.add_argument("--pose-check-position-m", type=float, default=0.005)
@@ -99,4 +102,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     add_tabletop_args(parser)
     parser.set_defaults(estimate_tabletop=True)
     parser.add_argument("--no-estimate-tabletop", dest="estimate_tabletop", action="store_false")
+    parser.add_argument(
+        "--allow-bbox-center-fallback",
+        action="store_false",
+        dest="require_geometry_center",
+        default=True,
+        help="Allow bbox-center depth points when tabletop/mask geometry is unavailable.",
+    )
     return parser.parse_args(argv)

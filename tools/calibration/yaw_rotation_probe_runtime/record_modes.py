@@ -32,13 +32,21 @@ Pose = Tuple[List[float], List[float]]
 
 def prefer_geometry_center(detections: List[Dict[str, object]]) -> None:
     for det in detections:
+        det["sample_base_xyz"] = det.get("point_base_xyz")
         geometry_center = det.get("geometry_center_m")
         if det.get("pointcloud_geometry_valid") and geometry_center is not None:
-            det["sample_base_xyz"] = det.get("point_base_xyz")
             det["point_base_xyz"] = geometry_center
             det["point_base_source"] = "geometry_center_m"
         else:
             det["point_base_source"] = "bbox_center_depth"
+
+
+def enforce_geometry_center(args: Namespace, detections: List[Dict[str, object]]) -> None:
+    if not getattr(args, "require_geometry_center", True):
+        return
+    for det in detections:
+        if det.get("point_base_source") != "geometry_center_m":
+            det["point_base_xyz"] = None
 
 
 def public_detection_records(detections: List[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -50,6 +58,48 @@ def public_detection_records(detections: List[Dict[str, object]]) -> List[Dict[s
             if not str(key).startswith("_") and key not in ("mask", "segmentation_mask")
         }
         output.append(item)
+    return output
+
+
+MEDIAN_VECTOR_FIELDS = (
+    "point_base_xyz",
+    "sample_base_xyz",
+    "point_camera_xyz",
+    "point_optical_xyz",
+    "geometry_center_m",
+    "center_on_table_m",
+    "top_surface_center_m",
+    "dimensions_m",
+)
+
+
+def median_vector(samples: List[Dict[str, object]], field: str) -> Optional[List[float]]:
+    values = []
+    for sample in samples:
+        value = sample.get(field)
+        if isinstance(value, list) and len(value) >= 3:
+            values.append([float(v) for v in value[:3]])
+    if not values:
+        return None
+    return np.median(np.asarray(values, dtype=float), axis=0).astype(float).tolist()
+
+
+def aggregate_selected_samples(samples: List[Dict[str, object]]) -> Dict[str, object]:
+    best = max(samples, key=lambda item: float(item.get("confidence", 0.0)))
+    output = copy.deepcopy(best)
+    for field in MEDIAN_VECTOR_FIELDS:
+        value = median_vector(samples, field)
+        if value is not None:
+            output[field] = value
+    depths = [float(item["depth_m"]) for item in samples if item.get("depth_m") is not None]
+    if depths:
+        output["depth_m"] = float(np.median(np.asarray(depths, dtype=float)))
+    counts = [int(item["pointcloud_point_count"]) for item in samples if item.get("pointcloud_point_count") is not None]
+    if counts:
+        output["pointcloud_point_count"] = int(np.median(np.asarray(counts, dtype=float)))
+        output["pointcloud_point_count_min"] = int(min(counts))
+    output["aggregate_sample_count"] = len(samples)
+    output["aggregate_samples"] = public_detection_records(samples)
     return output
 
 
@@ -143,6 +193,7 @@ def current_pose_and_detection(
             detail = "geometry error: {}".format(str(exc)[:110])
             tf_error = detail if tf_error is None else "{}; {}".format(tf_error, detail)
     prefer_geometry_center(detections)
+    enforce_geometry_center(args, detections)
     selected = select_detection(detections, args.target_label_contains)
     selected_id = None if selected is None else int(selected["id"])
 
@@ -497,7 +548,10 @@ def capture_yaw_record(
     last_pose_check = None
     last_tf_error = None
     last_detections: List[Dict[str, object]] = []
-    attempts = max(1, int(args.record_attempts))
+    target_samples = max(1, int(getattr(args, "record_samples", 1)))
+    min_samples = max(1, min(target_samples, int(getattr(args, "record_min_samples", 1))))
+    attempts = max(1, int(args.record_attempts), target_samples)
+    selected_samples: List[Dict[str, object]] = []
     target_pose = targets["targets"].get(yaw_file_stem(yaw_deg))  # type: ignore[index]
     for attempt in range(attempts):
         frame = subscriber.wait_for_frame(float(args.frame_timeout_ms) / 1000.0, last_seq, require_depth=True)
@@ -549,10 +603,25 @@ def capture_yaw_record(
             last_error = selection_failure_reason(detections, args.target_label_contains)
             continue
 
+        selected_samples.append(copy.deepcopy(selected))
+        status = "AUTO yaw={:+.1f} sample={}/{} selected={}#{}".format(
+            float(yaw_deg),
+            len(selected_samples),
+            target_samples,
+            selected["label"],
+            selected["id"],
+        )
+        cv2.putText(annotated, status, (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 255), 2, cv2.LINE_AA)
+        if len(selected_samples) < target_samples:
+            if float(getattr(args, "record_sample_delay_s", 0.0)) > 0.0:
+                time.sleep(float(args.record_sample_delay_s))
+            continue
+
+        aggregate = aggregate_selected_samples(selected_samples)
         record = build_record(
             args,
             yaw_deg,
-            selected,
+            aggregate,
             tool_pose,
             camera_pose,
             camera_link_pose,
@@ -561,6 +630,8 @@ def capture_yaw_record(
             source_camera_link_pose,
             targets,
         )
+        record["record_sample_target"] = target_samples
+        record["record_sample_minimum"] = min_samples
         record["pose_check"] = check
         stem = yaw_file_stem(yaw_deg)
         output_path = os.path.join(args.output_dir, stem + ".json")
@@ -568,6 +639,32 @@ def capture_yaw_record(
         write_json(output_path, record)
         cv2.imwrite(image_path, annotated)
         print("[INFO] saved record: {} and {}".format(output_path, image_path), flush=True)
+        return int(last_seq), True
+
+    if len(selected_samples) >= min_samples and last_tool_pose is not None and last_camera_pose is not None and last_camera_link_pose is not None:
+        aggregate = aggregate_selected_samples(selected_samples)
+        record = build_record(
+            args,
+            yaw_deg,
+            aggregate,
+            last_tool_pose,
+            last_camera_pose,
+            last_camera_link_pose,
+            source_tool_pose,
+            source_camera_pose,
+            source_camera_link_pose,
+            targets,
+        )
+        record["record_sample_target"] = target_samples
+        record["record_sample_minimum"] = min_samples
+        record["pose_check"] = last_pose_check
+        stem = yaw_file_stem(yaw_deg)
+        output_path = os.path.join(args.output_dir, stem + ".json")
+        image_path = os.path.join(args.output_dir, stem + ".png")
+        write_json(output_path, record)
+        if last_annotated is not None:
+            cv2.imwrite(image_path, last_annotated)
+        print("[INFO] saved median record with {}/{} samples: {}".format(len(selected_samples), target_samples, output_path), flush=True)
         return int(last_seq), True
 
     stem = yaw_file_stem(yaw_deg)

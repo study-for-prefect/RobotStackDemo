@@ -13,6 +13,13 @@ from .scene import (
 DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_POINT_MODE = "direct"
 
+def perception_camera_frame(args):
+    camera_frame = str(getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME) or DEFAULT_CAMERA_FRAME).lstrip("/")
+    if camera_frame == "camera_link":
+        return DEFAULT_CAMERA_FRAME
+    return camera_frame
+
+
 def tf_lookup_command(args):
     return [
         args.ros_python,
@@ -22,7 +29,7 @@ def tf_lookup_command(args):
         "--base-frame",
         getattr(args, "base_frame", "base_link"),
         "--camera-frame",
-        getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME),
+        perception_camera_frame(args),
         "--once",
     ]
 
@@ -44,7 +51,7 @@ def snapshot_command(args, output_dir, run_llm=False):
         "--base-frame",
         getattr(args, "base_frame", "base_link"),
         "--camera-frame",
-        getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME),
+        perception_camera_frame(args),
         "--tf-point-mode",
         DEFAULT_TF_POINT_MODE,
         "--estimate-tabletop",

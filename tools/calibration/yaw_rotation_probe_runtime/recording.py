@@ -343,7 +343,10 @@ def build_record(
         "pointcloud_geometry_valid": bool(selected.get("pointcloud_geometry_valid")),
         "pointcloud_source": selected.get("pointcloud_source"),
         "pointcloud_point_count": selected.get("pointcloud_point_count"),
+        "pointcloud_point_count_min": selected.get("pointcloud_point_count_min"),
         "geometry_frame": selected.get("geometry_frame"),
+        "aggregate_sample_count": selected.get("aggregate_sample_count"),
+        "aggregate_samples": selected.get("aggregate_samples"),
         "detection": {
             key: selected.get(key)
             for key in (
@@ -367,7 +370,9 @@ def build_record(
                 "pointcloud_geometry_valid",
                 "pointcloud_source",
                 "pointcloud_point_count",
+                "pointcloud_point_count_min",
                 "geometry_frame",
+                "aggregate_sample_count",
                 "selection_warning",
             )
         },
