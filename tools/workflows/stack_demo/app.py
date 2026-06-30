@@ -57,6 +57,44 @@ from .scene import (
     validate_decision,
 )
 
+SECOND_PICK_OBSERVATION_ERROR_MARKERS = (
+    "Second observation center z",
+    "Second observation center XY delta",
+    "Second observation center is not finite",
+    "Second-snapshot XY correction",
+)
+
+
+def _is_second_pick_observation_error(message: str) -> bool:
+    return any(marker in message for marker in SECOND_PICK_OBSERVATION_ERROR_MARKERS)
+
+
+def _write_first_pick_plan_without_second_xy(
+    first_pick_plan_path: str,
+    output_path: str,
+    report_path: str,
+    reason: str,
+    args,
+) -> None:
+    plan = load_json(first_pick_plan_path)
+    step = plan["steps"][0]
+    step["coordinate_source"] = "locked_first_observation_without_second_xy_correction"
+    step["second_snapshot_xy_correction_applied"] = False
+    step["second_snapshot_rejected_reason"] = str(reason)
+    write_json(output_path, plan)
+    write_json(
+        report_path,
+        {
+            "first_plan": first_pick_plan_path,
+            "corrected_plan": output_path,
+            "correction_applied": False,
+            "fallback": "use_locked_first_observation_without_second_xy_correction",
+            "reason": str(reason),
+            "max_second_snapshot_correction_m": args.max_second_snapshot_correction_m,
+            "second_snapshot_max_z_error_m": args.second_snapshot_max_z_error_m,
+        },
+    )
+
 
 def _future_place_regions(base_object, previous_stack_xy, args):
     center = previous_stack_xy or base_object.get("geometry_center_m")
@@ -271,13 +309,10 @@ def main() -> int:
                     "Second target observation",
                     retry_offset_camera=args.second_snapshot_retry_offset_camera,
                 )
+                second_unreliable_reason = None
             except RuntimeError as exc:
                 message = str(exc)
-                if (
-                    "Second observation center z" not in message
-                    and "Second observation center XY delta" not in message
-                    and "Second observation center is not finite" not in message
-                ):
+                if not _is_second_pick_observation_error(message):
                     raise
                 print(
                     "Second target observation was visible but had unreliable 3D center; "
@@ -293,25 +328,53 @@ def main() -> int:
                         "second_snapshot_max_z_error_m": args.second_snapshot_max_z_error_m,
                     },
                 )
+                second_unreliable_reason = message
                 second_state = current_state
                 second_object = copy.deepcopy(held_object)
             if second_state is None:
+                second_unreliable_reason = "Second target observation produced no scene state."
                 second_state = current_state
                 second_object = copy.deepcopy(held_object)
             second_pick_plan_path = os.path.join(cycle_dir, "pick_plan_second_observation.json")
             build_offline_pick_plan(second_state, second_object, second_pick_plan_path, args)
             pick_plan_path = os.path.join(cycle_dir, "pick_plan_second_xy_corrected.json")
             correction_report_path = os.path.join(cycle_dir, "pick_second_xy_correction.json")
-            build_corrected_plan(
-                first_pick_plan_path,
-                second_pick_plan_path,
-                pick_plan_path,
-                correction_report_path,
-                args.max_second_snapshot_correction_m,
-                args.max_grasp_offset_m,
-                use_second_yaw=False,
-                use_second_grasp_offset=True,
-            )
+            if second_unreliable_reason is None:
+                try:
+                    build_corrected_plan(
+                        first_pick_plan_path,
+                        second_pick_plan_path,
+                        pick_plan_path,
+                        correction_report_path,
+                        args.max_second_snapshot_correction_m,
+                        args.max_grasp_offset_m,
+                        use_second_yaw=False,
+                        use_second_grasp_offset=True,
+                    )
+                except RuntimeError as exc:
+                    message = str(exc)
+                    if not _is_second_pick_observation_error(message):
+                        raise
+                    print(
+                        "Second target correction rejected; using locked first observation "
+                        "without XY correction: {}".format(message),
+                        flush=True,
+                    )
+                    _write_first_pick_plan_without_second_xy(
+                        first_pick_plan_path,
+                        pick_plan_path,
+                        correction_report_path,
+                        message,
+                        args,
+                    )
+            else:
+                _write_first_pick_plan_without_second_xy(
+                    first_pick_plan_path,
+                    pick_plan_path,
+                    correction_report_path,
+                    second_unreliable_reason,
+                    args,
+                )
             pick_plan = load_json(pick_plan_path)
             pick_step = pick_plan["steps"][0]
 

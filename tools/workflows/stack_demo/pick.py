@@ -4,7 +4,7 @@ import copy
 from types import SimpleNamespace
 
 from robot_scene_pipeline.xy_correction import apply_step_xy_correction, load_xy_correction
-from tools.planning.build_geometry_pick_plan import set_stack_demo_yaw
+from tools.planning.build_geometry_pick_plan import normalize_equivalent_yaw, set_stack_demo_yaw
 from tools.planning.decision_to_execution import compile_plan, write_json
 from tools.workflows.two_stage_visual_pick import camera_vector_to_base
 
@@ -38,6 +38,31 @@ def apply_selected_grasp_yaw(step, obj):
     if selected_yaw is None:
         return
     yaw = float(selected_yaw)
+    label = str(step.get("object_label") or obj.get("label") or "").lower()
+    if "square" in label and step.get("target_yaw_deg") is not None:
+        period = float(step.get("yaw_equivalence_period_deg", 90.0))
+        base_yaw = float(step["target_yaw_deg"])
+        delta = abs(normalize_equivalent_yaw(yaw - base_yaw, period))
+        step["adaptive_selected_grasp_yaw_deg"] = yaw
+        step["adaptive_grasp_yaw_delta_deg"] = float(delta)
+        if delta > 10.0:
+            step["selected_grasp_yaw_ignored_reason"] = (
+                "square_adaptive_yaw_delta_{:.2f}_deg_exceeds_10deg".format(delta)
+            )
+            step["feasible_yaw_intervals_deg"] = obj.get("feasible_yaw_intervals_deg", [])
+            step["blocked_yaw_intervals_deg"] = obj.get("blocked_yaw_intervals_deg", [])
+            return
+        step["target_yaw_deg"] = yaw
+        step["chosen_grasp_yaw_deg"] = yaw
+        step["selected_grasp_yaw_deg"] = yaw
+        step["target_yaw_valid"] = True
+        step["exact_tool_yaw_required"] = False
+        step["yaw_equivalence_period_deg"] = 90.0
+        step["yaw_frame"] = "base_link"
+        step["yaw_source"] = obj.get("grasp_yaw_source") or "adaptive_grasp_yaw_search"
+        step["feasible_yaw_intervals_deg"] = obj.get("feasible_yaw_intervals_deg", [])
+        step["blocked_yaw_intervals_deg"] = obj.get("blocked_yaw_intervals_deg", [])
+        return
     step["target_yaw_deg"] = yaw
     step["chosen_grasp_yaw_deg"] = yaw
     step["selected_grasp_yaw_deg"] = yaw
