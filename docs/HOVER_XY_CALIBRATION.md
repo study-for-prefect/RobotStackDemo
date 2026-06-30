@@ -81,7 +81,7 @@ python3 tools/calibration/xy_bias_diagnosis.py collect \
   --repeats 3 \
   --hover-height 0.08 \
   --known-object-height-m 0.0235 \
-  --tcp-offset-tool -0.015 0 0.15 \
+  --tcp-offset-tool 0 0 0.15 \
   --pre-rotate-wrist-yaw-sign negative \
   --execute
 ```
@@ -106,7 +106,7 @@ python3 tools/calibration/xy_bias_diagnosis.py collect \
   --repeats 3 \
   --hover-height 0.08 \
   --known-object-height-m 0.0235 \
-  --tcp-offset-tool -0.015 0 0.15 \
+  --tcp-offset-tool 0 0 0.15 \
   --execute
 ```
 

@@ -155,8 +155,8 @@ The integrated flow is:
 8. Execute the selected pick while keeping the object held.
 9. Execute the remaining stack/place plan.
 
-The default integrated TCP offset is `--tcp-offset-tool -0.015 0 0.15`,
-meaning the gripper center is 1.5 cm along tool0 -X and 15 cm along tool0 +Z.
+The default integrated TCP offset is `--tcp-offset-tool 0 0 0.15`,
+meaning the gripper center is 15 cm along tool0 +Z with no tool0 X bias.
 Other defaults include `--pick-target-lift-m 0.010`, `--release-gap-m 0.010`,
 and negative wrist pre-rotation. The controller
 accepts one LLM-selected `pick` per run; a later second `pick` is rejected

@@ -24,7 +24,7 @@ def parse_args():
         "--tcp-offset-tool",
         nargs=3,
         type=float,
-        default=[-0.015, 0.0, 0.15],
+        default=[0.0, 0.0, 0.15],
         metavar=("X", "Y", "Z"),
         help="tool0->TCP/gripper-center translation in tool0 coordinates.",
     )

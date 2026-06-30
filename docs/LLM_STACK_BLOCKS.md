@@ -11,7 +11,7 @@ python3 tools/workflows/stack_demo_pipeline.py \
   --instruction "以红色积木为底，把绿色积木放到红色上面，再把蓝色积木放到绿色上面" \
   --output-dir runtime/llm_stack_blocks_test \
   --model qwen2.5vl:7b-q4_K_M \
-  --tcp-offset-tool -0.015 0 0.15
+  --tcp-offset-tool 0 0 0.15
 ```
 
 Add `--execute --yes` only when the robot, gripper, RealSense, TF, MoveIt, and

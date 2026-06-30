@@ -48,7 +48,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--ready-joint-pose-json", default="config/rectangle_ready_pose.json")
     parser.add_argument("--skip-initial-ready", action="store_true")
     parser.add_argument("--initial-ready-settle-s", type=float, default=0.6)
-    parser.add_argument("--motion-tcp-offset-tool", nargs=3, type=float, default=[-0.015, 0.0, 0.15])
+    parser.add_argument("--motion-tcp-offset-tool", nargs=3, type=float, default=[0.0, 0.0, 0.15])
     parser.add_argument("--motion-settle-s", type=float, default=0.6)
     parser.add_argument("--post-motion-tf-wait-s", type=float, default=4.0)
     parser.add_argument("--post-motion-tf-poll-s", type=float, default=0.10)
