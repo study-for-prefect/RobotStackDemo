@@ -3,7 +3,7 @@
 import copy
 from types import SimpleNamespace
 
-from robot_scene_pipeline.xy_correction import apply_step_xy_correction, load_xy_correction
+from robot_scene_pipeline.xy_correction import apply_step_xyz_correction, load_xy_correction
 from tools.planning.build_geometry_pick_plan import normalize_equivalent_yaw, set_stack_demo_yaw
 from tools.planning.decision_to_execution import compile_plan, write_json
 from tools.workflows.two_stage_visual_pick import camera_vector_to_base
@@ -107,8 +107,11 @@ def build_offline_pick_plan(state, obj, output_path, args):
     ]
     step["pick_target_lift_m"] = float(args.pick_target_lift_m)
     step["coordinate_source"] = "required_geometry_center_m"
-    correction = load_xy_correction(args.xy_correction_json)
-    configured_bias = correction.get("grasp_xy_bias_m", [0.0, 0.0])
+    correction_path = getattr(args, "calibration_json", "") or args.xy_correction_json
+    correction = load_xy_correction(correction_path)
+    configured_bias = correction.get("grasp_base_bias_m", correction.get("grasp_xy_bias_m", [0.0, 0.0, 0.0]))
+    if len(configured_bias) == 2:
+        configured_bias = [float(configured_bias[0]), float(configured_bias[1]), 0.0]
     grasp_bias_base = getattr(args, "grasp_bias_base", [0.0, 0.0])
     grasp_bias_camera = getattr(args, "grasp_bias_camera", [0.0, 0.0])
     grasp_bias_camera_base = [0.0, 0.0, 0.0]
@@ -117,12 +120,13 @@ def build_offline_pick_plan(state, obj, output_path, args):
             args.tf_json,
             [float(grasp_bias_camera[0]), float(grasp_bias_camera[1]), 0.0],
         )
-    correction["grasp_xy_bias_m"] = [
+    correction["grasp_base_bias_m"] = [
         float(configured_bias[0]) + float(grasp_bias_base[0]) + float(grasp_bias_camera_base[0]),
         float(configured_bias[1]) + float(grasp_bias_base[1]) + float(grasp_bias_camera_base[1]),
+        float(configured_bias[2]),
     ]
-    apply_step_xy_correction(step, center[:2], correction, kind="grasp")
-    step["grasp_offset_from_geometry_center_m"] = step["grasp_xy_bias_m"]
+    apply_step_xyz_correction(step, step["target_position_m"], correction, kind="grasp")
+    step["grasp_offset_from_geometry_center_m"] = step["grasp_correction_delta_m"]
     step["grasp_bias_camera_xy_m"] = [float(value) for value in grasp_bias_camera]
     step["grasp_bias_camera_base_xy_m"] = [float(value) for value in grasp_bias_camera_base[:2]]
     set_stack_demo_yaw(

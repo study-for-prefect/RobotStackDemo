@@ -15,6 +15,7 @@ from robot_scene_pipeline.geometry_relations import (
 )
 from robot_scene_pipeline.grasp_yaw_search import normalize_yaw_signed_180
 from tools.workflows.stack_demo.pick import build_offline_pick_plan
+from tools.workflows.stack_demo.placement import build_frozen_place_step, validate_place_second_snapshot
 from tools.workflows.stack_demo.push_clearing import pushable_blocking_relations
 
 
@@ -252,6 +253,136 @@ def test_selected_grasp_yaw_is_written_to_pick_plan():
     assert step["yaw_source"] == "adaptive_grasp_yaw_search"
 
 
+def test_final_held_place_snapshot_rejects_mismatched_base_id_and_yaw():
+    locked = {
+        "placement_base_object_id": 1,
+        "placement_base_center_xy_m": [0.30, 0.16],
+        "placement_base_top_z_m": 0.011,
+        "stack_yaw_deg": 0.0,
+    }
+    wrong_id = {
+        "placement_base_object_id": 0,
+        "placement_base_center_xy_m": [0.311, 0.158],
+        "placement_base_top_z_m": 0.0108,
+        "stack_yaw_deg": 28.0,
+    }
+    try:
+        validate_place_second_snapshot(locked, wrong_id, max_correction_m=0.015, top_z_tolerance_m=0.015)
+        raise AssertionError("Expected mismatched base id to be rejected.")
+    except RuntimeError as exc:
+        assert "does not match locked base id" in str(exc)
+
+    wrong_yaw = dict(wrong_id)
+    wrong_yaw["placement_base_object_id"] = 1
+    try:
+        validate_place_second_snapshot(locked, wrong_yaw, max_correction_m=0.015, top_z_tolerance_m=0.015)
+        raise AssertionError("Expected yaw jump to be rejected.")
+    except RuntimeError as exc:
+        assert "yaw delta" in str(exc)
+
+
+def test_calibration_json_applies_grasp_and_place_xyz_biases():
+    target = make_object(
+        1,
+        (0.40, 0.00, 0.015),
+        label="square green",
+        pointcloud_geometry_valid=True,
+        geometry_frame="base_link",
+        dimensions_m=[0.024, 0.024, 0.024],
+    )
+    base = make_object(
+        2,
+        (0.30, 0.10, 0.012),
+        label="square red",
+        pointcloud_geometry_valid=True,
+        geometry_frame="base_link",
+        dimensions_m=[0.024, 0.024, 0.024],
+    )
+    calibration = {
+        "grasp_base_bias_m": [0.002, -0.003, 0.004],
+        "place_base_bias_m": [-0.001, 0.002, -0.003],
+        "max_correction_m": {"xy_m": 0.02, "z_m": 0.015},
+    }
+    args = SimpleNamespace(
+        approach_height_m=0.05,
+        pick_target_lift_m=0.0,
+        xy_correction_json="",
+        grasp_bias_base=[0.0, 0.0],
+        grasp_bias_camera=[0.0, 0.0],
+        tf_json="",
+        fixed_square_yaw_deg=0.0,
+        stack_square_yaw_mode="detected",
+        grasp_axis="long",
+        gripper_yaw_offset_deg=0.0,
+        square_yaw_snap_tolerance_deg=5.0,
+        place_yaw_strategy="base",
+        place_center_strategy="top",
+        release_gap_m=0.01,
+        place_top_z_bias_m=0.0,
+        object_offset_tool=[0.0, 0.0],
+        place_bias_base=[0.0, 0.0],
+        max_place_bias_base_m=0.01,
+        max_stack_top_center_offset_m=0.015,
+    )
+    state = {"objects": [target, base], "base_frame": "base_link"}
+    stack_state = {
+        "valid": True,
+        "placement_base_center_xy_m": [0.30, 0.10],
+        "placement_base_top_z_m": 0.024,
+        "top_object_id": 2,
+        "placement_base_object_id": 2,
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+        calibration_path = os.path.join(tmpdir, "calibration.json")
+        with open(calibration_path, "w", encoding="utf-8") as f:
+            json.dump(calibration, f)
+        args.calibration_json = calibration_path
+        pick_path = os.path.join(tmpdir, "pick.json")
+        build_offline_pick_plan(state, target, pick_path, args)
+        with open(pick_path, "r", encoding="utf-8") as f:
+            pick_step = json.load(f)["steps"][0]
+        place_step = build_frozen_place_step(state, stack_state, base, target, args)
+
+    assert pick_step["target_position_m"] == [0.402, -0.003, 0.019]
+    assert pick_step["grasp_base_bias_m"] == [0.002, -0.003, 0.004]
+    assert place_step["target_position_m"] == [0.299, 0.102, 0.043]
+    assert abs(place_step["release_z_base_m"] - 0.043) < 1e-12
+    assert place_step["place_base_bias_m"] == [-0.001, 0.002, -0.003]
+
+
+def test_calibration_correction_limit_rejects_large_bias():
+    target = make_object(
+        1,
+        (0.40, 0.00, 0.015),
+        label="square green",
+        pointcloud_geometry_valid=True,
+        geometry_frame="base_link",
+    )
+    args = SimpleNamespace(
+        approach_height_m=0.05,
+        pick_target_lift_m=0.0,
+        xy_correction_json="",
+        grasp_bias_base=[0.0, 0.0],
+        grasp_bias_camera=[0.0, 0.0],
+        tf_json="",
+        fixed_square_yaw_deg=0.0,
+        stack_square_yaw_mode="detected",
+        grasp_axis="long",
+        gripper_yaw_offset_deg=0.0,
+        square_yaw_snap_tolerance_deg=5.0,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        calibration_path = os.path.join(tmpdir, "calibration.json")
+        with open(calibration_path, "w", encoding="utf-8") as f:
+            json.dump({"grasp_base_bias_m": [0.03, 0.0, 0.0], "max_correction_m": {"xy_m": 0.02}}, f)
+        args.calibration_json = calibration_path
+        try:
+            build_offline_pick_plan({"objects": [target]}, target, os.path.join(tmpdir, "pick.json"), args)
+            raise AssertionError("Expected large correction to be rejected.")
+        except ValueError as exc:
+            assert "correction XY norm" in str(exc)
+
+
 if __name__ == "__main__":
     test_near_relation()
     test_on_relation()
@@ -266,4 +397,7 @@ if __name__ == "__main__":
     test_base_blocks_all_yaws_returns_replan_without_push()
     test_placed_or_locked_structure_blocks_all_yaws_returns_replan_without_push()
     test_selected_grasp_yaw_is_written_to_pick_plan()
+    test_final_held_place_snapshot_rejects_mismatched_base_id_and_yaw()
+    test_calibration_json_applies_grasp_and_place_xyz_biases()
+    test_calibration_correction_limit_rejects_large_bias()
     print("geometry_relations tests passed")

@@ -124,7 +124,9 @@ def lookup_transform_matrix(base_frame, camera_frame, timeout_sec):
     from rclpy.time import Time
     from tf2_ros import Buffer, TransformListener
 
-    rclpy.init(args=None)
+    owns_rclpy = not rclpy.ok()
+    if owns_rclpy:
+        rclpy.init(args=None)
     node = rclpy.create_node("scene_pipeline_tf_lookup")
     buffer = Buffer()
     listener = TransformListener(buffer, node)  # noqa F841
@@ -150,7 +152,8 @@ def lookup_transform_matrix(base_frame, camera_frame, timeout_sec):
         )
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if owns_rclpy and rclpy.ok():
+            rclpy.shutdown()
 
 
 def attach_base_coordinates(detections, base_frame, camera_frame, timeout_sec, tf_json="", point_mode=DEFAULT_TF_POINT_MODE):

@@ -54,4 +54,9 @@ def parse_args():
     analyze = subparsers.add_parser("analyze", help="Fit diagnostic models from a samples JSON file.")
     analyze.add_argument("samples_json")
     analyze.add_argument("--output", default="")
+    analyze.add_argument(
+        "--output-calibration-json",
+        default="",
+        help="Optional stack_demo --calibration-json output path.",
+    )
     return parser.parse_args()

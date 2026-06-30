@@ -11,6 +11,7 @@ if PROJECT_ROOT not in sys.path:
 
 from tools.workflows.two_stage_pick import (
     build_corrected_plan,
+    build_tcp_error_corrected_plan,
     camera_optical_vector_to_base,
     camera_vector_to_base,
     main,
@@ -18,6 +19,7 @@ from tools.workflows.two_stage_pick import (
 
 __all__ = [
     "build_corrected_plan",
+    "build_tcp_error_corrected_plan",
     "camera_optical_vector_to_base",
     "camera_vector_to_base",
     "main",

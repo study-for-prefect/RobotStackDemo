@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 
-from robot_scene_pipeline.io_utils import write_json
+from robot_scene_pipeline.io_utils import project_path, write_json
 
 from .io import load_json
 
@@ -171,6 +171,31 @@ def analyze_dataset(dataset):
     }
 
 
+def build_stack_calibration(report):
+    """Convert a diagnosis report into stack_demo --calibration-json format."""
+    calibration = {
+        "schema_version": "stack_demo_calibration_v1",
+        "source": "xy_bias_diagnosis.analyze",
+        "max_correction_m": {
+            "xy_m": 0.02,
+            "z_m": 0.015,
+        },
+    }
+    yaw_model = report.get("yaw_model")
+    if yaw_model:
+        base_delta = yaw_model.get("suggested_base_offset_delta_m") or [0.0, 0.0]
+        calibration["grasp_base_bias_m"] = [float(base_delta[0]), float(base_delta[1]), 0.0]
+        calibration["tcp_offset_tool_m"] = [
+            float(value) for value in yaw_model["suggested_updated_tcp_offset_tool_m"][:3]
+        ]
+    workspace_model = report.get("workspace_model")
+    if workspace_model:
+        calibration["affine_xy"] = workspace_model["suggested_affine_xy"]
+    calibration.setdefault("grasp_base_bias_m", [0.0, 0.0, 0.0])
+    calibration.setdefault("place_base_bias_m", [0.0, 0.0, 0.0])
+    return calibration
+
+
 def print_report(report):
     print("\nDiagnosis report", flush=True)
     print("samples={}".format(report["sample_count"]), flush=True)
@@ -228,6 +253,11 @@ def analyze(args):
         "diagnosis_report.json",
     )
     write_json(output, report)
+    if args.output_calibration_json:
+        calibration = build_stack_calibration(report)
+        calibration_output = project_path(args.output_calibration_json)
+        write_json(calibration_output, calibration)
+        print("Saved stack demo calibration: {}".format(calibration_output), flush=True)
     print_report(report)
     print("Saved report: {}".format(output), flush=True)
     return 0

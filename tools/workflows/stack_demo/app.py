@@ -15,7 +15,7 @@ from robot_scene_pipeline.scene_memory import (
 from robot_scene_pipeline.stack_state import verify_stack_growth
 from robot_scene_pipeline.xy_correction import load_xy_correction
 from tools.planning.decision_to_execution import write_json
-from tools.workflows.two_stage_visual_pick import build_corrected_plan
+from tools.workflows.two_stage_visual_pick import build_tcp_error_corrected_plan
 
 from .arguments import parse_args
 from .commands import (
@@ -62,6 +62,7 @@ SECOND_PICK_OBSERVATION_ERROR_MARKERS = (
     "Second observation center XY delta",
     "Second observation center is not finite",
     "Second-snapshot XY correction",
+    "Second-snapshot TCP-target correction",
 )
 
 
@@ -96,6 +97,17 @@ def _write_first_pick_plan_without_second_xy(
     )
 
 
+def _write_second_snapshot_hover_plan(first_pick_plan_path: str, output_path: str, hover_above_object_m: float) -> None:
+    plan = load_json(first_pick_plan_path)
+    step = plan["steps"][0]
+    target = [float(value) for value in step["target_position_m"][:3]]
+    hover_z = target[2] + float(hover_above_object_m)
+    step["approach_position_m"] = [round(target[0], 5), round(target[1], 5), round(hover_z, 5)]
+    step["second_snapshot_hover_above_object_m"] = float(hover_above_object_m)
+    step["coordinate_source"] = "{}.second_snapshot_hover".format(step.get("coordinate_source", "locked_first"))
+    write_json(output_path, plan)
+
+
 def _future_place_regions(base_object, previous_stack_xy, args):
     center = previous_stack_xy or base_object.get("geometry_center_m")
     size = base_object.get("dimensions_m") or [0.04, 0.04, 0.03]
@@ -118,6 +130,16 @@ def main() -> int:
 
     if args.memory_json is None:
         args.memory_json = os.path.join(args.output_dir, "scene_memory.json")
+
+    calibration_path = args.calibration_json or args.xy_correction_json
+    calibration = load_xy_correction(calibration_path)
+    if calibration:
+        write_json(os.path.join(args.output_dir, "active_calibration.json"), calibration)
+    if calibration.get("tcp_offset_tool_m") is not None:
+        tcp_offset = calibration.get("tcp_offset_tool_m")
+        if not isinstance(tcp_offset, (list, tuple)) or len(tcp_offset) != 3:
+            raise RuntimeError("tcp_offset_tool_m must contain exactly three values.")
+        args.tcp_offset_tool = [float(value) for value in tcp_offset]
 
     memory = load_memory(args.memory_json, task="stack_blocks")
 
@@ -190,7 +212,6 @@ def main() -> int:
             },
         )
 
-        xy_correction = load_xy_correction(args.xy_correction_json)
         current_state = copy.deepcopy(initial_state)
         previous_stack_xy = None
         previous_locked_stack = None
@@ -291,7 +312,15 @@ def main() -> int:
 
             runtime["current_stage"] = "empty_gripper_first_pick_approach"
             if args.execute:
-                run(pick_approach_command(args, first_pick_plan_path))
+                approach_plan_path = first_pick_plan_path
+                if args.enable_second_pick_snapshot:
+                    approach_plan_path = os.path.join(cycle_dir, "pick_plan_second_snapshot_hover.json")
+                    _write_second_snapshot_hover_plan(
+                        first_pick_plan_path,
+                        approach_plan_path,
+                        args.second_snapshot_hover_above_object_m,
+                    )
+                run(pick_approach_command(args, approach_plan_path))
 
             second_object = copy.deepcopy(held_object)
             pick_plan_path = first_pick_plan_path
@@ -324,6 +353,7 @@ def main() -> int:
                         parse_second_pick_target,
                         "Second target observation",
                         retry_offset_camera=args.second_snapshot_retry_offset_camera,
+                        refresh_tf=True,
                     )
                     second_unreliable_reason = None
                 except RuntimeError as exc:
@@ -356,15 +386,15 @@ def main() -> int:
                 pick_plan_path = os.path.join(cycle_dir, "pick_plan_second_xy_corrected.json")
                 if second_unreliable_reason is None:
                     try:
-                        build_corrected_plan(
+                        build_tcp_error_corrected_plan(
                             first_pick_plan_path,
                             second_pick_plan_path,
+                            args.tf_json,
                             pick_plan_path,
                             correction_report_path,
                             args.max_second_snapshot_correction_m,
                             args.max_grasp_offset_m,
-                            use_second_yaw=False,
-                            use_second_grasp_offset=True,
+                            tcp_offset_tool=args.tcp_offset_tool,
                         )
                     except RuntimeError as exc:
                         message = str(exc)
@@ -524,41 +554,20 @@ def main() -> int:
                         os.path.join(cycle_dir, "place_final_held_xy_z_correction.json"),
                         held_place_correction,
                     )
-                    place_step = build_frozen_place_step(
-                        held_close_state,
-                        held_final_stack,
-                        current_base_object,
-                        held_object,
-                        args,
-                        locked_place_step=place_step,
+                    write_json(
+                        os.path.join(cycle_dir, "place_final_held_observation_verified_keep_locked.json"),
+                        {
+                            "validated": True,
+                            "execution_plan": place_plan_path,
+                            "policy": "keep_locked_before_pick_place_plan",
+                            "reason": (
+                                "Held-object close observation is verification-only; "
+                                "it must not overwrite locked place center or yaw."
+                            ),
+                            "held_place_correction": held_place_correction,
+                            "locked_place_pose": runtime["last_place_pose"],
+                        },
                     )
-                    place_step["coordinate_source"] = (
-                        "held_object_final_observation.placement_base_center_xy_and_top_z"
-                    )
-                    place_step["pre_holding_base_center_xy_m"] = held_place_correction["first_base_center_xy_m"]
-                    place_step["final_held_base_center_xy_m"] = held_place_correction["second_base_center_xy_m"]
-                    place_step["final_held_delta_base_xy_m"] = held_place_correction["second_snapshot_delta_base_xy_m"]
-                    place_step["pre_holding_base_top_z_m"] = held_place_correction["first_base_top_z_m"]
-                    place_step["final_held_base_top_z_m"] = held_place_correction["second_base_top_z_m"]
-                    validate_pick_place_separation(pick_step, place_step, args.min_pick_place_xy_distance_m)
-                    place_plan_path = os.path.join(cycle_dir, "place_on_top_plan_final_held_observation.json")
-                    write_json(place_plan_path, plan_envelope(held_close_state, place_step))
-                    final_stack_state = held_final_stack
-                    runtime["last_place_pose"] = {
-                        "position_m": place_step["target_position_m"],
-                        "pre_place_z_base_m": place_step["pre_place_z_base_m"],
-                        "release_z_base_m": place_step["release_z_base_m"],
-                        "detected_base_center_xy_m": held_final_stack.get("placement_base_center_xy_m"),
-                        "placement_reference_center_xy_m": place_step.get("placement_reference_center_xy_m"),
-                        "placement_reference_source": place_step.get("placement_reference_source"),
-                        "observed_top_center_xy_m": place_step.get("observed_top_center_xy_m"),
-                        "top_center_offset_from_reference_m": place_step.get("top_center_offset_from_reference_m"),
-                        "detected_base_top_z_m": held_final_stack.get("placement_base_top_z_m"),
-                        "place_top_z_bias_m": place_step.get("place_top_z_bias_m"),
-                        "release_gap_m": place_step.get("release_gap_m"),
-                        "yaw_deg": place_step["chosen_place_yaw_deg"],
-                        "source": place_step["coordinate_source"],
-                    }
                 except RuntimeError as exc:
                     reject_held_observation_and_keep_locked(
                         cycle_dir,

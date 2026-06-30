@@ -10,6 +10,7 @@ import glob
 import importlib
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
@@ -240,6 +241,7 @@ class RosRgbdSubscriber:
         self.depth_frame_id = ""
         self.camera_info_frame_id = ""
         self.last_error = None
+        self._lock = threading.Lock()
 
         self.node.create_subscription(Image, self.color_topic, self._on_color, qos_profile_sensor_data)
         self.node.create_subscription(Image, self.depth_topic, self._on_depth, qos_profile_sensor_data)
@@ -252,35 +254,48 @@ class RosRgbdSubscriber:
 
     def _on_color(self, msg):
         try:
-            self.color_bgr = decode_color_image(msg)
-            self.color_stamp = _stamp_to_float(msg.header)
-            self.color_frame_id = str(getattr(msg.header, "frame_id", "") or "")
-            self.color_seq += 1
-            self.last_error = None
+            image = decode_color_image(msg)
+            with self._lock:
+                self.color_bgr = image
+                self.color_stamp = _stamp_to_float(msg.header)
+                self.color_frame_id = str(getattr(msg.header, "frame_id", "") or "")
+                self.color_seq += 1
+                self.last_error = None
         except Exception as exc:
-            self.last_error = "color decode failed: {}".format(exc)
+            with self._lock:
+                self.last_error = "color decode failed: {}".format(exc)
 
     def _on_depth(self, msg):
         try:
-            self.depth_frame = TopicDepthFrame(decode_depth_image_m(msg, self.depth_scale_m))
-            self.depth_stamp = _stamp_to_float(msg.header)
-            self.depth_frame_id = str(getattr(msg.header, "frame_id", "") or "")
-            self.last_error = None
+            depth_frame = TopicDepthFrame(decode_depth_image_m(msg, self.depth_scale_m))
+            with self._lock:
+                self.depth_frame = depth_frame
+                self.depth_stamp = _stamp_to_float(msg.header)
+                self.depth_frame_id = str(getattr(msg.header, "frame_id", "") or "")
+                self.last_error = None
         except Exception as exc:
-            self.last_error = "depth decode failed: {}".format(exc)
+            with self._lock:
+                self.last_error = "depth decode failed: {}".format(exc)
 
     def _on_camera_info(self, msg):
         try:
-            self.intrinsics = intrinsics_from_camera_info(msg)
-            self.camera_info_frame_id = self.intrinsics.frame_id
-            self.last_error = None
+            intrinsics = intrinsics_from_camera_info(msg)
+            with self._lock:
+                self.intrinsics = intrinsics
+                self.camera_info_frame_id = intrinsics.frame_id
+                self.last_error = None
         except Exception as exc:
-            self.last_error = "camera_info decode failed: {}".format(exc)
+            with self._lock:
+                self.last_error = "camera_info decode failed: {}".format(exc)
 
     def _ready(self, require_depth):
-        if self.color_bgr is None or self.intrinsics is None:
-            return False
-        return (not require_depth) or self.depth_frame is not None
+        with self._lock:
+            if self.color_bgr is None or self.intrinsics is None:
+                return False
+            return (not require_depth) or self.depth_frame is not None
+
+    def ready(self, require_depth: bool = True) -> bool:
+        return self._ready(require_depth)
 
     def wait_for_frame(
         self,
@@ -309,10 +324,18 @@ class RosRgbdSubscriber:
         )
 
     def latest_frame(self) -> RosRgbdFrame:
-        depth_frame = None
-        if self.depth_frame is not None:
-            depth_frame = TopicDepthFrame(self.depth_frame.depth_m.copy())
-        frame_bgr = self.color_bgr.copy()
+        with self._lock:
+            depth_frame = None
+            if self.depth_frame is not None:
+                depth_frame = TopicDepthFrame(self.depth_frame.depth_m.copy())
+            frame_bgr = self.color_bgr.copy()
+            intrinsics = self.intrinsics
+            color_seq = int(self.color_seq)
+            color_stamp = self.color_stamp
+            depth_stamp = self.depth_stamp
+            color_frame_id = self.color_frame_id
+            depth_frame_id = self.depth_frame_id
+            camera_info_frame_id = self.camera_info_frame_id
         profile = {
             "source": "ros-topic",
             "color_topic": self.color_topic,
@@ -324,19 +347,19 @@ class RosRgbdSubscriber:
             "depth_height": None if depth_frame is None else depth_frame.get_height(),
             "depth_available": depth_frame is not None,
             "depth_scale_m_per_unit": self.depth_scale_m,
-            "color_stamp": self.color_stamp,
-            "depth_stamp": self.depth_stamp,
-            "color_frame_id": self.color_frame_id,
-            "depth_frame_id": self.depth_frame_id,
-            "camera_info_frame_id": self.camera_info_frame_id,
-            "coordinate_frame": self.camera_info_frame_id or self.depth_frame_id or self.color_frame_id,
+            "color_stamp": color_stamp,
+            "depth_stamp": depth_stamp,
+            "color_frame_id": color_frame_id,
+            "depth_frame_id": depth_frame_id,
+            "camera_info_frame_id": camera_info_frame_id,
+            "coordinate_frame": camera_info_frame_id or depth_frame_id or color_frame_id,
         }
         return RosRgbdFrame(
             frame_bgr=frame_bgr,
             depth_frame=depth_frame,
-            intrinsics=self.intrinsics,
+            intrinsics=intrinsics,
             profile=profile,
-            color_seq=int(self.color_seq),
+            color_seq=color_seq,
         )
 
 

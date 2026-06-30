@@ -57,6 +57,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-predict", type=int, default=1024)
     parser.add_argument("--no-image", action="store_true")
     parser.add_argument("--detector-weight", default="models/yolo/weights/best.pt")
+    parser.add_argument(
+        "--perception-server-url",
+        default=os.environ.get("ROBOT_SCENE_PERCEPTION_URL", "http://127.0.0.1:8765"),
+        help="Persistent perception server base URL. Use empty string only with --allow-snapshot-subprocess-fallback.",
+    )
+    parser.add_argument("--perception-server-timeout-s", type=float, default=15.0)
+    parser.add_argument(
+        "--allow-snapshot-subprocess-fallback",
+        action="store_true",
+        help="Allow legacy snapshot_pipeline subprocess if the persistent perception server is unavailable.",
+    )
     parser.add_argument("--score-thresh", type=float, default=0.5)
     parser.add_argument("--detector-imgsz", type=int, default=960)
     parser.add_argument("--detector-iou", type=float, default=0.45)
@@ -70,6 +81,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-observation-retry-count", type=int, default=1)
     parser.add_argument("--initial-observation-stable-wait-s", type=float, default=0.5)
     parser.add_argument("--xy-correction-json", default="")
+    parser.add_argument(
+        "--calibration-json",
+        default="",
+        help=(
+            "Unified calibration JSON. Supports affine_xy, grasp_base_bias_m, "
+            "place_base_bias_m, tcp_offset_tool_m, and max_correction_m. "
+            "When set, it supersedes --xy-correction-json for stack pick/place correction."
+        ),
+    )
     parser.add_argument("--search-radius-m", type=float, default=0.06)
     parser.add_argument("--close-stack-search-radius-m", type=float, default=0.04)
     parser.add_argument("--target-exclusion-radius-m", type=float, default=0.035)
@@ -114,6 +134,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-pre-rotate-joint-delta", type=float, default=3.1416)
     parser.add_argument("--max-second-snapshot-correction-m", type=float, default=0.006)
     parser.add_argument("--second-snapshot-max-z-error-m", type=float, default=0.06)
+    parser.add_argument("--second-snapshot-hover-above-object-m", type=float, default=0.10)
     parser.add_argument("--max-grasp-offset-m", type=float, default=0.05)
     parser.add_argument(
         "--enable-second-pick-snapshot",

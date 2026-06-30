@@ -4,6 +4,8 @@ import copy
 import math
 import os
 
+from robot_scene_pipeline.grasp_yaw_search import equivalent_yaw_delta_deg
+from robot_scene_pipeline.xy_correction import apply_step_xyz_correction, load_xy_correction
 from tools.planning.decision_to_execution import compile_place_on_top, write_json
 
 from .scene import (
@@ -115,12 +117,16 @@ def build_frozen_place_step(current_state, stack_state, base_object, held_object
         place_step["exact_tool_yaw_required"] = True
         place_step["yaw_equivalence_period_deg"] = 180.0
         place_step["preserve_current_yaw"] = False
+    correction_path = getattr(args, "calibration_json", "") or getattr(args, "xy_correction_json", "")
+    correction = load_xy_correction(correction_path)
+    apply_step_xyz_correction(place_step, place_step["target_position_m"], correction, kind="place")
     return place_step
 
 
 def validate_pick_place_separation(pick_step, place_step, min_distance_m):
     pick_xy = [float(value) for value in pick_step["target_position_m"][:2]]
-    place_xy = [float(value) for value in place_step["stack_center_xy_base_m"][:2]]
+    place_reference = place_step.get("tcp_place_xy_base_m") or place_step.get("target_position_m")
+    place_xy = [float(value) for value in place_reference[:2]]
     distance = math.hypot(place_xy[0] - pick_xy[0], place_xy[1] - pick_xy[1])
     if distance < float(min_distance_m):
         raise RuntimeError(
@@ -135,6 +141,54 @@ def validate_pick_place_separation(pick_step, place_step, min_distance_m):
     return place_step
 
 
+def _placement_base_stack_object(stack_state):
+    base_id = stack_state.get("placement_base_object_id")
+    for obj in stack_state.get("stack_objects") or []:
+        if base_id is not None and str(obj.get("id")) == str(base_id):
+            return obj
+    objects = stack_state.get("stack_objects") or []
+    return objects[-1] if objects else {}
+
+
+def _validate_same_base_identity(first_stack_state, second_stack_state):
+    first_id = first_stack_state.get("placement_base_object_id")
+    second_id = second_stack_state.get("placement_base_object_id")
+    if first_id is not None and second_id is not None and str(first_id) != str(second_id):
+        raise RuntimeError(
+            "Refusing second base correction: observed base id {} does not match locked base id {}.".format(
+                second_id,
+                first_id,
+            )
+        )
+
+    first_obj = _placement_base_stack_object(first_stack_state)
+    second_obj = _placement_base_stack_object(second_stack_state)
+    first_label = first_obj.get("label")
+    second_label = second_obj.get("label")
+    if first_label and second_label and str(first_label).lower() != str(second_label).lower():
+        raise RuntimeError(
+            "Refusing second base correction: observed base label '{}' does not match locked label '{}'.".format(
+                second_label,
+                first_label,
+            )
+        )
+
+    first_dims = first_obj.get("dimensions_m")
+    second_dims = second_obj.get("dimensions_m")
+    if first_dims is None or second_dims is None:
+        return
+    deltas = [
+        abs(float(second_dims[index]) - float(first_dims[index]))
+        for index in range(min(3, len(first_dims), len(second_dims)))
+    ]
+    if deltas and max(deltas) > 0.012:
+        raise RuntimeError(
+            "Refusing second base correction: observed base dimensions changed by {} m.".format(
+                [round(value, 5) for value in deltas]
+            )
+        )
+
+
 def validate_place_second_snapshot(first_stack_state, second_stack_state, max_correction_m, top_z_tolerance_m=None):
     first_xy = [float(value) for value in first_stack_state["placement_base_center_xy_m"][:2]]
     second_xy = [float(value) for value in second_stack_state["placement_base_center_xy_m"][:2]]
@@ -142,6 +196,7 @@ def validate_place_second_snapshot(first_stack_state, second_stack_state, max_co
     distance = math.hypot(delta[0], delta[1])
     first_top_z = float(first_stack_state["placement_base_top_z_m"])
     second_top_z = float(second_stack_state["placement_base_top_z_m"])
+    _validate_same_base_identity(first_stack_state, second_stack_state)
     if distance > float(max_correction_m):
         raise RuntimeError(
             "Refusing second base correction: XY delta {:.4f} m exceeds {:.4f} m.".format(
@@ -155,6 +210,14 @@ def validate_place_second_snapshot(first_stack_state, second_stack_state, max_co
                 float(top_z_tolerance_m),
             )
         )
+    first_yaw = first_stack_state.get("stack_yaw_deg")
+    second_yaw = second_stack_state.get("stack_yaw_deg")
+    if first_yaw is not None and second_yaw is not None:
+        yaw_delta = equivalent_yaw_delta_deg(float(second_yaw), float(first_yaw))
+        if yaw_delta > 10.0:
+            raise RuntimeError(
+                "Refusing second base correction: yaw delta {:.2f} deg exceeds 10.00 deg.".format(yaw_delta)
+            )
     return {
         "first_base_center_xy_m": first_xy,
         "second_base_center_xy_m": second_xy,

@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 import time
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 from tools.workflows.two_stage_visual_pick import camera_optical_vector_to_base
 
@@ -120,21 +122,62 @@ def capture_empty_observation(args, output_dir, held_object_id):
     init_ready_pose(args)
     if args.offline_scene_state:
         return None
-    run(tf_lookup_command(args))
-    run(snapshot_command(args, output_dir, stack_reasoning=False))
+    capture_scene_observation(args, output_dir, stack_reasoning=False)
     return load_json(os.path.join(output_dir, "private_scene_state.json"))
 
 
-def capture_empty_current_pose(args, output_dir, held_object_id, allow_holding=False):
+def capture_empty_current_pose(args, output_dir, held_object_id, allow_holding=False, refresh_tf=False):
     if held_object_id is not None and not allow_holding:
         raise RuntimeError("Second snapshot forbidden while holding object {}.".format(held_object_id))
     if args.offline_scene_state:
         return None
     if args.second_snapshot_stable_wait_s > 0:
         time.sleep(float(args.second_snapshot_stable_wait_s))
-    run(tf_lookup_command(args))
-    run(snapshot_command(args, output_dir, stack_reasoning=False))
+    if refresh_tf:
+        run(tf_lookup_command(args))
+    capture_scene_observation(args, output_dir, stack_reasoning=False)
     return load_json(os.path.join(output_dir, "private_scene_state.json"))
+
+
+def perception_server_snapshot(args, output_dir):
+    base_url = str(getattr(args, "perception_server_url", "") or "").rstrip("/")
+    if not base_url:
+        raise RuntimeError("No --perception-server-url configured.")
+    query = urlencode(
+        {
+            "output_dir": output_dir,
+            "instruction": getattr(args, "instruction", ""),
+            "camera_frame": perception_camera_frame(args),
+        }
+    )
+    url = "{}/snapshot?{}".format(base_url, query)
+    with urlopen(url, timeout=float(getattr(args, "perception_server_timeout_s", 10.0))) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not payload.get("ok"):
+        raise RuntimeError(payload.get("error") or "perception server snapshot failed")
+    return payload
+
+
+def capture_scene_observation(args, output_dir, stack_reasoning=False):
+    try:
+        payload = perception_server_snapshot(args, output_dir)
+        print(
+            "Perception server snapshot: output={} objects={} frame_seq={}".format(
+                output_dir,
+                payload.get("object_count"),
+                payload.get("frame_color_seq"),
+            ),
+            flush=True,
+        )
+        return
+    except Exception as exc:
+        if not getattr(args, "allow_snapshot_subprocess_fallback", False):
+            raise RuntimeError(
+                "Persistent perception server snapshot failed and subprocess fallback is disabled: {}".format(exc)
+            )
+        print("Perception server failed; using legacy snapshot subprocess: {}".format(exc), flush=True)
+    run(tf_lookup_command(args))
+    run(snapshot_command(args, output_dir, stack_reasoning=stack_reasoning))
 
 
 def relative_translate_command(args, offset_base):
@@ -182,13 +225,20 @@ def retry_close_observation(
     allow_holding=False,
     retry_count=None,
     retry_offset_camera=None,
+    refresh_tf=False,
 ):
     retries = args.close_observation_retry_count if retry_count is None else retry_count
     attempts = max(0, int(retries)) + 1
     last_error = None
     for attempt in range(attempts):
         attempt_dir = os.path.join(output_dir, "attempt_{:02d}".format(attempt + 1))
-        state = capture_empty_current_pose(args, attempt_dir, held_object_id, allow_holding=allow_holding)
+        state = capture_empty_current_pose(
+            args,
+            attempt_dir,
+            held_object_id,
+            allow_holding=allow_holding,
+            refresh_tf=bool(refresh_tf),
+        )
         if state is None:
             return None, None
         try:

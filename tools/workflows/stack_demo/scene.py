@@ -6,13 +6,17 @@ import os
 import time
 
 from robot_scene_pipeline.llm_scene_reasoner import (
+    build_stack_blocks_prompt,
+    call_ollama,
+    normalize_stack_blocks_text,
     rule_stack_blocks_decision,
     validate_stack_blocks_decision,
 )
+from tools.planning.decision_to_execution import write_json
 from robot_scene_pipeline.stack_state import estimate_stack_state
 from tools.planning.build_geometry_pick_plan import find_object, set_stack_demo_yaw
 
-from .commands import load_json, run, snapshot_command, tf_lookup_command
+from .commands import capture_scene_observation, load_json
 
 def object_by_id(state, object_id):
     for obj in state.get("objects", []):
@@ -53,8 +57,7 @@ def load_or_capture_initial(args):
             initial_dir = os.path.join(args.output_dir, "initial_order_retry_{:02d}".format(attempt))
             if float(args.initial_observation_stable_wait_s) > 0.0:
                 time.sleep(float(args.initial_observation_stable_wait_s))
-        run(tf_lookup_command(args))
-        run(snapshot_command(args, initial_dir, stack_reasoning=False))
+        capture_scene_observation(args, initial_dir, stack_reasoning=False)
         state = load_json(os.path.join(initial_dir, "private_scene_state.json"))
         objects = [obj for obj in state.get("objects", []) if not obj.get("is_workspace")]
         if objects or attempt + 1 >= initial_attempts:
@@ -72,10 +75,19 @@ def load_or_capture_initial(args):
         decision = None if args.force_llm_decision else rule_stack_blocks_decision(args.instruction, state.get("objects", []))
         if decision is None:
             reasoning_dir = os.path.join(args.output_dir, "initial_order_llm")
-            run(tf_lookup_command(args))
-            run(snapshot_command(args, reasoning_dir, stack_reasoning=True))
+            capture_scene_observation(args, reasoning_dir, stack_reasoning=False)
             state = load_json(os.path.join(reasoning_dir, "private_scene_state.json"))
-            decision = load_json(os.path.join(reasoning_dir, "llm_scene_graph_decision.json"))
+            llm_input = load_json(os.path.join(reasoning_dir, "llm_input.json"))
+            prompt = build_stack_blocks_prompt(llm_input)
+            raw_result = call_ollama(args, prompt, state.get("snapshot_image", ""))
+            decision = normalize_stack_blocks_text(
+                raw_result,
+                hard_prior_objects=llm_input.get("hard_priors", {}).get("objects", []),
+                instruction=args.instruction,
+                prefer_explicit_rule=True,
+            )
+            write_json(os.path.join(reasoning_dir, "llm_scene_graph_decision_raw.json"), {"raw": raw_result})
+            write_json(os.path.join(reasoning_dir, "llm_scene_graph_decision.json"), decision)
     return state, decision
 
 

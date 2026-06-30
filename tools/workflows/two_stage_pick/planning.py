@@ -2,6 +2,7 @@
 
 import json
 import math
+import numpy as np
 
 from .io import load_json, write_json
 
@@ -64,6 +65,21 @@ def has_planned_motion(plan):
 def plan_has_reliable_yaw(path):
     step = first_planned_step(load_json(path))
     return bool(step.get("target_yaw_valid") and step.get("target_yaw_deg") is not None)
+
+
+def current_tcp_position_from_tf_json(tf_json_path, tcp_offset_tool):
+    payload = load_json(tf_json_path)
+    tool_transform = payload.get("tool_transform")
+    if not tool_transform:
+        raise RuntimeError(
+            "{} has no tool_transform. Regenerate it with tools/robot/tf_lookup_json.py --require-tool.".format(
+                tf_json_path
+            )
+        )
+    matrix = np.asarray(tool_transform["matrix_4x4"], dtype=float)
+    offset = np.asarray([float(value) for value in tcp_offset_tool[:3]] + [1.0], dtype=float)
+    tcp_base = matrix.dot(offset)
+    return [float(tcp_base[index]) for index in range(3)]
 
 
 def valid_geometry_center(step, name):
@@ -202,6 +218,98 @@ def build_corrected_plan(
     write_json(report_path, report)
     print(
         "\nSecond-snapshot correction: delta_base_xy=[{:.4f}, {:.4f}] m norm={:.4f} m".format(
+            delta[0], delta[1], correction_norm
+        ),
+        flush=True,
+    )
+
+
+def build_tcp_error_corrected_plan(
+    first_plan_path,
+    second_plan_path,
+    tf_json_path,
+    output_path,
+    report_path,
+    max_correction_m,
+    max_grasp_offset_m=0.05,
+    tcp_offset_tool=None,
+):
+    first_plan = load_json(first_plan_path)
+    second_plan = load_json(second_plan_path)
+    first_step = first_planned_step(first_plan)
+    second_step = first_planned_step(second_plan)
+    first_target = [float(value) for value in first_step["target_position_m"]]
+    first_geometry = valid_geometry_center(first_step, "First")
+    second_geometry = valid_geometry_center(second_step, "Second")
+    desired_tcp_to_target_xy = [
+        first_target[0] - first_geometry[0],
+        first_target[1] - first_geometry[1],
+    ]
+    desired_norm = math.hypot(desired_tcp_to_target_xy[0], desired_tcp_to_target_xy[1])
+    if desired_norm > float(max_grasp_offset_m):
+        raise RuntimeError(
+            "Selected TCP-to-target offset {:.4f} m exceeds limit {:.4f} m.".format(
+                desired_norm, max_grasp_offset_m
+            )
+        )
+    current_tcp = current_tcp_position_from_tf_json(tf_json_path, tcp_offset_tool or [0.0, 0.0, 0.15])
+    observed_tcp_to_target_xy = [
+        current_tcp[0] - second_geometry[0],
+        current_tcp[1] - second_geometry[1],
+    ]
+    delta = [
+        desired_tcp_to_target_xy[0] - observed_tcp_to_target_xy[0],
+        desired_tcp_to_target_xy[1] - observed_tcp_to_target_xy[1],
+        0.0,
+    ]
+    correction_norm = math.hypot(delta[0], delta[1])
+    if correction_norm > float(max_correction_m):
+        raise RuntimeError(
+            "Second-snapshot TCP-target correction {:.4f} m exceeds limit {:.4f} m.".format(
+                correction_norm, max_correction_m
+            )
+        )
+
+    corrected = json.loads(json.dumps(first_plan))
+    corrected_step = first_planned_step(corrected)
+    for key in ("target_position_m", "approach_position_m"):
+        position = corrected_step.get(key)
+        if position:
+            corrected_step[key] = [
+                round(float(position[0]) + delta[0], 5),
+                round(float(position[1]) + delta[1], 5),
+                round(float(position[2]), 5),
+            ]
+    corrected_step["second_snapshot_delta_base_xy_m"] = [round(delta[0], 5), round(delta[1], 5)]
+    corrected_step["second_geometry_center_m"] = second_geometry
+    corrected_step["current_tcp_position_base_m"] = [round(value, 6) for value in current_tcp]
+    corrected_step["desired_tcp_to_target_xy_m"] = [round(value, 6) for value in desired_tcp_to_target_xy]
+    corrected_step["observed_tcp_to_target_xy_m"] = [round(value, 6) for value in observed_tcp_to_target_xy]
+    corrected_step["coordinate_source"] = "locked_plan_plus_second_snapshot_tcp_target_error"
+    write_json(output_path, corrected)
+
+    report = {
+        "first_plan": first_plan_path,
+        "second_plan": second_plan_path,
+        "tf_json": tf_json_path,
+        "corrected_plan": output_path,
+        "first_target_position_m": first_target,
+        "first_geometry_center_m": first_geometry,
+        "second_geometry_center_m": second_geometry,
+        "current_tcp_position_base_m": current_tcp,
+        "desired_tcp_to_target_xy_m": desired_tcp_to_target_xy,
+        "observed_tcp_to_target_xy_m": observed_tcp_to_target_xy,
+        "delta_base_xy_m": [delta[0], delta[1]],
+        "correction_norm_m": correction_norm,
+        "max_correction_m": float(max_correction_m),
+        "max_tcp_to_target_offset_m": float(max_grasp_offset_m),
+        "correction_model": "tcp_target_error_from_second_snapshot",
+        "used_second_yaw": False,
+        "used_second_absolute_target": False,
+    }
+    write_json(report_path, report)
+    print(
+        "\nSecond-snapshot TCP-target correction: delta_base_xy=[{:.4f}, {:.4f}] m norm={:.4f} m".format(
             delta[0], delta[1], correction_norm
         ),
         flush=True,

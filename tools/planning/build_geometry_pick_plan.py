@@ -13,7 +13,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from robot_scene_pipeline.xy_correction import apply_step_xy_correction, load_xy_correction
+from robot_scene_pipeline.xy_correction import apply_step_xyz_correction, load_xy_correction
 from tools.planning.decision_to_execution import compile_plan, write_json
 
 
@@ -292,8 +292,8 @@ def main():
             step["coordinate_source"] = "required_geometry_center_m"
         correction = load_xy_correction(args.xy_correction_json)
         if geometry_center is not None:
-            apply_step_xy_correction(step, geometry_center[:2], correction=correction, kind="grasp")
-            step["grasp_offset_from_geometry_center_m"] = step["grasp_xy_bias_m"]
+            apply_step_xyz_correction(step, step["target_position_m"], correction=correction, kind="grasp")
+            step["grasp_offset_from_geometry_center_m"] = step["grasp_correction_delta_m"]
         if args.stack_demo_mode:
             set_stack_demo_yaw(
                 step,

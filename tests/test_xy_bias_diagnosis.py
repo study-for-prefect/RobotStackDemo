@@ -6,7 +6,12 @@ import unittest
 
 import numpy as np
 
-from tools.calibration.xy_bias_diagnosis import analyze_dataset, fit_workspace_model, trial_key
+from tools.calibration.xy_bias_diagnosis import (
+    analyze_dataset,
+    build_stack_calibration,
+    fit_workspace_model,
+    trial_key,
+)
 
 
 def yaw_dataset(base_error, local_error):
@@ -95,6 +100,15 @@ class XYBiasDiagnosisTest(unittest.TestCase):
         left = {"position_label": "fixed", "yaw_deg": 90, "repeat": 2}
         right = {"position_label": "fixed", "yaw_deg": 90.0, "repeat": 2}
         self.assertEqual(trial_key(left), trial_key(right))
+
+    def test_build_stack_calibration_uses_unified_fields(self):
+        report = analyze_dataset(yaw_dataset([0.003, -0.002], [0.0012, 0.0007]))
+        calibration = build_stack_calibration(report)
+
+        np.testing.assert_allclose(calibration["grasp_base_bias_m"], [-0.003, 0.002, 0.0], atol=1e-12)
+        np.testing.assert_allclose(calibration["tcp_offset_tool_m"], [-0.0012, -0.0007, 0.15], atol=1e-12)
+        self.assertEqual(calibration["place_base_bias_m"], [0.0, 0.0, 0.0])
+        self.assertEqual(calibration["max_correction_m"], {"xy_m": 0.02, "z_m": 0.015})
 
 
 if __name__ == "__main__":

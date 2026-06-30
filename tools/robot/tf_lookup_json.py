@@ -118,9 +118,10 @@ def resolve_frames(buffer, args):
                 continue
             if args.require_tool:
                 connected_tool = None
+                tool_transform = None
                 for tool_frame in tools:
                     try:
-                        buffer.lookup_transform(
+                        tool_transform = buffer.lookup_transform(
                             base_frame,
                             tool_frame,
                             Time(),
@@ -134,7 +135,8 @@ def resolve_frames(buffer, args):
                     continue
             else:
                 connected_tool = args.tool_frame
-            return base_frame, camera_frame, connected_tool, camera_transform
+                tool_transform = None
+            return base_frame, camera_frame, connected_tool, camera_transform, tool_transform
     raise RuntimeError(
         "TF trees are not connected for base={} camera={} tool={}: {}\nKnown TF frames:\n{}".format(
             args.base_frame,
@@ -177,7 +179,7 @@ def main():
                     raise RuntimeError(message)
                 print(message, flush=True)
             else:
-                base_frame, camera_frame, tool_frame, transform = resolved
+                base_frame, camera_frame, tool_frame, transform, tool_transform = resolved
                 payload = transform_payload(transform)
                 payload["requested_frames"] = {
                     "base_frame": args.base_frame,
@@ -191,6 +193,7 @@ def main():
                 }
                 payload["tool_frame"] = tool_frame
                 payload["tool_transform_verified"] = bool(args.require_tool)
+                payload["tool_transform"] = transform_payload(tool_transform) if tool_transform is not None else None
                 write_json_atomic(args.output, payload)
                 print(
                     "ok t=[{:.4f},{:.4f},{:.4f}]".format(*payload["translation"]),

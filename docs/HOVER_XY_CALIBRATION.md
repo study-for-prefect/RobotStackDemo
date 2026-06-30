@@ -125,8 +125,22 @@ the transforms explicitly.
 
 ```bash
 python3 tools/calibration/xy_bias_diagnosis.py analyze \
-  runtime/xy_bias_diagnosis/yaw_green/samples.json
+  runtime/xy_bias_diagnosis/yaw_green/samples.json \
+  --output-calibration-json runtime/stack_calibration_yaw.json
 ```
+
+The optional calibration output is directly consumable by stack demo:
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  ... \
+  --calibration-json runtime/stack_calibration_yaw.json
+```
+
+Its fields are `affine_xy`, `grasp_base_bias_m`, `place_base_bias_m`,
+`tcp_offset_tool_m`, and `max_correction_m`. Camera-frame offsets are not a
+default execution path; convert any measured camera vector through TF and store
+the resulting base/tool correction in this JSON.
 
 ## Validation
 

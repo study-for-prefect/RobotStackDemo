@@ -10,12 +10,13 @@ if PROJECT_ROOT not in sys.path:
 
 from tools.calibration.xy_bias import (
     analyze_dataset,
+    build_stack_calibration,
     fit_workspace_model,
     main,
     trial_key,
 )
 
-__all__ = ["analyze_dataset", "fit_workspace_model", "main", "trial_key"]
+__all__ = ["analyze_dataset", "build_stack_calibration", "fit_workspace_model", "main", "trial_key"]
 
 if __name__ == "__main__":
     raise SystemExit(main())

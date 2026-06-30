@@ -24,6 +24,25 @@ python3 tools/workflows/stack_demo_pipeline.py --help
 Hardware execution remains opt-in through `--execute`. The refactor does not
 introduce another executable path or change pick/place behavior.
 
+## Persistent Perception Server
+
+Start perception once before running stack demo:
+
+```bash
+python3 -m robot_scene_pipeline.perception_server \
+  --detector-weight models/yolo/weights/best.pt \
+  --base-frame base_link \
+  --camera-frame camera_color_optical_frame
+```
+
+The server keeps subscribing to `/camera/camera/color/image_raw` and
+`/camera/camera/aligned_depth_to_color/image_raw`, loads YOLO once, and returns
+the latest detections, depth geometry, tabletop geometry, and base-frame
+coordinates on request. `stack_demo_pipeline.py` requests this server by
+default through `--perception-server-url http://127.0.0.1:8765`; it no longer
+starts `robot_scene_pipeline.snapshot_pipeline` as a subprocess unless
+`--allow-snapshot-subprocess-fallback` is explicitly provided.
+
 ## Pick Yaw And Close Snapshot
 
 Pick yaw selection is axis-first. The adaptive yaw search still checks obstacle
@@ -52,6 +71,49 @@ When the flag is omitted, `pick_second_xy_correction.json` records
 use_locked_first_observation_without_second_snapshot`. This is the preferred
 default for stable tabletop stacking because it avoids stopping above the target
 for another RGB-D capture.
+
+When `--enable-second-pick-snapshot` is enabled, the approach pose used for
+that snapshot is `target_position_m.z + --second-snapshot-hover-above-object-m`
+and the default hover distance is `0.10 m`. The correction is no longer
+"believe the second object coordinate"; it measures the current TCP-to-target
+XY error from TF plus the second observation, then applies only that bounded
+delta to the locked first pick plan. The report is still written to
+`pick_second_xy_correction.json`.
+
+## Locked Place Yaw And Calibration
+
+Placement yaw is locked before the pick. With the default
+`--place-yaw-strategy base`, the final held-object close observation is only a
+verification snapshot; it cannot rewrite `target_position_m` or
+`chosen_place_yaw_deg`. If that snapshot reports a different base id, label,
+size, center, Z, or yaw, the workflow writes
+`place_final_held_observation_rejected_use_locked.json` and still executes the
+locked `place_on_top_plan_locked_before_pick.json`.
+
+Use one calibration file for systematic offsets:
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  ... \
+  --calibration-json runtime/stack_calibration.json
+```
+
+The file may contain:
+
+```json
+{
+  "affine_xy": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+  "grasp_base_bias_m": [0.0, 0.0, 0.0],
+  "place_base_bias_m": [0.0, 0.0, 0.0],
+  "tcp_offset_tool_m": [0.0, 0.0, 0.15],
+  "max_correction_m": {"xy_m": 0.02, "z_m": 0.015}
+}
+```
+
+Pick/place plans record the applied correction source, before/after target
+point, base bias, XY norm, Z magnitude, and limits. `tcp_offset_tool_m` is used
+only by robot motion to convert TCP goals to `tool0`; it is not mixed into
+camera-frame XY compensation.
 
 ## 抓取遮挡与推开策略
 
