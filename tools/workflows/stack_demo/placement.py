@@ -112,8 +112,8 @@ def build_frozen_place_step(current_state, stack_state, base_object, held_object
     place_step["top_center_offset_from_reference_m"] = top_center_offset
     place_step["max_stack_top_center_offset_m"] = max_top_center_offset
     if "square" in str(place_yaw_object.get("label") or "").lower():
-        place_step["exact_tool_yaw_required"] = False
-        place_step["yaw_equivalence_period_deg"] = 90.0
+        place_step["exact_tool_yaw_required"] = True
+        place_step["yaw_equivalence_period_deg"] = 180.0
         place_step["preserve_current_yaw"] = False
     return place_step
 

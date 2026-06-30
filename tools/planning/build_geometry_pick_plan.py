@@ -156,8 +156,8 @@ def set_stack_demo_yaw(
     step["gripper_yaw_offset_deg"] = float(gripper_yaw_offset_deg)
     step["grasp_axis"] = "long"
     step["target_yaw_valid"] = True
-    step["exact_tool_yaw_required"] = not is_square
-    step["yaw_equivalence_period_deg"] = 90.0 if is_square else 180.0
+    step["exact_tool_yaw_required"] = True
+    step["yaw_equivalence_period_deg"] = 180.0
     step["preserve_current_yaw"] = False
     step["yaw_frame"] = "base_link"
     step["yaw_source"] = (
@@ -180,19 +180,12 @@ def apply_selected_grasp_yaw(step, obj):
         delta = abs(normalize_equivalent_yaw(yaw - base_yaw, period))
         step["adaptive_selected_grasp_yaw_deg"] = yaw
         step["adaptive_grasp_yaw_delta_deg"] = float(delta)
-        if delta > 10.0:
-            step["selected_grasp_yaw_ignored_reason"] = (
-                "square_adaptive_yaw_delta_{:.2f}_deg_exceeds_10deg".format(delta)
-            )
-            step["feasible_yaw_intervals_deg"] = obj.get("feasible_yaw_intervals_deg", [])
-            step["blocked_yaw_intervals_deg"] = obj.get("blocked_yaw_intervals_deg", [])
-            return
         step["target_yaw_deg"] = yaw
         step["chosen_grasp_yaw_deg"] = yaw
         step["selected_grasp_yaw_deg"] = yaw
         step["target_yaw_valid"] = True
-        step["exact_tool_yaw_required"] = False
-        step["yaw_equivalence_period_deg"] = 90.0
+        step["exact_tool_yaw_required"] = True
+        step["yaw_equivalence_period_deg"] = 180.0
         step["yaw_frame"] = "base_link"
         step["yaw_source"] = obj.get("grasp_yaw_source") or "adaptive_grasp_yaw_search"
         step["feasible_yaw_intervals_deg"] = obj.get("feasible_yaw_intervals_deg", [])
