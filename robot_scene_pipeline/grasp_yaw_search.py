@@ -11,6 +11,15 @@ def normalize_yaw_180(yaw_deg: float) -> float:
     return float(yaw_deg) % 180.0
 
 
+def normalize_yaw_signed_180(yaw_deg: float) -> float:
+    """Return the 180-degree-equivalent yaw closest to zero."""
+    return ((float(yaw_deg) + 90.0) % 180.0) - 90.0
+
+
+def equivalent_yaw_delta_deg(first_yaw_deg: float, second_yaw_deg: float) -> float:
+    return abs(normalize_yaw_signed_180(float(first_yaw_deg) - float(second_yaw_deg)))
+
+
 def _finite_vector(value: object, minimum_length: int) -> Optional[List[float]]:
     if not isinstance(value, (list, tuple)) or len(value) < minimum_length:
         return None
@@ -217,6 +226,12 @@ def _candidate_yaws(
     return output
 
 
+def _target_axis_alignment_delta_deg(target: ObjectDict, yaw_deg: float) -> float:
+    target_yaw = get_yaw_deg(target)
+    axes = (target_yaw, target_yaw + 90.0)
+    return min(equivalent_yaw_delta_deg(yaw_deg, axis) for axis in axes)
+
+
 def _evaluate_yaw(
     target: ObjectDict,
     obstacles: Iterable[ObjectDict],
@@ -389,10 +404,13 @@ def select_best_grasp(
         if current_wrist_yaw_deg is not None:
             delta = abs((float(item["yaw_deg"]) - float(current_wrist_yaw_deg) + 90.0) % 180.0 - 90.0)
             wrist_penalty = -delta / 180.0
-        return (float(item.get("clearance_m", 0.0)), source_priority, wrist_penalty, -float(item["yaw_deg"]))
+        axis_delta = _target_axis_alignment_delta_deg(target, float(item["yaw_deg"]))
+        return (-axis_delta, source_priority, float(item.get("clearance_m", 0.0)), wrist_penalty, -float(item["yaw_deg"]))
 
     feasible_candidates.sort(key=score, reverse=True)
     selected = feasible_candidates[0] if feasible_candidates else None
+    selected_yaw = None if selected is None else normalize_yaw_signed_180(float(selected["yaw_deg"]))
+    selected_axis_delta = None if selected is None else _target_axis_alignment_delta_deg(target, float(selected["yaw_deg"]))
     all_blockers: Dict[str, dict] = {}
     for interval in blockers_by_interval:
         for blocker in interval.get("blocking_objects", []):
@@ -400,7 +418,8 @@ def select_best_grasp(
     categories = {str(item.get("blocker_category")) for item in all_blockers.values()}
     all_grasps_blocked = not feasible_intervals
     return {
-        "selected_grasp_yaw_deg": None if selected is None else round(float(selected["yaw_deg"]), 3),
+        "selected_grasp_yaw_deg": None if selected is None else round(float(selected_yaw), 3),
+        "selected_grasp_axis_delta_deg": None if selected is None else round(float(selected_axis_delta), 3),
         "selected_grasp_source": None if selected is None else selected.get("source"),
         "grasp_feasible": selected is not None,
         "feasible_yaw_intervals_deg": feasible_intervals,

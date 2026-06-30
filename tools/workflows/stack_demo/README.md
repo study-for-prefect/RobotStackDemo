@@ -24,18 +24,48 @@ python3 tools/workflows/stack_demo_pipeline.py --help
 Hardware execution remains opt-in through `--execute`. The refactor does not
 introduce another executable path or change pick/place behavior.
 
+## Pick Yaw And Close Snapshot
+
+Pick yaw selection is axis-first. The adaptive yaw search still checks obstacle
+clearance, but it now prefers a feasible yaw aligned with the detected block
+principal axis or its 90-degree equivalent before choosing a larger off-axis
+clearance angle. This avoids cases where a square block detected near `0 deg`
+is grasped at `20-30 deg` only because that angle has slightly more clearance.
+
+The selected yaw is written as a signed 180-degree-equivalent angle, so a yaw
+such as `176 deg` is reported as `-4 deg`. The analysis also records
+`selected_grasp_axis_delta_deg`; values near zero mean the final grasp yaw is
+aligned with the block axis.
+
+The close target snapshot after moving above the block is disabled by default.
+The stack workflow now picks from the locked first observation unless this flag
+is explicitly provided:
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  ... \
+  --enable-second-pick-snapshot
+```
+
+When the flag is omitted, `pick_second_xy_correction.json` records
+`correction_applied: false` and `fallback:
+use_locked_first_observation_without_second_snapshot`. This is the preferred
+default for stable tabletop stacking because it avoids stopping above the target
+for another RGB-D capture.
+
 ## 抓取遮挡与推开策略
 
 抓取遮挡不再是单一 boolean。每次 pick 前会先对目标运行连续 yaw 搜索：
 
 - 搜索范围是 `[0, 180)`，因为平行夹爪 180 度等价。
 - 候选 yaw 来自目标主轴、障碍物方向、当前腕部 yaw 偏置和均匀 fallback 采样。
+- 可行候选优先贴近目标主轴；只有主轴附近不可行时才偏离主轴去换取避障空间。
 - 先用粗粒度 `yaw_step_deg` 找候选，再用 `local_refine_step_deg` 细化可行区间。
 - 默认夹爪外宽 `0.112 m`，内宽 `0.048 m`。
 
 `geometry_relations_before_pick.json` 里会写入 `target_grasp_analysis`，包括
 `selected_grasp_yaw_deg`、`feasible_yaw_intervals_deg`、
-`blocked_yaw_intervals_deg`、`all_grasps_blocked` 和
+`selected_grasp_axis_delta_deg`、`blocked_yaw_intervals_deg`、`all_grasps_blocked` 和
 `blocking_objects_by_interval`。
 
 决策顺序：

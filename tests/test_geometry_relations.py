@@ -13,6 +13,7 @@ from robot_scene_pipeline.geometry_relations import (
     is_supporting,
     safe_to_push,
 )
+from robot_scene_pipeline.grasp_yaw_search import normalize_yaw_signed_180
 from tools.workflows.stack_demo.pick import build_offline_pick_plan
 from tools.workflows.stack_demo.push_clearing import pushable_blocking_relations
 
@@ -123,6 +124,35 @@ def test_side_block_in_row_uses_continuous_pick_yaw_without_push():
     assert not push_candidates(objects, relations, "target")
 
 
+def test_grasp_yaw_prefers_target_axis_over_extra_clearance():
+    target = make_object(
+        0,
+        (0.3402, 0.0764, -0.0025),
+        size=(0.0246, 0.0233, 0.0233),
+        label="square green",
+        table_yaw_deg=-89.51,
+    )
+    red_base = make_object(
+        1,
+        (0.3010, 0.1585, -0.0017),
+        size=(0.0221, 0.0208, 0.0248),
+        label="square red",
+        table_yaw_deg=89.67,
+        pushable=False,
+    )
+    relations = build_geometry_relations([target, red_base], target_id=0)
+    analysis = target_analysis(relations)
+    assert analysis["action"] == "pick"
+    assert analysis["selected_grasp_source"] == "target_principal_axis"
+    assert abs(analysis["selected_grasp_yaw_deg"] - 0.49) < 0.01
+    assert analysis["selected_grasp_axis_delta_deg"] == 0.0
+
+
+def test_signed_yaw_normalization_keeps_small_negative_equivalent():
+    assert normalize_yaw_signed_180(176.0) == -4.0
+    assert normalize_yaw_signed_180(-184.0) == -4.0
+
+
 def test_target_under_other_object_returns_remove_top_action():
     target = make_object("target", (0.40, 0.00, 0.015))
     top = make_object("top", (0.40, 0.00, 0.045))
@@ -229,6 +259,8 @@ if __name__ == "__main__":
     test_locked_object_not_safe_to_push()
     test_should_push_away_relation()
     test_side_block_in_row_uses_continuous_pick_yaw_without_push()
+    test_grasp_yaw_prefers_target_axis_over_extra_clearance()
+    test_signed_yaw_normalization_keeps_small_negative_equivalent()
     test_target_under_other_object_returns_remove_top_action()
     test_loose_objects_block_all_yaws_returns_push_clearing()
     test_base_blocks_all_yaws_returns_replan_without_push()

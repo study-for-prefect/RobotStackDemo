@@ -128,10 +128,10 @@ conda run -n scene_graph_benchmark python -m robot_scene_pipeline.snapshot_pipel
   --output-dir /tmp/robot_scene_geometry
 ```
 
-## Integrated LLM + Two-Stage Pick
+## Integrated LLM + Stack Pick
 
-The main robot entry now combines LLM task reasoning with the tabletop-yaw and
-second-snapshot pick workflow:
+The main robot entry combines LLM task reasoning with tabletop geometry, block
+yaw, optional close-snapshot correction, and stack placement:
 
 ```bash
 python3 tools/workflows/stack_demo_pipeline.py \
@@ -146,11 +146,14 @@ The integrated flow is:
    LLM, and compile `robot_execution_plan.json`.
 4. Read the first planned `pick` target from the LLM plan and build a
    deterministic geometry pick plan for that object.
-5. Pre-rotate the wrist from the detected object yaw, then move above it.
-6. Capture a second RGB-D snapshot and correct only base-link XY. Preserve the
-   first plan's yaw and Z.
-7. Execute the corrected pick while keeping the object held.
-8. Execute the remaining LLM plan, such as `place_relative`.
+5. Select a feasible grasp yaw that stays aligned with the detected block axis
+   when possible, then move above the target.
+6. By default, pick from the locked first observation without another close
+   target snapshot.
+7. If `--enable-second-pick-snapshot` is provided, capture a second RGB-D
+   snapshot and correct only base-link XY. Preserve the first plan's yaw and Z.
+8. Execute the selected pick while keeping the object held.
+9. Execute the remaining stack/place plan.
 
 The default integrated TCP offset is `--tcp-offset-tool -0.015 0 0.15`,
 meaning the gripper center is 1.5 cm along tool0 -X and 15 cm along tool0 +Z.
@@ -167,11 +170,11 @@ open command runs.
 Important output files:
 
 ```text
-/tmp/robot_scene_pipeline/private_scene_state.json
-/tmp/robot_scene_pipeline/robot_execution_plan.json
-/tmp/robot_scene_pipeline_second/private_scene_state.json
-/tmp/robot_scene_pipeline/second_snapshot_xy_correction.json
-/tmp/robot_scene_pipeline/robot_execution_plan_after_two_stage_pick.json
+/tmp/robot_scene_pipeline/initial_scene_state.json
+/tmp/robot_scene_pipeline/stack_blocks_decision.json
+/tmp/robot_scene_pipeline/cycle_*/pick_plan_first_observation.json
+/tmp/robot_scene_pipeline/cycle_*/pick_second_xy_correction.json
+/tmp/robot_scene_pipeline/cycle_*/place_on_top_plan_locked_before_pick.json
 ```
 
 The deterministic rotation-only test remains available:

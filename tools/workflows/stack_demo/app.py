@@ -293,92 +293,107 @@ def main() -> int:
             if args.execute:
                 run(pick_approach_command(args, first_pick_plan_path))
 
-            runtime["current_stage"] = "empty_gripper_second_pick_snapshot"
-            second_dir = os.path.join(cycle_dir, "pick_second_observation")
-            def parse_second_pick_target(state):
-                state["_second_snapshot_max_xy_m"] = float(args.max_second_snapshot_correction_m)
-                state["_second_snapshot_max_z_error_m"] = float(args.second_snapshot_max_z_error_m)
-                return copy.deepcopy(reacquire_pick_target_for_second_observation(state, held_object))
-
-            try:
-                second_state, second_object = retry_close_observation(
-                    args,
-                    second_dir,
-                    runtime["held_object_id"],
-                    parse_second_pick_target,
-                    "Second target observation",
-                    retry_offset_camera=args.second_snapshot_retry_offset_camera,
-                )
-                second_unreliable_reason = None
-            except RuntimeError as exc:
-                message = str(exc)
-                if not _is_second_pick_observation_error(message):
-                    raise
-                print(
-                    "Second target observation was visible but had unreliable 3D center; "
-                    "using locked first observation without XY correction: {}".format(message),
-                    flush=True,
-                )
+            second_object = copy.deepcopy(held_object)
+            pick_plan_path = first_pick_plan_path
+            correction_report_path = os.path.join(cycle_dir, "pick_second_xy_correction.json")
+            if not args.enable_second_pick_snapshot:
                 write_json(
-                    os.path.join(cycle_dir, "pick_second_observation_unreliable_use_first.json"),
+                    correction_report_path,
                     {
-                        "reason": message,
-                        "fallback": "use_locked_first_observation_without_second_xy_correction",
-                        "max_second_snapshot_correction_m": args.max_second_snapshot_correction_m,
-                        "second_snapshot_max_z_error_m": args.second_snapshot_max_z_error_m,
+                        "first_plan": first_pick_plan_path,
+                        "corrected_plan": first_pick_plan_path,
+                        "correction_applied": False,
+                        "fallback": "use_locked_first_observation_without_second_snapshot",
+                        "reason": "second pick snapshot disabled",
                     },
                 )
-                second_unreliable_reason = message
-                second_state = current_state
-                second_object = copy.deepcopy(held_object)
-            if second_state is None:
-                second_unreliable_reason = "Second target observation produced no scene state."
-                second_state = current_state
-                second_object = copy.deepcopy(held_object)
-            second_pick_plan_path = os.path.join(cycle_dir, "pick_plan_second_observation.json")
-            build_offline_pick_plan(second_state, second_object, second_pick_plan_path, args)
-            pick_plan_path = os.path.join(cycle_dir, "pick_plan_second_xy_corrected.json")
-            correction_report_path = os.path.join(cycle_dir, "pick_second_xy_correction.json")
-            if second_unreliable_reason is None:
+            else:
+                runtime["current_stage"] = "empty_gripper_second_pick_snapshot"
+                second_dir = os.path.join(cycle_dir, "pick_second_observation")
+
+                def parse_second_pick_target(state):
+                    state["_second_snapshot_max_xy_m"] = float(args.max_second_snapshot_correction_m)
+                    state["_second_snapshot_max_z_error_m"] = float(args.second_snapshot_max_z_error_m)
+                    return copy.deepcopy(reacquire_pick_target_for_second_observation(state, held_object))
+
                 try:
-                    build_corrected_plan(
-                        first_pick_plan_path,
-                        second_pick_plan_path,
-                        pick_plan_path,
-                        correction_report_path,
-                        args.max_second_snapshot_correction_m,
-                        args.max_grasp_offset_m,
-                        use_second_yaw=False,
-                        use_second_grasp_offset=True,
+                    second_state, second_object = retry_close_observation(
+                        args,
+                        second_dir,
+                        runtime["held_object_id"],
+                        parse_second_pick_target,
+                        "Second target observation",
+                        retry_offset_camera=args.second_snapshot_retry_offset_camera,
                     )
+                    second_unreliable_reason = None
                 except RuntimeError as exc:
                     message = str(exc)
                     if not _is_second_pick_observation_error(message):
                         raise
                     print(
-                        "Second target correction rejected; using locked first observation "
-                        "without XY correction: {}".format(message),
+                        "Second target observation was visible but had unreliable 3D center; "
+                        "using locked first observation without XY correction: {}".format(message),
                         flush=True,
                     )
+                    write_json(
+                        os.path.join(cycle_dir, "pick_second_observation_unreliable_use_first.json"),
+                        {
+                            "reason": message,
+                            "fallback": "use_locked_first_observation_without_second_xy_correction",
+                            "max_second_snapshot_correction_m": args.max_second_snapshot_correction_m,
+                            "second_snapshot_max_z_error_m": args.second_snapshot_max_z_error_m,
+                        },
+                    )
+                    second_unreliable_reason = message
+                    second_state = current_state
+                    second_object = copy.deepcopy(held_object)
+                if second_state is None:
+                    second_unreliable_reason = "Second target observation produced no scene state."
+                    second_state = current_state
+                    second_object = copy.deepcopy(held_object)
+                second_pick_plan_path = os.path.join(cycle_dir, "pick_plan_second_observation.json")
+                build_offline_pick_plan(second_state, second_object, second_pick_plan_path, args)
+                pick_plan_path = os.path.join(cycle_dir, "pick_plan_second_xy_corrected.json")
+                if second_unreliable_reason is None:
+                    try:
+                        build_corrected_plan(
+                            first_pick_plan_path,
+                            second_pick_plan_path,
+                            pick_plan_path,
+                            correction_report_path,
+                            args.max_second_snapshot_correction_m,
+                            args.max_grasp_offset_m,
+                            use_second_yaw=False,
+                            use_second_grasp_offset=True,
+                        )
+                    except RuntimeError as exc:
+                        message = str(exc)
+                        if not _is_second_pick_observation_error(message):
+                            raise
+                        print(
+                            "Second target correction rejected; using locked first observation "
+                            "without XY correction: {}".format(message),
+                            flush=True,
+                        )
+                        _write_first_pick_plan_without_second_xy(
+                            first_pick_plan_path,
+                            pick_plan_path,
+                            correction_report_path,
+                            message,
+                            args,
+                        )
+                else:
                     _write_first_pick_plan_without_second_xy(
                         first_pick_plan_path,
                         pick_plan_path,
                         correction_report_path,
-                        message,
+                        second_unreliable_reason,
                         args,
                     )
-            else:
-                _write_first_pick_plan_without_second_xy(
-                    first_pick_plan_path,
-                    pick_plan_path,
-                    correction_report_path,
-                    second_unreliable_reason,
-                    args,
-                )
             pick_plan = load_json(pick_plan_path)
             pick_step = pick_plan["steps"][0]
 
-            # Do not leave the corrected pick approach before grasping. The base is
+            # Do not leave the selected pick approach before grasping. The base is
             # reacquired only after the object is held and the robot is above it.
             final_stack_state = stack_state
             place_step = build_frozen_place_step(
@@ -405,9 +420,9 @@ def main() -> int:
             }
 
             print(
-                "\nCycle {} pick corrected by second target snapshot; grasp immediately before base approach: "
+                "\nCycle {} pick plan ready; grasp immediately before base approach: "
                 "target_id={} label={} first_center={} second_center={} "
-                "first_object_yaw={} second_object_yaw={} final_grasp_yaw={} "
+                "first_object_yaw={} second_object_yaw={} final_grasp_yaw={} pick_plan_source={} "
                 "detected_base_id={} detected_base_center={} "
                 "detected_base_top_z={} stack_average_center={} stack_yaw={} place_pose={}".format(
                     index,
@@ -418,6 +433,7 @@ def main() -> int:
                     held_object.get("table_yaw_deg"),
                     second_object.get("table_yaw_deg"),
                     pick_step.get("chosen_grasp_yaw_deg"),
+                    pick_step.get("coordinate_source"),
                     final_stack_state.get("placement_base_object_id"),
                     final_stack_state.get("placement_base_center_xy_m"),
                     final_stack_state.get("placement_base_top_z_m"),
@@ -428,7 +444,7 @@ def main() -> int:
                 flush=True,
             )
 
-            runtime["current_stage"] = "pick_from_second_visual_correction"
+            runtime["current_stage"] = "pick_from_locked_visual_plan"
             runtime["last_pick_pose"] = {
                 "first_center_base_m": held_object.get("geometry_center_m"),
                 "second_center_base_m": second_object.get("geometry_center_m"),

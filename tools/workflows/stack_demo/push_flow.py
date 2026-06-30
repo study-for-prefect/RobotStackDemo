@@ -63,6 +63,7 @@ def _apply_selected_grasp_to_target(held_object: dict, analysis: dict) -> dict:
         return held_object
     held_object["selected_grasp_yaw_deg"] = float(selected_yaw)
     held_object["grasp_feasible"] = bool(analysis.get("grasp_feasible"))
+    held_object["selected_grasp_axis_delta_deg"] = analysis.get("selected_grasp_axis_delta_deg")
     held_object["feasible_yaw_intervals_deg"] = analysis.get("feasible_yaw_intervals_deg", [])
     held_object["blocked_yaw_intervals_deg"] = analysis.get("blocked_yaw_intervals_deg", [])
     held_object["grasp_yaw_source"] = analysis.get("selected_grasp_source") or "adaptive_grasp_yaw_search"

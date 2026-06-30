@@ -115,6 +115,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-second-snapshot-correction-m", type=float, default=0.006)
     parser.add_argument("--second-snapshot-max-z-error-m", type=float, default=0.06)
     parser.add_argument("--max-grasp-offset-m", type=float, default=0.05)
+    parser.add_argument(
+        "--enable-second-pick-snapshot",
+        action="store_true",
+        help=(
+            "After the first pick approach, capture a close target snapshot and use it only for XY correction. "
+            "Default is off so execution picks from the locked first observation."
+        ),
+    )
     parser.add_argument("--second-snapshot-stable-wait-s", type=float, default=0.5)
     parser.add_argument("--second-snapshot-retry-offset-camera", nargs=3, type=float, default=[0.0, 0.04, 0.0])
     parser.add_argument("--close-observation-retry-count", type=int, default=1)

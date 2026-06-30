@@ -12,6 +12,11 @@ from .constants import PROJECT_ROOT
 DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_POINT_MODE = "direct"
 
+
+def format_motion_float(value):
+    return "{:.6f}".format(float(value))
+
+
 def perception_camera_frame(args):
     camera_frame = str(getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME) or DEFAULT_CAMERA_FRAME).lstrip("/")
     if camera_frame == "camera_link":
@@ -135,7 +140,7 @@ def capture_empty_current_pose(args, output_dir, held_object_id, allow_holding=F
 def relative_translate_command(args, offset_base):
     command = [
         args.ros_python, "tools/robot/moveit_plan_preview.py",
-        "--relative-tool-translation-base", *[str(value) for value in offset_base],
+        "--relative-tool-translation-base", *[format_motion_float(value) for value in offset_base],
         "--velocity", str(args.velocity), "--acceleration", str(args.acceleration),
         *moveit_frame_args(args),
         "--tf-timeout", str(getattr(args, "tf_timeout", 8.0)),

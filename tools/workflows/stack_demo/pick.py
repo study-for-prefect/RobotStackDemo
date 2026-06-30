@@ -53,6 +53,7 @@ def apply_selected_grasp_yaw(step, obj):
         step["yaw_equivalence_period_deg"] = 180.0
         step["yaw_frame"] = "base_link"
         step["yaw_source"] = obj.get("grasp_yaw_source") or "adaptive_grasp_yaw_search"
+        step["selected_grasp_axis_delta_deg"] = obj.get("selected_grasp_axis_delta_deg")
         step["feasible_yaw_intervals_deg"] = obj.get("feasible_yaw_intervals_deg", [])
         step["blocked_yaw_intervals_deg"] = obj.get("blocked_yaw_intervals_deg", [])
         return
@@ -64,6 +65,7 @@ def apply_selected_grasp_yaw(step, obj):
     step["yaw_equivalence_period_deg"] = 180.0
     step["yaw_frame"] = "base_link"
     step["yaw_source"] = obj.get("grasp_yaw_source") or "adaptive_grasp_yaw_search"
+    step["selected_grasp_axis_delta_deg"] = obj.get("selected_grasp_axis_delta_deg")
     step["feasible_yaw_intervals_deg"] = obj.get("feasible_yaw_intervals_deg", [])
     step["blocked_yaw_intervals_deg"] = obj.get("blocked_yaw_intervals_deg", [])
 

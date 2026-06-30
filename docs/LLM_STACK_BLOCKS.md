@@ -31,5 +31,7 @@ instruction. This follows the safer Scene-Graph-Benchmark behavior: the model
 may describe the order, but it is not trusted to invent or renumber detector
 ids.
 
-The closed-loop pick/place, second-snapshot XY correction, place verification,
-and safety checks remain unchanged.
+The closed-loop pick/place, optional second-snapshot XY correction, place
+verification, and safety checks remain unchanged. The stack workflow now skips
+the close pick snapshot by default; add `--enable-second-pick-snapshot` only
+when the first locked observation is not accurate enough for pick XY.

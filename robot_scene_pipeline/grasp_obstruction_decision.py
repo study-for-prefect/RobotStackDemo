@@ -74,6 +74,7 @@ def make_grasp_analysis_relation(
         "objects_above_target": [],
         "grasp_feasible": bool(grasp_result.get("grasp_feasible")),
         "selected_grasp_yaw_deg": grasp_result.get("selected_grasp_yaw_deg"),
+        "selected_grasp_axis_delta_deg": grasp_result.get("selected_grasp_axis_delta_deg"),
         "selected_grasp_source": grasp_result.get("selected_grasp_source"),
         "feasible_yaw_intervals_deg": grasp_result.get("feasible_yaw_intervals_deg", []),
         "blocked_yaw_intervals_deg": grasp_result.get("blocked_yaw_intervals_deg", []),
