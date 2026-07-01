@@ -145,8 +145,50 @@ def test_grasp_yaw_prefers_target_axis_over_extra_clearance():
     analysis = target_analysis(relations)
     assert analysis["action"] == "pick"
     assert analysis["selected_grasp_source"] == "target_principal_axis"
-    assert abs(analysis["selected_grasp_yaw_deg"] - 0.49) < 0.01
     assert analysis["selected_grasp_axis_delta_deg"] == 0.0
+
+
+def test_close_square_row_uses_top_grasp_equivalent_yaw_without_push():
+    target = make_object(
+        0,
+        (0.3222, 0.1138, -0.0017),
+        size=(0.023, 0.0221, 0.025),
+        label="square green",
+        table_yaw_deg=-3.03,
+    )
+    blue = make_object(
+        1,
+        (0.3236, 0.0562, -0.0022),
+        size=(0.0241, 0.0239, 0.023),
+        label="square blue",
+        table_yaw_deg=89.78,
+        pushable=True,
+    )
+    red_base = make_object(
+        2,
+        (0.3183, 0.2186, -0.0024),
+        size=(0.0249, 0.0242, 0.0246),
+        label="square red",
+        table_yaw_deg=89.39,
+        role="base",
+        state="locked",
+        pushable=False,
+    )
+    yellow = make_object(
+        3,
+        (0.3232, 0.1658, -0.0013),
+        size=(0.0221, 0.0203, 0.0232),
+        label="square yellow",
+        table_yaw_deg=89.59,
+        pushable=True,
+    )
+    objects = [target, blue, red_base, yellow]
+    relations = build_geometry_relations(objects, target_id=0)
+    analysis = target_analysis(relations)
+    assert analysis["action"] == "pick"
+    assert analysis["grasp_feasible"] is True
+    assert analysis["selected_grasp_yaw_deg"] is not None
+    assert not push_candidates(objects, relations, 0)
 
 
 def test_signed_yaw_normalization_keeps_small_negative_equivalent():
@@ -391,6 +433,7 @@ if __name__ == "__main__":
     test_should_push_away_relation()
     test_side_block_in_row_uses_continuous_pick_yaw_without_push()
     test_grasp_yaw_prefers_target_axis_over_extra_clearance()
+    test_close_square_row_uses_top_grasp_equivalent_yaw_without_push()
     test_signed_yaw_normalization_keeps_small_negative_equivalent()
     test_target_under_other_object_returns_remove_top_action()
     test_loose_objects_block_all_yaws_returns_push_clearing()

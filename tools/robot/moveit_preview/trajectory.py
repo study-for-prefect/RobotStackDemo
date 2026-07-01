@@ -103,6 +103,8 @@ def setup_gripper(args):
         port=args.gripper_port,
         slave_id=args.gripper_slave_id,
         baudrate=args.gripper_baudrate,
+        retries=args.gripper_modbus_retries,
+        retry_wait_s=args.gripper_modbus_retry_wait_s,
     )
     print("Connected DH gripper: port={}, slave_id={}".format(args.gripper_port, args.gripper_slave_id))
     if not args.skip_gripper_init:

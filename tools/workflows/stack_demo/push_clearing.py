@@ -44,6 +44,9 @@ def relation_objects_with_protected_structure(
     for obj in relation_objects:
         if str(obj.get("id")) in locked_ids:
             obj["pushable"] = False
+            if str(obj.get("id")) == str(base_id):
+                obj["role"] = "base"
+                obj["state"] = "locked"
     return relation_objects
 
 
@@ -244,6 +247,9 @@ def evaluate_push_candidates(
     memory: Optional[dict] = None,
     lift_m: float = 0.05,
     contact_z_offset_m: float = 0.015,
+    gripper_outer_width_m: float = 0.112,
+    gripper_inner_width_m: float = 0.048,
+    grasp_approach_length_m: float = 0.02,
 ) -> dict:
     relations = list(push_candidates)
     obstacle_ids = []
@@ -267,6 +273,9 @@ def evaluate_push_candidates(
         table_bounds=table_bounds,
         lift_m=lift_m,
         contact_z_offset_m=contact_z_offset_m,
+        gripper_outer_width_m=gripper_outer_width_m,
+        gripper_inner_width_m=gripper_inner_width_m,
+        grasp_approach_length_m=grasp_approach_length_m,
     )
     candidate_results = []
     for relation in relations:

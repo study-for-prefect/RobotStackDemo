@@ -22,6 +22,7 @@ MAX_PUSH_DISTANCE_M = 0.07
 DEFAULT_SAFETY_MARGIN_M = 0.01
 DEFAULT_GRIPPER_OUTER_WIDTH_M = 0.112
 DEFAULT_GRIPPER_INNER_WIDTH_M = 0.048
+DEFAULT_GRASP_APPROACH_LENGTH_M = 0.02
 
 
 def _object_id(obj: ObjectDict) -> str:
@@ -212,6 +213,7 @@ def _prepare_push_context(
     table_bounds: Optional[dict],
     gripper_outer_width_m: float,
     gripper_inner_width_m: float,
+    grasp_approach_length_m: float,
     safety_margin_m: float,
     lift_m: float,
     contact_z_offset_m: float,
@@ -232,6 +234,7 @@ def _prepare_push_context(
         _objects(scene),
         gripper_outer_width_m=gripper_outer_width_m,
         gripper_inner_width_m=gripper_inner_width_m,
+        approach_length_m=grasp_approach_length_m,
     )
     predicted_scene = predict_scene_after_push(scene, obstacle.get("id"), candidate["direction_base"], distance_m)
     predicted_objects = _objects(predicted_scene)
@@ -312,6 +315,7 @@ def evaluate_one_push_grasp_candidate(
     memory: Optional[dict] = None, table_bounds: Optional[dict] = None,
     gripper_outer_width_m: float = DEFAULT_GRIPPER_OUTER_WIDTH_M,
     gripper_inner_width_m: float = DEFAULT_GRIPPER_INNER_WIDTH_M,
+    grasp_approach_length_m: float = DEFAULT_GRASP_APPROACH_LENGTH_M,
     safety_margin_m: float = DEFAULT_SAFETY_MARGIN_M,
     lift_m: float = 0.05,
     contact_z_offset_m: float = 0.015,
@@ -331,6 +335,7 @@ def evaluate_one_push_grasp_candidate(
         table_bounds,
         gripper_outer_width_m=gripper_outer_width_m,
         gripper_inner_width_m=gripper_inner_width_m,
+        grasp_approach_length_m=grasp_approach_length_m,
         safety_margin_m=safety_margin_m,
         lift_m=lift_m,
         contact_z_offset_m=contact_z_offset_m,
@@ -343,6 +348,7 @@ def evaluate_one_push_grasp_candidate(
         context["predicted_objects"],
         gripper_outer_width_m=gripper_outer_width_m,
         gripper_inner_width_m=gripper_inner_width_m,
+        approach_length_m=grasp_approach_length_m,
     )
     output["predicted_selected_grasp_yaw_deg"] = predicted_grasp.get("selected_grasp_yaw_deg")
     output["predicted_grasp"] = predicted_grasp
@@ -394,6 +400,7 @@ def evaluate_push_grasp_joint_candidates(
     table_bounds: Optional[dict] = None,
     gripper_outer_width_m: float = DEFAULT_GRIPPER_OUTER_WIDTH_M,
     gripper_inner_width_m: float = DEFAULT_GRIPPER_INNER_WIDTH_M,
+    grasp_approach_length_m: float = DEFAULT_GRASP_APPROACH_LENGTH_M,
     safety_margin_m: float = DEFAULT_SAFETY_MARGIN_M,
     lift_m: float = 0.05,
     contact_z_offset_m: float = 0.015,
@@ -418,6 +425,7 @@ def evaluate_push_grasp_joint_candidates(
                 table_bounds=table_bounds,
                 gripper_outer_width_m=gripper_outer_width_m,
                 gripper_inner_width_m=gripper_inner_width_m,
+                grasp_approach_length_m=grasp_approach_length_m,
                 safety_margin_m=safety_margin_m,
                 lift_m=lift_m,
                 contact_z_offset_m=contact_z_offset_m,

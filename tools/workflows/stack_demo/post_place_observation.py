@@ -10,6 +10,50 @@ from .observation_scope import expected_placed_template, observe_empty_with_scop
 from .scene import estimate_current_stack
 
 
+def _planned_height_fallback(
+    held_object: dict,
+    place_step: dict,
+    final_stack_state: dict,
+    post_place_stack: dict,
+    post_place_observation: dict,
+) -> dict:
+    placed_template = expected_placed_template(held_object, place_step)
+    placed_id = placed_template.get("id")
+    observed = []
+    for attempt in post_place_observation.get("attempts", []):
+        observed.extend(attempt.get("observed_critical", []))
+    if not any(str(item.get("template_id")) == str(placed_id) for item in observed):
+        return post_place_stack
+    center = placed_template.get("geometry_center_m")
+    size = held_object.get("dimensions_m")
+    previous_top = final_stack_state.get("top_z_base_m")
+    if (
+        not isinstance(center, list)
+        or len(center) < 3
+        or not isinstance(size, list)
+        or len(size) < 3
+        or previous_top is None
+    ):
+        return post_place_stack
+    expected_top = float(center[2]) + 0.5 * float(size[2])
+    if expected_top < float(previous_top) + 0.005:
+        return post_place_stack
+    corrected = dict(post_place_stack)
+    corrected["valid"] = True
+    corrected["reason"] = "Accepted planned place height because scoped observation confirmed the placed object XY."
+    corrected["top_z_base_m"] = round(expected_top, 6)
+    corrected["placement_base_top_z_m"] = round(expected_top, 6)
+    corrected["top_z_source"] = "planned_place_height_after_noisy_depth"
+    corrected["height_estimation_method"] = "planned_place_height_fallback"
+    corrected["post_place_height_fallback"] = {
+        "placed_object_id": placed_id,
+        "expected_top_z_base_m": round(expected_top, 6),
+        "observed_top_z_base_m": post_place_stack.get("top_z_base_m"),
+        "previous_top_z_base_m": previous_top,
+    }
+    return corrected
+
+
 def handle_post_place_observation(
     args: Any,
     cycle_dir: str,
@@ -50,6 +94,18 @@ def handle_post_place_observation(
     )
     write_json(os.path.join(cycle_dir, "stack_state_after_place_observation.json"), post_place_stack)
     post_place_verification = verify_stack_growth(final_stack_state, post_place_stack)
+    if not post_place_verification["valid"]:
+        corrected_stack = _planned_height_fallback(
+            held_object,
+            place_step,
+            final_stack_state,
+            post_place_stack,
+            post_place_observation,
+        )
+        if corrected_stack is not post_place_stack:
+            post_place_stack = corrected_stack
+            write_json(os.path.join(cycle_dir, "stack_state_after_place_height_fallback.json"), post_place_stack)
+            post_place_verification = verify_stack_growth(final_stack_state, post_place_stack)
     write_json(
         os.path.join(cycle_dir, "post_place_growth_verification.json"),
         post_place_verification,

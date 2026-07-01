@@ -2,6 +2,7 @@
 
 from robot_scene_pipeline.scene_memory import update_from_detections, update_from_scoped_detections
 from tools.workflows.stack_demo.observation_scope import expected_placed_template
+from tools.workflows.stack_demo.post_place_observation import _planned_height_fallback
 
 
 def detection(label, center, size=(0.04, 0.04, 0.03)):
@@ -83,8 +84,41 @@ def test_expected_placed_template_uses_tcp_place_center():
     assert placed["reacquire_source"] == "expected_post_place_pose"
 
 
+def test_planned_height_fallback_accepts_confirmed_placed_object_xy():
+    held = {
+        "id": 3,
+        "label": "square green",
+        "geometry_center_m": [0.1, 0.2, 0.015],
+        "dimensions_m": [0.024, 0.024, 0.024],
+    }
+    place_step = {
+        "tcp_place_xy_base_m": [0.30, 0.10],
+        "object_offset_base_xy_m": [0.0, 0.0],
+        "release_z_base_m": 0.036,
+    }
+    final_stack = {"top_z_base_m": 0.024, "stack_xy_base_m": [0.30, 0.10]}
+    noisy_stack = {
+        "valid": True,
+        "top_z_base_m": 0.029,
+        "placement_base_top_z_m": 0.029,
+    }
+    scoped_report = {
+        "attempts": [
+            {
+                "observed_critical": [
+                    {"template_id": 3, "template_label": "square green", "distance_m": 0.002}
+                ]
+            }
+        ]
+    }
+    corrected = _planned_height_fallback(held, place_step, final_stack, noisy_stack, scoped_report)
+    assert corrected["top_z_base_m"] == 0.048
+    assert corrected["height_estimation_method"] == "planned_place_height_fallback"
+
+
 if __name__ == "__main__":
     test_scoped_update_keeps_missing_objects_low_confidence_not_operable()
     test_scoped_update_marks_missing_critical_as_unconfirmed_missing()
     test_expected_placed_template_uses_tcp_place_center()
+    test_planned_height_fallback_accepts_confirmed_placed_object_xy()
     print("scoped observation memory tests passed")

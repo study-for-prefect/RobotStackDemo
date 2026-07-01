@@ -252,6 +252,8 @@ def parse_args():
     parser.add_argument("--gripper-port", default="/dev/ttyUSB0")
     parser.add_argument("--gripper-slave-id", type=int, default=1)
     parser.add_argument("--gripper-baudrate", type=int, default=115200)
+    parser.add_argument("--gripper-modbus-retries", type=int, default=3)
+    parser.add_argument("--gripper-modbus-retry-wait-s", type=float, default=0.08)
     parser.add_argument("--skip-gripper-init", action="store_true")
     parser.add_argument("--gripper-full-calibration", action="store_true")
     parser.add_argument("--gripper-force", type=int, default=50)

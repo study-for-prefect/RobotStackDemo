@@ -16,7 +16,47 @@ from tools.planning.decision_to_execution import write_json
 from robot_scene_pipeline.stack_state import estimate_stack_state
 from tools.planning.build_geometry_pick_plan import find_object, set_stack_demo_yaw
 
-from .commands import capture_scene_observation, load_json
+from .commands import capture_scene_observation, load_json, relative_translate_command, run
+
+
+def _parse_base_offsets(raw_value):
+    offsets = []
+    for item in str(raw_value or "").split(";"):
+        if not item.strip():
+            continue
+        values = [float(value.strip()) for value in item.split(",")]
+        if len(values) != 3:
+            raise RuntimeError("Initial observation recovery offsets must contain XYZ triples.")
+        offsets.append(values)
+    return offsets
+
+
+def _move_to_initial_recovery_offset(args, attempt):
+    offsets = _parse_base_offsets(getattr(args, "initial_observation_recovery_offsets_base", ""))
+    if not offsets or not getattr(args, "execute", False):
+        return
+    offset = offsets[min(max(0, attempt - 1), len(offsets) - 1)]
+    if any(abs(value) > 1e-9 for value in offset):
+        print("Initial observation retry: moving by base_link offset {}.".format(offset), flush=True)
+        run(relative_translate_command(args, offset))
+
+
+def _initial_decision_valid(args, state):
+    if args.stack_decision_json or args.force_llm_decision:
+        return True, None
+    decision = rule_stack_blocks_decision(args.instruction, state.get("objects", []))
+    if decision is None:
+        return False, "rule_stack_blocks_decision returned no complete decision"
+    try:
+        validate_stack_blocks_decision(
+            decision,
+            state.get("objects", []),
+            args.instruction,
+            prefer_explicit_rule=True,
+        )
+    except RuntimeError as exc:
+        return False, str(exc)
+    return True, None
 
 def object_by_id(state, object_id):
     for obj in state.get("objects", []):
@@ -57,13 +97,19 @@ def load_or_capture_initial(args):
             initial_dir = os.path.join(args.output_dir, "initial_order_retry_{:02d}".format(attempt))
             if float(args.initial_observation_stable_wait_s) > 0.0:
                 time.sleep(float(args.initial_observation_stable_wait_s))
+            _move_to_initial_recovery_offset(args, attempt)
         capture_scene_observation(args, initial_dir, stack_reasoning=False)
         state = load_json(os.path.join(initial_dir, "private_scene_state.json"))
         objects = [obj for obj in state.get("objects", []) if not obj.get("is_workspace")]
-        if objects or attempt + 1 >= initial_attempts:
+        decision_ok, decision_error = _initial_decision_valid(args, state)
+        if objects and decision_ok:
+            break
+        if attempt + 1 >= initial_attempts:
             break
         print(
-            "Initial observation detected no non-workspace objects; retry {}/{}.".format(
+            "Initial observation incomplete: objects={} decision_error={}. Retry {}/{}.".format(
+                len(objects),
+                decision_error,
                 attempt + 1,
                 initial_attempts - 1,
             ),

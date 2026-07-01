@@ -387,6 +387,7 @@ def build_geometry_relations(
     local_refine_step_deg=1.0,
     gripper_outer_width_m=0.112,
     gripper_inner_width_m=0.048,
+    grasp_approach_length_m=0.02,
     current_wrist_yaw_deg=None,
 ):
     """Build deterministic pairwise and target-specific geometry relations."""
@@ -430,6 +431,7 @@ def build_geometry_relations(
         local_refine_step_deg=local_refine_step_deg,
         gripper_outer_width_m=gripper_outer_width_m,
         gripper_inner_width_m=gripper_inner_width_m,
+        approach_length_m=grasp_approach_length_m,
         current_wrist_yaw_deg=current_wrist_yaw_deg,
     )
     analysis = make_grasp_analysis_relation(_object_name(target), [], grasp_result)

@@ -16,10 +16,7 @@ def all_blocking_objects(grasp_result: Dict[str, object]) -> List[dict]:
 
 
 def is_loose_movable_blocker(blocker: dict) -> bool:
-    return (
-        blocker.get("blocker_category") == "loose_movable"
-        and blocker.get("pushable", True) is not False
-    )
+    return blocker.get("blocker_category") == "loose_movable"
 
 
 def make_grasp_analysis_relation(

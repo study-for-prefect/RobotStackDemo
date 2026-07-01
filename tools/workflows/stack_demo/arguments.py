@@ -80,6 +80,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--init-stable-wait-s", type=float, default=1.0)
     parser.add_argument("--initial-observation-retry-count", type=int, default=1)
     parser.add_argument("--initial-observation-stable-wait-s", type=float, default=0.5)
+    parser.add_argument(
+        "--initial-observation-recovery-offsets-base",
+        default="0,0,-0.04;0.03,0,-0.02;-0.03,0,-0.02;0,0.03,-0.02;0,-0.03,-0.02",
+        help="Semicolon-separated base_link XYZ offsets used between initial observation retries.",
+    )
     parser.add_argument("--xy-correction-json", default="")
     parser.add_argument(
         "--calibration-json",
@@ -128,6 +133,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--square-yaw-snap-tolerance-deg", type=float, default=0.0)
     parser.add_argument("--grasp-axis", choices=("long", "short"), default="long")
     parser.add_argument("--gripper-yaw-offset-deg", type=float, default=0.0)
+    parser.add_argument("--grasp-gripper-outer-width-m", type=float, default=0.112)
+    parser.add_argument("--grasp-gripper-inner-width-m", type=float, default=0.048)
+    parser.add_argument(
+        "--grasp-approach-length-m",
+        type=float,
+        default=0.02,
+        help="Planar top-grasp envelope extension along the gripper axis; keep small for vertical tabletop grasps.",
+    )
     parser.add_argument("--max-grasp-yaw-error-deg", type=float, default=5.0)
     parser.add_argument("--max-grasp-orientation-error-deg", type=float, default=0.5)
     parser.add_argument("--pre-rotate-wrist-yaw-sign", choices=("positive", "negative"), default="negative")

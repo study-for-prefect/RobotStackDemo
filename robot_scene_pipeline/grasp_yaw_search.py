@@ -338,7 +338,7 @@ def select_best_grasp(
     gripper_outer_width_m: float = 0.112,
     gripper_inner_width_m: float = 0.048,
     current_wrist_yaw_deg: Optional[float] = None,
-    approach_length_m: float = 0.12,
+    approach_length_m: float = 0.02,
     z_tolerance_m: float = 0.04,
 ) -> dict:
     obstacles = [obj for obj in objects if isinstance(obj, dict) and not is_same_object(obj, target)]
@@ -436,5 +436,6 @@ def select_best_grasp(
             "local_refine_step_deg": float(local_refine_step_deg),
             "gripper_outer_width_m": float(gripper_outer_width_m),
             "gripper_inner_width_m": float(gripper_inner_width_m),
+            "approach_length_m": float(approach_length_m),
         },
     }

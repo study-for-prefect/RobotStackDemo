@@ -6,21 +6,13 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 from robot_scene_pipeline.geometry_relations import build_geometry_relations
 from robot_scene_pipeline.qwen_action_candidate_parser import parse_qwen_action_candidates
-from robot_scene_pipeline.scene_memory import (
-    mark_pushed,
-    save_memory,
-    update_from_detections,
-)
+from robot_scene_pipeline.scene_memory import mark_pushed, save_memory, update_from_detections
 from tools.planning.decision_to_execution import write_json
 
 from .commands import capture_empty_observation, load_json, push_clear_command, run
 from .observation_scope import observe_empty_with_scope
 from .push_context import (
-    future_target_objects,
-    observed_push_delta_m,
-    protected_objects,
-    protected_stack_templates,
-    qwen_forbidden_objects,
+    future_target_objects, observed_push_delta_m, protected_objects, protected_stack_templates, qwen_forbidden_objects,
 )
 from .push_clearing import (
     build_push_execution_plan,
@@ -37,6 +29,7 @@ def _relations_for_target(
     held_object: dict,
     base_id: Any,
     previous_locked_stack: dict,
+    args: Any,
 ) -> list:
     relation_objects = relation_objects_with_protected_structure(
         current_state.get("objects", []),
@@ -46,6 +39,9 @@ def _relations_for_target(
     return build_geometry_relations(
         relation_objects,
         target_id=held_object["id"],
+        gripper_outer_width_m=getattr(args, "grasp_gripper_outer_width_m", 0.112),
+        gripper_inner_width_m=getattr(args, "grasp_gripper_inner_width_m", 0.048),
+        grasp_approach_length_m=getattr(args, "grasp_approach_length_m", 0.02),
     )
 
 
@@ -150,6 +146,7 @@ def _manual_clear_and_reobserve(
         held_object,
         base_id,
         previous_locked_stack,
+        args,
     )
     write_json(
         os.path.join(cycle_dir, "geometry_relations_after_manual_clearing.json"),
@@ -191,6 +188,7 @@ def handle_push_clearing_before_pick(
         held_object,
         base_id,
         previous_locked_stack,
+        args,
     )
     write_json(
         os.path.join(cycle_dir, "geometry_relations_before_pick.json"),
@@ -261,6 +259,9 @@ def handle_push_clearing_before_pick(
         memory=memory,
         lift_m=args.push_clearing_lift_m,
         contact_z_offset_m=args.push_clearing_contact_z_offset_m,
+        gripper_outer_width_m=args.grasp_gripper_outer_width_m,
+        gripper_inner_width_m=args.grasp_gripper_inner_width_m,
+        grasp_approach_length_m=args.grasp_approach_length_m,
     )
     write_json(
         os.path.join(cycle_dir, "push_grasp_joint_candidates.json"),
@@ -449,6 +450,7 @@ def handle_push_clearing_before_pick(
         held_object,
         base_id,
         previous_locked_stack,
+        args,
     )
     write_json(
         os.path.join(cycle_dir, "geometry_relations_after_push.json"),
