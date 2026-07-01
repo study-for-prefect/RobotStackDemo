@@ -26,6 +26,7 @@ from .commands import (
     retry_close_observation,
     run,
 )
+from .observation_scope import expected_placed_template
 from .pick import (
     build_offline_pick_plan,
     pick_approach_command,
@@ -42,6 +43,7 @@ from .placement import (
     validate_pick_place_separation,
     validate_place_second_snapshot,
 )
+from .post_place_observation import handle_post_place_observation
 from .push_flow import handle_push_clearing_before_pick
 from .scene import (
     estimate_current_stack,
@@ -215,6 +217,7 @@ def main() -> int:
         current_state = copy.deepcopy(initial_state)
         previous_stack_xy = None
         previous_locked_stack = None
+        protected_locked_stack = None
 
         for index, object_id in enumerate(order, start=1):
             cycle_dir = os.path.join(args.output_dir, "cycle_{:02d}_object_{}".format(index, object_id))
@@ -243,7 +246,7 @@ def main() -> int:
                 held_templates[object_id],
                 held_object,
                 base_id,
-                previous_locked_stack,
+                protected_locked_stack or previous_locked_stack,
                 future_targets=[held_templates[target_id] for target_id in order[index:]],
                 future_place_regions=_future_place_regions(base_object, previous_stack_xy, args),
             )
@@ -590,17 +593,53 @@ def main() -> int:
                     target_id=memory["structure"].get("current_top"),
                     result="executed" if args.execute else "dry_run",
                 )
+                placed_template = expected_placed_template(held_object, place_step)
+                placed_center = placed_template.get("geometry_center_m")
+                if isinstance(placed_center, list) and len(placed_center) >= 3:
+                    memory["objects"][placed_mem_id]["last_pose_base"] = [float(value) for value in placed_center[:3]]
+                    held_size = held_object.get("dimensions_m") or memory["objects"][placed_mem_id].get("size_m")
+                    if isinstance(held_size, list) and len(held_size) >= 3:
+                        memory["objects"][placed_mem_id]["top_z"] = float(placed_center[2]) + float(held_size[2]) / 2.0
+                    memory["structure"]["top_center_base"] = memory["objects"][placed_mem_id]["last_pose_base"]
+                    memory["structure"]["top_z"] = memory["objects"][placed_mem_id].get("top_z")
                 save_memory(memory, args.memory_json)
 
-            if not args.execute:
+            if args.execute:
+                current_state, memory, protected_locked_stack = handle_post_place_observation(
+                    args,
+                    cycle_dir,
+                    runtime,
+                    memory,
+                    current_state,
+                    base_object,
+                    current_base_object,
+                    held_object,
+                    place_step,
+                    final_stack_state,
+                    [held_templates[target_id] for target_id in order[index:]],
+                    index,
+                )
+                save_memory(memory, args.memory_json)
+            else:
                 held_state = simulate_held_state(current_state, object_id)
                 current_state = simulate_placed_state(held_state, held_object, place_step)
                 write_json(os.path.join(cycle_dir, "after_place_scene_state.json"), current_state)
                 memory = update_from_detections(memory, current_state.get("objects", []))
+                _, protected_locked_stack = estimate_current_stack(
+                    current_state,
+                    base_object,
+                    final_stack_state.get("stack_xy_base_m"),
+                    args,
+                    search_radius_m=args.search_radius_m,
+                )
                 save_memory(memory, args.memory_json)
 
             previous_locked_stack = final_stack_state
-            previous_stack_xy = final_stack_state["stack_xy_base_m"]
+            previous_stack_xy = (
+                protected_locked_stack.get("stack_xy_base_m")
+                if protected_locked_stack and protected_locked_stack.get("valid")
+                else final_stack_state["stack_xy_base_m"]
+            )
 
         runtime["current_stage"] = "final_empty_gripper_ready_verification"
         observed = capture_empty_observation(

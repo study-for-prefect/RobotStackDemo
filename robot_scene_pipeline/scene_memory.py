@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 
 Memory = Dict[str, Any]
@@ -217,6 +217,100 @@ def update_from_detections(
     for obj in memory["objects"].values():
         if not obj.get("visible", False):
             obj["state"] = "missing" if obj.get("state") == "free" else obj.get("state")
+
+    return memory
+
+
+def update_from_scoped_detections(
+    memory: Memory,
+    detections: List[Obj],
+    match_dist_m: float = 0.05,
+    scoped_object_ids: Optional[Iterable[str]] = None,
+    critical_object_ids: Optional[Iterable[str]] = None,
+    observation_scope: str = "post_action",
+) -> Memory:
+    """
+    Update memory from a scoped observation after pick / push / place.
+
+    Unlike update_from_detections(), this function does not turn every unseen
+    free object into missing. Objects inside the requested scope that are not
+    detected are kept as low-confidence, non-operable memory until a later
+    observation confirms them again.
+    """
+
+    memory["step_index"] = int(memory.get("step_index", 0)) + 1
+    step_index = memory["step_index"]
+    scoped_ids: Set[str] = {str(value) for value in scoped_object_ids or []}
+    critical_ids: Set[str] = {str(value) for value in critical_object_ids or []}
+    seen_ids: Set[str] = set()
+
+    for obj_id in scoped_ids:
+        obj = memory.get("objects", {}).get(obj_id)
+        if obj is None:
+            continue
+        obj["visible"] = False
+        obj["last_observation_scope"] = observation_scope
+
+    for det in detections:
+        label = _get_label(det)
+        center = _get_center_base(det)
+        size = _get_size_m(det)
+
+        if label is None or center is None:
+            continue
+
+        obj_id = _find_match(memory, label, center, max_dist_m=match_dist_m)
+
+        if obj_id is None:
+            obj_id = _make_object_id(label, memory["objects"])
+            memory["objects"][obj_id] = {
+                "id": obj_id,
+                "label": label,
+                "role": "unknown",
+                "state": "free",
+            }
+
+        mem_obj = memory["objects"][obj_id]
+        role = mem_obj.get("role", "unknown")
+        state = mem_obj.get("state", "free")
+        yaw = _get_yaw(det)
+        top_z = _get_top_z(det, center, size)
+        graspable, pushable = _default_operability(role, state)
+
+        mem_obj.update({
+            "id": obj_id,
+            "label": label,
+            "last_pose_base": center,
+            "size_m": size,
+            "yaw_rad": yaw,
+            "top_z": top_z,
+            "visible": True,
+            "graspable": graspable,
+            "pushable": pushable,
+            "last_seen_step": step_index,
+            "observation_confidence": 1.0,
+            "last_observation_scope": observation_scope,
+        })
+        mem_obj.pop("missing_observation_scope", None)
+        seen_ids.add(str(obj_id))
+
+    missing_scoped_ids = scoped_ids - seen_ids
+    for obj_id in missing_scoped_ids:
+        obj = memory.get("objects", {}).get(obj_id)
+        if obj is None:
+            continue
+        previous_count = int(obj.get("unconfirmed_missing_count", 0))
+        obj["visible"] = False
+        obj["last_missing_step"] = step_index
+        obj["unconfirmed_missing_count"] = previous_count + 1
+        obj["missing_observation_scope"] = observation_scope
+        obj["observation_confidence"] = 0.15 if obj_id in critical_ids else 0.35
+        obj["graspable"] = False
+        obj["pushable"] = False
+        if obj_id in critical_ids:
+            obj["state"] = "unconfirmed_missing"
+        elif obj.get("state") == "missing":
+            obj["state"] = "free"
 
     return memory
 

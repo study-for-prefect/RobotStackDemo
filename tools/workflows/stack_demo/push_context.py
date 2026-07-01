@@ -24,6 +24,22 @@ def protected_objects(
     return output
 
 
+def protected_stack_templates(
+    current_state: dict,
+    base_id: Any,
+    previous_locked_stack: Optional[dict],
+) -> List[dict]:
+    templates = []
+    if base_id is not None:
+        for obj in current_state.get("objects", []):
+            if str(obj.get("id")) == str(base_id):
+                templates.append(copy.deepcopy(obj))
+                break
+    if previous_locked_stack:
+        templates.extend(copy.deepcopy(previous_locked_stack.get("stack_objects", [])))
+    return templates
+
+
 def observed_push_delta_m(before_obstacle: dict, after_state: dict) -> Optional[float]:
     before_center = before_obstacle.get("geometry_center_m")
     if not isinstance(before_center, list) or len(before_center) < 2:

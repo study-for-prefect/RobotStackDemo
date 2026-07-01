@@ -14,10 +14,12 @@ from robot_scene_pipeline.scene_memory import (
 from tools.planning.decision_to_execution import write_json
 
 from .commands import capture_empty_observation, load_json, push_clear_command, run
+from .observation_scope import observe_empty_with_scope
 from .push_context import (
     future_target_objects,
     observed_push_delta_m,
     protected_objects,
+    protected_stack_templates,
     qwen_forbidden_objects,
 )
 from .push_clearing import (
@@ -408,11 +410,20 @@ def handle_push_clearing_before_pick(
         {"status": "passed_and_executed", "source": "moveit_plan_preview_push_preflight"},
     )
 
-    runtime["current_stage"] = "observation_after_push_clearing"
-    pushed_state = capture_empty_observation(
+    runtime["current_stage"] = "scoped_observation_after_push_clearing"
+    pushed_state, memory, post_push_observation = observe_empty_with_scope(
         args,
         os.path.join(cycle_dir, "observation_after_push"),
-        runtime["held_object_id"],
+        runtime,
+        memory,
+        critical_templates=(
+            [held_template]
+            + protected_stack_templates(current_state, base_id, previous_locked_stack)
+            + list(future_targets or [])
+        ),
+        noncritical_templates=[obstacle],
+        scope_name="after_push_clearing",
+        description="Post-push scoped observation",
     )
     if pushed_state is None:
         raise RuntimeError(
@@ -420,7 +431,6 @@ def handle_push_clearing_before_pick(
         )
     current_state = pushed_state
     write_json(os.path.join(cycle_dir, "scene_state_after_action.json"), current_state)
-    memory = update_from_detections(memory, current_state.get("objects", []))
     observed_delta_m = observed_push_delta_m(obstacle, current_state)
     if obstacle_memory_id is not None:
         memory = mark_pushed(
@@ -454,6 +464,7 @@ def handle_push_clearing_before_pick(
         {
             "action": "push_clearing",
             "result": "executed_and_reobserved",
+            "post_push_observation": post_push_observation,
             "observed_delta_m": observed_delta_m,
             "post_push_grasp_action": after_analysis.get("action"),
             "post_push_selected_grasp_yaw_deg": after_analysis.get("selected_grasp_yaw_deg"),

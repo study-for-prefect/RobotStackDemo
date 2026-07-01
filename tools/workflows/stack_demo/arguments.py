@@ -148,6 +148,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--second-snapshot-retry-offset-camera", nargs=3, type=float, default=[0.0, 0.04, 0.0])
     parser.add_argument("--close-observation-retry-count", type=int, default=1)
     parser.add_argument("--close-observation-retry-base-offset", nargs=3, type=float, default=[0.0, 0.0, 0.0])
+    parser.add_argument(
+        "--scoped-observation-recovery-offsets-base",
+        default="0,0,0;0.04,0,0;-0.04,0,0;0,0.04,0;0,-0.04,0",
+        help=(
+            "Semicolon-separated base_link XYZ offsets for scoped recovery observations, "
+            "for example '0,0,0;0.04,0,0;0,0.04,0'."
+        ),
+    )
+    parser.add_argument("--scoped-observation-max-attempts", type=int, default=5)
+    parser.add_argument("--scoped-observation-match-distance-m", type=float, default=0.07)
     parser.add_argument("--place-yaw-strategy", choices=("stack", "base", "held"), default="base")
     parser.add_argument("--place-center-strategy", choices=("top", "base"), default="top")
     parser.add_argument("--max-stack-top-center-offset-m", type=float, default=0.015)
