@@ -74,8 +74,8 @@ def handle_post_place_observation(
         os.path.join(cycle_dir, "observation_after_place"),
         runtime,
         memory,
-        critical_templates=[expected_placed_template(held_object, place_step)] + list(future_templates),
-        noncritical_templates=[current_base_object],
+        critical_templates=[expected_placed_template(held_object, place_step)],
+        noncritical_templates=[current_base_object] + list(future_templates),
         scope_name="after_place",
         description="Post-place scoped observation",
     )

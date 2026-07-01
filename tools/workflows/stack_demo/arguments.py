@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
         default=0.015,
         help="Contact z offset above table for push clearing.",
     )
+    parser.add_argument("--push-tool-width-m", type=float, default=0.035)
+    parser.add_argument("--push-tool-safety-margin-m", type=float, default=0.005)
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--conda-env", default="yolo")
     parser.add_argument("--ros-python", default="/usr/bin/python3")

@@ -15,11 +15,8 @@ from .push_context import (
     future_target_objects, observed_push_delta_m, protected_objects, protected_stack_templates, qwen_forbidden_objects,
 )
 from .push_clearing import (
-    build_push_execution_plan,
-    evaluate_push_candidates,
-    object_by_string_id,
-    pushable_blocking_relations,
-    relation_objects_with_protected_structure,
+    build_push_execution_plan, evaluate_push_candidates, object_by_string_id,
+    pushable_blocking_relations, relation_objects_with_protected_structure,
 )
 from .scene import memory_id_for_scene_object, reacquire_target
 
@@ -148,20 +145,22 @@ def _manual_clear_and_reobserve(
         previous_locked_stack,
         args,
     )
-    write_json(
-        os.path.join(cycle_dir, "geometry_relations_after_manual_clearing.json"),
-        relations,
-    )
-    remaining_push = pushable_blocking_relations(
-        observed_state,
-        relations,
-        held_object["id"],
-        base_id,
-        previous_locked_stack,
-    )
-    if remaining_push:
+    write_json(os.path.join(cycle_dir, "geometry_relations_after_manual_clearing.json"), relations)
+    remaining_push = pushable_blocking_relations(observed_state, relations, held_object["id"], base_id, previous_locked_stack)
+    after_analysis = _target_grasp_analysis(relations, held_object["id"])
+    write_json(os.path.join(cycle_dir, "grasp_yaw_analysis_after_manual_clearing.json"), after_analysis)
+    if after_analysis.get("action") == "pick" and after_analysis.get("grasp_feasible"):
+        held_object = _apply_selected_grasp_to_target(held_object, after_analysis)
+    elif remaining_push:
+        raise RuntimeError("Target remains blocked after manual clearing observation; refusing to pick.")
+    else:
         raise RuntimeError(
-            "Target remains blocked after one manual clearing observation."
+            "Manual clearing did not produce a feasible grasp. action={} base={} locked={} placed={}.".format(
+                after_analysis.get("action"),
+                after_analysis.get("blocked_by_base"),
+                after_analysis.get("blocked_by_locked_structure"),
+                after_analysis.get("blocked_by_placed_structure"),
+            )
         )
     request = load_json(request_path)
     request["execution_status"] = "operator_confirmed_and_reobserved"
@@ -262,6 +261,8 @@ def handle_push_clearing_before_pick(
         gripper_outer_width_m=args.grasp_gripper_outer_width_m,
         gripper_inner_width_m=args.grasp_gripper_inner_width_m,
         grasp_approach_length_m=args.grasp_approach_length_m,
+        push_tool_width_m=args.push_tool_width_m,
+        push_tool_safety_margin_m=args.push_tool_safety_margin_m,
     )
     write_json(
         os.path.join(cycle_dir, "push_grasp_joint_candidates.json"),

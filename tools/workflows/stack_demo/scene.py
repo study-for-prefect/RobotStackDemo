@@ -46,7 +46,10 @@ def _initial_decision_valid(args, state):
         return True, None
     decision = rule_stack_blocks_decision(args.instruction, state.get("objects", []))
     if decision is None:
-        return False, "rule_stack_blocks_decision returned no complete decision"
+        objects = [obj for obj in state.get("objects", []) if not obj.get("is_workspace")]
+        if len(objects) >= 2:
+            return True, "structure planner will choose roles"
+        return False, "not enough detected blocks for structure planning"
     try:
         validate_stack_blocks_decision(
             decision,
@@ -169,8 +172,11 @@ def selected_stack_yaw(obj, args):
 def print_decision_summary(initial_state, decision):
     base = object_by_id(initial_state, decision["base_object_id"])
     ordered = [object_by_id(initial_state, object_id) for object_id in decision["stack_order"]]
+    structure_plan = decision.get("structure_plan") if isinstance(decision.get("structure_plan"), dict) else {}
     print(
-        "\nValidated stack decision: base={} id={} stack_order={} ids={} source={}".format(
+        "\nValidated stack decision: structure={} strategy={} base={} id={} stack_order={} ids={} source={}".format(
+            structure_plan.get("structure_type", "stack"),
+            structure_plan.get("execution_strategy", "vertical_stack"),
             base.get("label"),
             base.get("id"),
             [obj.get("label") for obj in ordered],
@@ -193,6 +199,15 @@ def print_decision_summary(initial_state, decision):
                 ),
                 flush=True,
             )
+    for role in structure_plan.get("roles", []) if isinstance(structure_plan.get("roles"), list) else []:
+        print(
+            "Structure role: role={} object_id={} reason={}".format(
+                role.get("role"),
+                role.get("object_id", role.get("object_ids")),
+                role.get("reason"),
+            ),
+            flush=True,
+        )
 
 
 def memory_id_for_scene_object(memory, scene_obj, max_dist_m=0.05):

@@ -1,10 +1,17 @@
 import json
-import math
 
 import requests
 
 from .depth_geometry import coordinate_convention, public_object
 from .io_utils import image_to_base64
+from .llm_stack_blocks import (
+    build_stack_blocks_prompt,
+    color_mentions,
+    normalize_stack_blocks_text,
+    object_id_for_color,
+    rule_stack_blocks_decision,
+    validate_stack_blocks_decision,
+)
 
 
 def add_llm_args(parser):
@@ -96,26 +103,6 @@ def build_prompt(llm_input):
 {}""".format(json.dumps(llm_input, ensure_ascii=False, indent=2))
 
 
-def build_stack_blocks_prompt(llm_input):
-    return """你是积木叠放任务的符号指令解析模块。
-
-你只负责解析用户自然语言中的积木叠放顺序。对象必须来自 hard_priors.objects。
-不要输出机器人坐标、抓取点、放置点、关节角、动作轨迹或完整多步坐标计划。
-base_object_id 是最底层且不需要抓取的积木；stack_order 是从下到上依次需要抓取并放置的对象 id。
-颜色和类别必须与 hard_priors.objects 的 label 严格一致；例如用户要求 green 时禁止选择 yellow。
-base_object_id 禁止出现在 stack_order 中。缺少用户指定颜色时，不得用其他颜色替代。同色存在多个积木时，按有效 base_link geometry_center_m 的 x、y、id 升序选择。
-若指令不明确，reason 必须说明歧义；仍然只输出以下严格 JSON schema：
-{{
-  "task_type": "stack_blocks",
-  "base_object_id": 0,
-  "stack_order": [1, 2],
-  "reason": "short explanation of the parsed order"
-}}
-
-输入：
-{}""".format(json.dumps(llm_input, ensure_ascii=False, indent=2))
-
-
 def call_ollama(args, prompt, snapshot_path):
     message = {"role": "user", "content": prompt}
     if not args.no_image:
@@ -142,210 +129,6 @@ def parse_json_or_embedded(text):
         if start >= 0 and end > start:
             return json.loads(text[start:end + 1])
         raise
-
-
-COLOR_ALIASES = [
-    ("green", ("green", "绿色", "绿")),
-    ("red", ("red", "红色", "红")),
-    ("blue", ("blue", "蓝色", "蓝")),
-    ("yellow", ("yellow", "黄色", "黄")),
-]
-
-
-def color_mentions(text):
-    mentions = []
-    lowered = text.lower()
-    for color, aliases in COLOR_ALIASES:
-        positions = []
-        for alias in aliases:
-            pos = lowered.find(alias.lower())
-            if pos >= 0:
-                positions.append(pos)
-        if positions:
-            mentions.append((min(positions), color))
-    return [color for _, color in sorted(mentions)]
-
-
-def object_label_contains(obj, color):
-    label = str(obj.get("label", "")).lower()
-    aliases = next((values for name, values in COLOR_ALIASES if name == color), (color,))
-    return any(str(alias).lower() in label for alias in aliases)
-
-
-def object_id_for_color(objects, color):
-    matches = [obj for obj in objects if object_label_contains(obj, color)]
-    if not matches:
-        return None
-    return int(max(matches, key=lambda item: item.get("confidence", 0.0))["id"])
-
-
-def _stack_candidate_xy(obj):
-    center = obj.get("geometry_center_m")
-    if (
-        obj.get("geometry_frame") != "base_link"
-        or not obj.get("pointcloud_geometry_valid", True)
-        or not isinstance(center, (list, tuple))
-        or len(center) < 2
-    ):
-        return None
-    try:
-        xy = (float(center[0]), float(center[1]))
-    except (TypeError, ValueError):
-        return None
-    return xy if all(math.isfinite(value) for value in xy) else None
-
-
-def select_stack_object_for_color(objects, color):
-    """Select one color match deterministically, using only stack-safe geometry for ambiguity."""
-    matches = [
-        obj
-        for obj in objects
-        if not obj.get("is_workspace")
-        and str(obj.get("label", "")).lower() != "workspace"
-        and object_label_contains(obj, color)
-    ]
-    if not matches:
-        raise ValueError(
-            "Color-rule stack instruction requires exactly one {} block, found 0.".format(color)
-        )
-    if len(matches) == 1:
-        eligible_ids = [int(matches[0]["id"])] if _stack_candidate_xy(matches[0]) is not None else []
-        return matches[0], {
-            "color": color,
-            "candidate_ids": [int(matches[0]["id"])],
-            "eligible_ids": eligible_ids,
-            "selected_id": int(matches[0]["id"]),
-            "strategy": "only_color_match",
-        }
-
-    eligible = [(obj, _stack_candidate_xy(obj)) for obj in matches]
-    eligible = [(obj, xy) for obj, xy in eligible if xy is not None]
-    if not eligible:
-        raise ValueError(
-            "Color-rule stack instruction found {} {} blocks, but none has valid base_link "
-            "geometry_center_m for deterministic x/y selection.".format(len(matches), color)
-        )
-    selected, selected_xy = min(
-        eligible,
-        key=lambda item: (item[1][0], item[1][1], int(item[0]["id"])),
-    )
-    return selected, {
-        "color": color,
-        "candidate_ids": sorted(int(obj["id"]) for obj in matches),
-        "eligible_ids": sorted(int(obj["id"]) for obj, _ in eligible),
-        "selected_id": int(selected["id"]),
-        "selected_xy_base_m": [selected_xy[0], selected_xy[1]],
-        "strategy": "min_base_link_geometry_x_then_y_then_id",
-    }
-
-
-BASE_ROLE_WORDS = ("底", "底座", "基底", "底层", "底部", "最底层", "最下面", "base", "bottom")
-BOTTOM_TO_TOP_MARKERS = ("从下到上", "自下而上", "由下到上", "bottom to top")
-ON_TOP_MARKERS = ("放到", "放在", "叠到", "叠在", "堆到", "堆在", "摞到", "摞在", "on top of", "onto", "stack")
-
-
-def _explicit_base_color(text):
-    for color, aliases in COLOR_ALIASES:
-        for alias in aliases:
-            alias = str(alias).lower()
-            alias_forms = (alias, "{}方块".format(alias), "{}积木".format(alias), "{}块".format(alias))
-            for alias_form in alias_forms:
-                for role_word in BASE_ROLE_WORDS:
-                    if (
-                        "以{}为{}".format(alias_form, role_word) in text
-                        or "{}为{}".format(alias_form, role_word) in text
-                        or "{}作为{}".format(alias_form, role_word) in text
-                        or "用{}作为{}".format(alias_form, role_word) in text
-                        or "把{}作为{}".format(alias_form, role_word) in text
-                        or "{}当{}".format(alias_form, role_word) in text
-                        or "{} as {}".format(alias_form, role_word) in text
-                        or "{} is {}".format(alias_form, role_word) in text
-                    ):
-                        return color
-    return None
-
-
-def _implied_stack_order_from_instruction(text, mentioned):
-    if len(mentioned) < 2:
-        return None, None, None
-    if any(marker in text for marker in BOTTOM_TO_TOP_MARKERS):
-        return mentioned[0], mentioned[1:], "bottom_to_top_order"
-    if any(marker in text for marker in ON_TOP_MARKERS) and ("上" in text or "top" in text or "onto" in text):
-        return mentioned[1], [mentioned[0]] + mentioned[2:], "target_on_reference_order"
-    return None, None, None
-
-
-def rule_stack_blocks_decision(instruction, hard_prior_objects):
-    """Resolve color-specified stack instructions without LLM freedom."""
-    text = str(instruction or "").lower()
-    mentioned = color_mentions(text)
-    if not mentioned:
-        return None
-
-    base_color = _explicit_base_color(text)
-    decision_rule = "explicit_base_role"
-    if base_color is None:
-        base_color, ordered_colors, decision_rule = _implied_stack_order_from_instruction(text, mentioned)
-        if base_color is None:
-            return None
-    else:
-        ordered_colors = [color for color in mentioned if color != base_color]
-
-    if not ordered_colors:
-        raise ValueError("Color-rule stack instruction has no block to place above the base.")
-    color_ids = {}
-    selections = []
-    for color in [base_color] + ordered_colors:
-        selected, selection = select_stack_object_for_color(hard_prior_objects, color)
-        color_ids[color] = int(selected["id"])
-        selections.append(selection)
-    return {
-        "task_type": "stack_blocks",
-        "base_object_id": color_ids[base_color],
-        "stack_order": [color_ids[color] for color in ordered_colors],
-        "reason": "Deterministic color-rule parse ({}): base={} stack_order={}.".format(
-            decision_rule, base_color, ordered_colors
-        ),
-        "base_color": base_color,
-        "stack_colors": ordered_colors,
-        "decision_source": "instruction_color_rule",
-        "instruction_parse_rule": decision_rule,
-        "color_candidate_selections": selections,
-    }
-
-
-def validate_stack_blocks_decision(
-    decision,
-    hard_prior_objects,
-    instruction="",
-    prefer_explicit_rule=True,
-):
-    normalized = json.loads(
-        normalize_stack_blocks_text(
-            json.dumps(decision),
-            hard_prior_objects,
-            instruction,
-            prefer_explicit_rule=prefer_explicit_rule,
-        )
-    )
-    rule_decision = (
-        rule_stack_blocks_decision(instruction, hard_prior_objects)
-        if prefer_explicit_rule
-        else None
-    )
-    if rule_decision is not None:
-        if (
-            normalized["base_object_id"] != rule_decision["base_object_id"]
-            or normalized["stack_order"] != rule_decision["stack_order"]
-        ):
-            rule_decision["reason"] = (
-                "{} Overrode conflicting stack decision with the explicit instruction parse.".format(
-                    rule_decision["reason"]
-                )
-            )
-        return rule_decision
-    normalized["decision_source"] = "validated_llm_or_explicit"
-    return normalized
 
 
 def remap_step_ids_from_instruction(step, hard_prior_objects, instruction):
@@ -491,78 +274,3 @@ def normalize_decision_text(text, hard_prior_objects=None, instruction=""):
             "Validated scene graph object ids against detector hard priors."
         )
     return json.dumps(decision, ensure_ascii=False, indent=2)
-
-
-def normalize_stack_blocks_text(
-    text,
-    hard_prior_objects=None,
-    instruction="",
-    prefer_explicit_rule=True,
-):
-    decision = parse_json_or_embedded(text)
-    if decision.get("task_type") != "stack_blocks":
-        raise ValueError("Stack decision task_type must be stack_blocks.")
-    rule_decision = None
-    if instruction and prefer_explicit_rule:
-        rule_decision = rule_stack_blocks_decision(instruction, hard_prior_objects or [])
-    valid_ids = {int(obj["id"]) for obj in (hard_prior_objects or [])}
-    non_block_ids = {
-        int(obj["id"])
-        for obj in (hard_prior_objects or [])
-        if obj.get("is_workspace") or str(obj.get("label", "")).lower() == "workspace"
-    }
-    try:
-        base_object_id = int(decision["base_object_id"])
-        stack_order = [int(value) for value in decision["stack_order"]]
-    except (KeyError, TypeError, ValueError):
-        if rule_decision is not None:
-            rule_decision["reason"] = (
-                "{} Repaired malformed LLM stack decision with explicit instruction color parse.".format(
-                    rule_decision["reason"]
-                )
-            )
-            return json.dumps(rule_decision, ensure_ascii=False, indent=2)
-        raise ValueError("Stack decision must contain integer base_object_id and stack_order.")
-    if base_object_id in stack_order or len(stack_order) != len(set(stack_order)):
-        if rule_decision is not None:
-            rule_decision["reason"] = (
-                "{} Repaired non-unique LLM stack ids with explicit instruction color parse.".format(
-                    rule_decision["reason"]
-                )
-            )
-            return json.dumps(rule_decision, ensure_ascii=False, indent=2)
-        raise ValueError("Stack decision must contain unique ids and exclude the base from stack_order.")
-    if valid_ids and ({base_object_id} | set(stack_order)) - valid_ids:
-        if rule_decision is not None:
-            rule_decision["reason"] = (
-                "{} Repaired LLM ids absent from detector hard priors with explicit instruction color parse.".format(
-                    rule_decision["reason"]
-                )
-            )
-            return json.dumps(rule_decision, ensure_ascii=False, indent=2)
-        raise ValueError("Stack decision references object ids absent from detector hard priors.")
-    if ({base_object_id} | set(stack_order)) & non_block_ids:
-        if rule_decision is not None:
-            rule_decision["reason"] = (
-                "{} Repaired LLM workspace/non-block id selection with explicit instruction color parse.".format(
-                    rule_decision["reason"]
-                )
-            )
-            return json.dumps(rule_decision, ensure_ascii=False, indent=2)
-        raise ValueError("Stack decision must not use the workspace as a block.")
-    normalized = {
-        "task_type": "stack_blocks",
-        "base_object_id": base_object_id,
-        "stack_order": stack_order,
-        "reason": str(decision.get("reason", "")),
-    }
-    if rule_decision is not None:
-        if base_object_id != rule_decision["base_object_id"] or stack_order != rule_decision["stack_order"]:
-            rule_decision["reason"] = (
-                "{} Overrode conflicting LLM stack decision with deterministic instruction color parse.".format(
-                    rule_decision["reason"]
-                )
-            )
-            return json.dumps(rule_decision, ensure_ascii=False, indent=2)
-        normalized["reason"] = "{} {}".format(normalized["reason"], rule_decision["reason"]).strip()
-    return json.dumps(normalized, ensure_ascii=False, indent=2)

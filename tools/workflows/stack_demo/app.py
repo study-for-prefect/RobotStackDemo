@@ -668,6 +668,7 @@ def main() -> int:
             "execution_status": "executed" if args.execute else "dry_run_complete",
             "base_object_id": base_id,
             "stack_order": order,
+            "structure_plan": decision.get("structure_plan"),
             "cycles_completed": len(order),
             "final_stack_state": final_stack_state,
             "geometry_relations_enabled": True,

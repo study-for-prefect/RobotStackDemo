@@ -23,6 +23,8 @@ DEFAULT_SAFETY_MARGIN_M = 0.01
 DEFAULT_GRIPPER_OUTER_WIDTH_M = 0.112
 DEFAULT_GRIPPER_INNER_WIDTH_M = 0.048
 DEFAULT_GRASP_APPROACH_LENGTH_M = 0.02
+DEFAULT_PUSH_TOOL_WIDTH_M = 0.035
+DEFAULT_PUSH_TOOL_SAFETY_MARGIN_M = 0.005
 
 
 def _object_id(obj: ObjectDict) -> str:
@@ -215,6 +217,8 @@ def _prepare_push_context(
     gripper_inner_width_m: float,
     grasp_approach_length_m: float,
     safety_margin_m: float,
+    push_tool_width_m: float,
+    push_tool_safety_margin_m: float,
     lift_m: float,
     contact_z_offset_m: float,
 ) -> Optional[Dict[str, Any]]:
@@ -249,8 +253,8 @@ def _prepare_push_context(
         push_plan,
         _objects(scene),
         ignore_object_ids=[obstacle.get("id")],
-        gripper_outer_width_m=gripper_outer_width_m,
-        safety_margin_m=safety_margin_m,
+        gripper_outer_width_m=push_tool_width_m,
+        safety_margin_m=push_tool_safety_margin_m,
     )
     output["tool_swept_volume"] = swept
     if not swept["feasible"]:
@@ -307,6 +311,44 @@ def _mark_feasible_candidate(
     )
 
 
+def _blocker_count(grasp: Dict[str, Any]) -> int:
+    blockers = {
+        str(item.get("id"))
+        for item in grasp.get("blocking_objects", [])
+        if item.get("id") is not None
+    }
+    return len(blockers)
+
+
+def _mark_progress_candidate(
+    output: Dict[str, Any],
+    predicted_grasp: Dict[str, Any],
+    current_grasp: Dict[str, Any],
+    future: Dict[str, Any],
+    candidate: CandidateDict,
+) -> None:
+    current_count = _blocker_count(current_grasp)
+    predicted_count = _blocker_count(predicted_grasp)
+    progress = max(0, current_count - predicted_count)
+    score = (
+        0.35
+        + 0.10 * float(progress)
+        - 0.05 * output["future_blocking_cost"]
+        - 0.05 * output["place_blocking_cost"]
+        - 0.5 * float(candidate["distance_m"])
+    )
+    output.update(
+        {
+            "feasible": True,
+            "score": round(score, 6),
+            "reason": "push_reduces_current_blockers_and_preserves_future_tasks",
+            "current_blocker_count": current_count,
+            "predicted_blocker_count": predicted_count,
+            "blocker_reduction": progress,
+        }
+    )
+
+
 def evaluate_one_push_grasp_candidate(
     scene: Dict[str, Any], target: ObjectDict, obstacle: ObjectDict, candidate: CandidateDict,
     future_targets: Iterable[ObjectDict] = (),
@@ -317,6 +359,8 @@ def evaluate_one_push_grasp_candidate(
     gripper_inner_width_m: float = DEFAULT_GRIPPER_INNER_WIDTH_M,
     grasp_approach_length_m: float = DEFAULT_GRASP_APPROACH_LENGTH_M,
     safety_margin_m: float = DEFAULT_SAFETY_MARGIN_M,
+    push_tool_width_m: float = DEFAULT_PUSH_TOOL_WIDTH_M,
+    push_tool_safety_margin_m: float = DEFAULT_PUSH_TOOL_SAFETY_MARGIN_M,
     lift_m: float = 0.05,
     contact_z_offset_m: float = 0.015,
 ) -> Dict[str, Any]:
@@ -337,6 +381,8 @@ def evaluate_one_push_grasp_candidate(
         gripper_inner_width_m=gripper_inner_width_m,
         grasp_approach_length_m=grasp_approach_length_m,
         safety_margin_m=safety_margin_m,
+        push_tool_width_m=push_tool_width_m,
+        push_tool_safety_margin_m=push_tool_safety_margin_m,
         lift_m=lift_m,
         contact_z_offset_m=contact_z_offset_m,
     )
@@ -352,9 +398,6 @@ def evaluate_one_push_grasp_candidate(
     )
     output["predicted_selected_grasp_yaw_deg"] = predicted_grasp.get("selected_grasp_yaw_deg")
     output["predicted_grasp"] = predicted_grasp
-    if not predicted_grasp["grasp_feasible"]:
-        output["reason"] = "push_after_current_target_still_blocked"
-        return output
 
     future = evaluate_future_task_impact(
         context["predicted_scene"],
@@ -372,6 +415,13 @@ def evaluate_one_push_grasp_candidate(
     output["place_blocking_cost"] = float(future.get("place_blocking_cost", 0.0))
     if not future["feasible"]:
         output["reason"] = future["reason"]
+        return output
+
+    if not predicted_grasp["grasp_feasible"]:
+        if _blocker_count(predicted_grasp) < _blocker_count(context["current_grasp"]):
+            _mark_progress_candidate(output, predicted_grasp, context["current_grasp"], future, candidate)
+            return output
+        output["reason"] = "push_after_current_target_still_blocked"
         return output
 
     _mark_feasible_candidate(
@@ -402,6 +452,8 @@ def evaluate_push_grasp_joint_candidates(
     gripper_inner_width_m: float = DEFAULT_GRIPPER_INNER_WIDTH_M,
     grasp_approach_length_m: float = DEFAULT_GRASP_APPROACH_LENGTH_M,
     safety_margin_m: float = DEFAULT_SAFETY_MARGIN_M,
+    push_tool_width_m: float = DEFAULT_PUSH_TOOL_WIDTH_M,
+    push_tool_safety_margin_m: float = DEFAULT_PUSH_TOOL_SAFETY_MARGIN_M,
     lift_m: float = 0.05,
     contact_z_offset_m: float = 0.015,
 ) -> Dict[str, Any]:
@@ -427,6 +479,8 @@ def evaluate_push_grasp_joint_candidates(
                 gripper_inner_width_m=gripper_inner_width_m,
                 grasp_approach_length_m=grasp_approach_length_m,
                 safety_margin_m=safety_margin_m,
+                push_tool_width_m=push_tool_width_m,
+                push_tool_safety_margin_m=push_tool_safety_margin_m,
                 lift_m=lift_m,
                 contact_z_offset_m=contact_z_offset_m,
             )
