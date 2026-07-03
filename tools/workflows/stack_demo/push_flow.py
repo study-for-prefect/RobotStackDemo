@@ -20,7 +20,6 @@ from .push_clearing import (
 )
 from .scene import memory_id_for_scene_object, reacquire_target
 
-
 def _relations_for_target(
     current_state: dict,
     held_object: dict,
@@ -309,8 +308,8 @@ def handle_push_clearing_before_pick(
         write_json(
             os.path.join(cycle_dir, "selected_action.json"),
             {
-                "action": "pick_away_obstacle" if push_candidates else "reject",
-                "reason": "no_feasible_joint_push_candidate",
+                "action": "replan_required",
+                "reason": "all_push_directions_unsafe" if push_candidates else "no_pushable_blocking_relation",
                 "rejected_candidates": rejected,
             },
         )
@@ -321,7 +320,11 @@ def handle_push_clearing_before_pick(
         write_json(os.path.join(cycle_dir, "scene_state_after_action.json"), current_state)
         write_json(
             os.path.join(cycle_dir, "action_result.json"),
-            {"action": "push_clearing", "result": "not_selected", "reason": "no_feasible_joint_push_candidate"},
+            {
+                "action": "replan_required",
+                "result": "not_selected",
+                "reason": "all_push_directions_unsafe" if push_candidates else "no_pushable_blocking_relation",
+            },
         )
         write_json(
             os.path.join(cycle_dir, "manual_clearance_required.json"),

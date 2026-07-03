@@ -39,17 +39,7 @@ def _find_object(objects: Iterable[ObjectDict], object_id: Any) -> Optional[Obje
 
 
 def _rule_directions(obstacle: ObjectDict, target: ObjectDict) -> List[CandidateDict]:
-    obstacle_center = get_center(obstacle)
-    target_center = get_center(target)
-    if obstacle_center is None or target_center is None:
-        away = [1.0, 0.0, 0.0]
-    else:
-        away = normalize_xy([obstacle_center[0] - target_center[0], obstacle_center[1] - target_center[1], 0.0])
-        away = away or [1.0, 0.0, 0.0]
     raw = [
-        ("away_from_target", away),
-        ("perpendicular_left", [-away[1], away[0], 0.0]),
-        ("perpendicular_right", [away[1], -away[0], 0.0]),
         ("base_positive_x", [1.0, 0.0, 0.0]),
         ("base_negative_x", [-1.0, 0.0, 0.0]),
         ("base_positive_y", [0.0, 1.0, 0.0]),

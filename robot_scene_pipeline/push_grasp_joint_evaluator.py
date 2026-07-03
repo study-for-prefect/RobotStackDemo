@@ -10,6 +10,7 @@ from .future_task_impact import evaluate_future_task_impact
 from .geometry_relations import is_locked, object_xy_aabb, xy_aabb_overlap, xy_distance
 from .grasp_yaw_search import select_best_grasp
 from .push_candidate_generation import build_joint_push_candidates, normalize_xy
+from .push_direction_safety import direction_safety_defaults, push_end_collisions, table_bounds_ok
 from .tool_swept_volume import check_tool_swept_volume
 
 
@@ -124,32 +125,6 @@ def predict_scene_after_push(
     return predicted
 
 
-def _table_bounds_ok(obj: ObjectDict, table_bounds: Optional[dict], edge_margin_m: float) -> Tuple[bool, str]:
-    if table_bounds is None:
-        return True, "table_bounds_not_available"
-    aabb = object_xy_aabb(obj)
-    if not aabb:
-        return False, "missing_pushed_object_aabb"
-    try:
-        if (
-            aabb["xmin"] < float(table_bounds["xmin"])
-            or aabb["xmax"] > float(table_bounds["xmax"])
-            or aabb["ymin"] < float(table_bounds["ymin"])
-            or aabb["ymax"] > float(table_bounds["ymax"])
-        ):
-            return False, "push_end_out_of_table_bounds"
-        if (
-            aabb["xmin"] < float(table_bounds["xmin"]) + edge_margin_m
-            or aabb["xmax"] > float(table_bounds["xmax"]) - edge_margin_m
-            or aabb["ymin"] < float(table_bounds["ymin"]) + edge_margin_m
-            or aabb["ymax"] > float(table_bounds["ymax"]) - edge_margin_m
-        ):
-            return False, "push_end_near_table_edge"
-    except (KeyError, TypeError, ValueError):
-        return False, "invalid_table_bounds"
-    return True, "table_bounds_clear"
-
-
 def _push_plan(target: ObjectDict, obstacle: ObjectDict, candidate: CandidateDict, lift_m: float, contact_z_offset_m: float) -> Dict[str, Any]:
     return {
         "schema_version": "push_execution_plan_v1",
@@ -203,6 +178,7 @@ def _candidate_output(candidate: CandidateDict, obstacle: ObjectDict) -> Dict[st
         "collision_risk": 0.0,
         "predicted_selected_grasp_yaw_deg": None,
         "source": candidate.get("source"),
+        **direction_safety_defaults(),
     }
 
 
@@ -244,9 +220,16 @@ def _prepare_push_context(
     predicted_objects = _objects(predicted_scene)
     predicted_target = _find_object(predicted_objects, target.get("id")) or target
     predicted_obstacle = _find_object(predicted_objects, obstacle.get("id")) or obstacle
-    table_ok, table_reason = _table_bounds_ok(predicted_obstacle, table_bounds, edge_margin_m=0.02)
+    table_ok, table_reason = table_bounds_ok(predicted_obstacle, table_bounds, edge_margin_m=0.02)
     if not table_ok:
+        output["push_end_safe"] = False
         output["reason"] = table_reason
+        return None
+    end_collisions = push_end_collisions(predicted_obstacle, predicted_objects)
+    output["push_end_collisions"] = end_collisions
+    output["push_end_safe"] = not end_collisions
+    if end_collisions:
+        output["reason"] = "push_end_collision"
         return None
     push_plan = _push_plan(target, obstacle, candidate, lift_m=lift_m, contact_z_offset_m=contact_z_offset_m)
     swept = check_tool_swept_volume(
@@ -257,6 +240,16 @@ def _prepare_push_context(
         safety_margin_m=push_tool_safety_margin_m,
     )
     output["tool_swept_volume"] = swept
+    approach_collisions = [
+        item for item in swept.get("collisions", [])
+        if item.get("stage") in ("pre_push_pose", "vertical_approach", "contact_pose")
+    ]
+    push_collisions = [
+        item for item in swept.get("collisions", [])
+        if item.get("stage") in ("horizontal_push", "retreat")
+    ]
+    output["approach_path_safe"] = not approach_collisions
+    output["push_swept_safe"] = not push_collisions
     if not swept["feasible"]:
         output["collision_risk"] = 1.0
         output["reason"] = swept["reason"]
@@ -320,35 +313,6 @@ def _blocker_count(grasp: Dict[str, Any]) -> int:
     return len(blockers)
 
 
-def _mark_progress_candidate(
-    output: Dict[str, Any],
-    predicted_grasp: Dict[str, Any],
-    current_grasp: Dict[str, Any],
-    future: Dict[str, Any],
-    candidate: CandidateDict,
-) -> None:
-    current_count = _blocker_count(current_grasp)
-    predicted_count = _blocker_count(predicted_grasp)
-    progress = max(0, current_count - predicted_count)
-    score = (
-        0.35
-        + 0.10 * float(progress)
-        - 0.05 * output["future_blocking_cost"]
-        - 0.05 * output["place_blocking_cost"]
-        - 0.5 * float(candidate["distance_m"])
-    )
-    output.update(
-        {
-            "feasible": True,
-            "score": round(score, 6),
-            "reason": "push_reduces_current_blockers_and_preserves_future_tasks",
-            "current_blocker_count": current_count,
-            "predicted_blocker_count": predicted_count,
-            "blocker_reduction": progress,
-        }
-    )
-
-
 def evaluate_one_push_grasp_candidate(
     scene: Dict[str, Any], target: ObjectDict, obstacle: ObjectDict, candidate: CandidateDict,
     future_targets: Iterable[ObjectDict] = (),
@@ -366,7 +330,14 @@ def evaluate_one_push_grasp_candidate(
 ) -> Dict[str, Any]:
     output = _candidate_output(candidate, obstacle)
     protected_ids = {str(obj.get("id")) for obj in protected_objects or []}
-    if str(obstacle.get("id")) in protected_ids or is_locked(obstacle) or obstacle.get("pushable") is False:
+    loose_movable = obstacle.get("role") == "loose_movable" and obstacle.get("state") not in ("locked", "placed")
+    output["pushed_object_loose_movable"] = bool(loose_movable)
+    if (
+        not loose_movable
+        or str(obstacle.get("id")) in protected_ids
+        or is_locked(obstacle)
+        or obstacle.get("pushable") is False
+    ):
         output["reason"] = "pushed_object_protected_or_not_pushable"
         return output
 
@@ -398,6 +369,7 @@ def evaluate_one_push_grasp_candidate(
     )
     output["predicted_selected_grasp_yaw_deg"] = predicted_grasp.get("selected_grasp_yaw_deg")
     output["predicted_grasp"] = predicted_grasp
+    output["post_push_grasp_feasible"] = bool(predicted_grasp.get("grasp_feasible"))
 
     future = evaluate_future_task_impact(
         context["predicted_scene"],
@@ -418,9 +390,8 @@ def evaluate_one_push_grasp_candidate(
         return output
 
     if not predicted_grasp["grasp_feasible"]:
-        if _blocker_count(predicted_grasp) < _blocker_count(context["current_grasp"]):
-            _mark_progress_candidate(output, predicted_grasp, context["current_grasp"], future, candidate)
-            return output
+        output["current_blocker_count"] = _blocker_count(context["current_grasp"])
+        output["predicted_blocker_count"] = _blocker_count(predicted_grasp)
         output["reason"] = "push_after_current_target_still_blocked"
         return output
 

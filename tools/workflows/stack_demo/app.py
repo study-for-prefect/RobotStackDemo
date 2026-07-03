@@ -67,10 +67,8 @@ SECOND_PICK_OBSERVATION_ERROR_MARKERS = (
     "Second-snapshot TCP-target correction",
 )
 
-
 def _is_second_pick_observation_error(message: str) -> bool:
     return any(marker in message for marker in SECOND_PICK_OBSERVATION_ERROR_MARKERS)
-
 
 def _write_first_pick_plan_without_second_xy(
     first_pick_plan_path: str,
@@ -98,7 +96,6 @@ def _write_first_pick_plan_without_second_xy(
         },
     )
 
-
 def _write_second_snapshot_hover_plan(first_pick_plan_path: str, output_path: str, hover_above_object_m: float) -> None:
     plan = load_json(first_pick_plan_path)
     step = plan["steps"][0]
@@ -108,7 +105,6 @@ def _write_second_snapshot_hover_plan(first_pick_plan_path: str, output_path: st
     step["second_snapshot_hover_above_object_m"] = float(hover_above_object_m)
     step["coordinate_source"] = "{}.second_snapshot_hover".format(step.get("coordinate_source", "locked_first"))
     write_json(output_path, plan)
-
 
 def _future_place_regions(base_object, previous_stack_xy, args):
     center = previous_stack_xy or base_object.get("geometry_center_m")
@@ -667,7 +663,9 @@ def main() -> int:
             "task_type": "stack_blocks",
             "execution_status": "executed" if args.execute else "dry_run_complete",
             "base_object_id": base_id,
+            "full_stack_order": decision.get("full_stack_order", [base_id] + list(order)),
             "stack_order": order,
+            "stack_order_semantics": decision.get("stack_order_semantics", "place_order_excludes_base"),
             "structure_plan": decision.get("structure_plan"),
             "cycles_completed": len(order),
             "final_stack_state": final_stack_state,

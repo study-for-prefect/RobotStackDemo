@@ -6,10 +6,12 @@ import os
 import time
 
 from robot_scene_pipeline.llm_scene_reasoner import (
+    StackColorSelectionError,
     build_stack_blocks_prompt,
     call_ollama,
-    normalize_stack_blocks_text,
+    normalize_stack_blocks_decision,
     rule_stack_blocks_decision,
+    stack_color_requirement_report,
     validate_stack_blocks_decision,
 )
 from tools.planning.decision_to_execution import write_json
@@ -57,9 +59,37 @@ def _initial_decision_valid(args, state):
             args.instruction,
             prefer_explicit_rule=True,
         )
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         return False, str(exc)
     return True, None
+
+
+def _write_initial_required_objects_report(args, output_dir, state, decision_error=None):
+    report = stack_color_requirement_report(args.instruction, state.get("objects", []))
+    report["snapshot_image"] = state.get("snapshot_image")
+    report["annotated_image"] = state.get("annotated_image")
+    report["decision_error"] = decision_error
+    write_json(os.path.join(output_dir, "initial_required_objects_report.json"), report)
+    return report
+
+
+def _raise_initial_required_objects_missing(args, state, decision_error):
+    report = _write_initial_required_objects_report(
+        args,
+        args.output_dir,
+        state,
+        decision_error=decision_error,
+    )
+    missing = report.get("missing_colors", [])
+    raise RuntimeError(
+        "Initial required objects are still missing after recovery observation: "
+        "missing_colors={} error={}. See initial_required_objects_report.json. "
+        "Object id is a per-snapshot instance id; label is the detector class name; "
+        "label_id/class_id are YOLO class ids and are not unique object ids.".format(
+            missing,
+            decision_error,
+        )
+    )
 
 def object_by_id(state, object_id):
     for obj in state.get("objects", []):
@@ -93,6 +123,7 @@ def load_or_capture_initial(args):
         return state, decision
 
     state = None
+    decision_error = None
     initial_attempts = max(0, int(args.initial_observation_retry_count)) + 1
     for attempt in range(initial_attempts):
         initial_dir = os.path.join(args.output_dir, "initial_order")
@@ -105,6 +136,7 @@ def load_or_capture_initial(args):
         state = load_json(os.path.join(initial_dir, "private_scene_state.json"))
         objects = [obj for obj in state.get("objects", []) if not obj.get("is_workspace")]
         decision_ok, decision_error = _initial_decision_valid(args, state)
+        _write_initial_required_objects_report(args, initial_dir, state, decision_error=decision_error)
         if objects and decision_ok:
             break
         if attempt + 1 >= initial_attempts:
@@ -121,15 +153,19 @@ def load_or_capture_initial(args):
     if args.stack_decision_json:
         decision = load_json(args.stack_decision_json)
     else:
-        decision = None if args.force_llm_decision else rule_stack_blocks_decision(args.instruction, state.get("objects", []))
+        try:
+            decision = None if args.force_llm_decision else rule_stack_blocks_decision(args.instruction, state.get("objects", []))
+        except StackColorSelectionError as exc:
+            _raise_initial_required_objects_missing(args, state, str(exc))
         if decision is None:
             reasoning_dir = os.path.join(args.output_dir, "initial_order_llm")
             capture_scene_observation(args, reasoning_dir, stack_reasoning=False)
             state = load_json(os.path.join(reasoning_dir, "private_scene_state.json"))
+            _write_initial_required_objects_report(args, reasoning_dir, state, decision_error=None)
             llm_input = load_json(os.path.join(reasoning_dir, "llm_input.json"))
             prompt = build_stack_blocks_prompt(llm_input)
             raw_result = call_ollama(args, prompt, state.get("snapshot_image", ""))
-            decision = normalize_stack_blocks_text(
+            decision = normalize_stack_blocks_decision(
                 raw_result,
                 hard_prior_objects=llm_input.get("hard_priors", {}).get("objects", []),
                 instruction=args.instruction,
@@ -172,15 +208,23 @@ def selected_stack_yaw(obj, args):
 def print_decision_summary(initial_state, decision):
     base = object_by_id(initial_state, decision["base_object_id"])
     ordered = [object_by_id(initial_state, object_id) for object_id in decision["stack_order"]]
+    full_ordered = [
+        object_by_id(initial_state, object_id)
+        for object_id in decision.get("full_stack_order", [decision["base_object_id"]] + list(decision["stack_order"]))
+    ]
     structure_plan = decision.get("structure_plan") if isinstance(decision.get("structure_plan"), dict) else {}
     print(
-        "\nValidated stack decision: structure={} strategy={} base={} id={} stack_order={} ids={} source={}".format(
+        "\nValidated stack decision: structure={} strategy={} base={} id={} "
+        "full_stack_order={} full_ids={} place_order={} place_ids={} semantics={} source={}".format(
             structure_plan.get("structure_type", "stack"),
             structure_plan.get("execution_strategy", "vertical_stack"),
             base.get("label"),
             base.get("id"),
+            [obj.get("label") for obj in full_ordered],
+            [obj.get("id") for obj in full_ordered],
             [obj.get("label") for obj in ordered],
             [obj.get("id") for obj in ordered],
+            decision.get("stack_order_semantics", "place_order_excludes_base"),
             decision.get("decision_source"),
         ),
         flush=True,

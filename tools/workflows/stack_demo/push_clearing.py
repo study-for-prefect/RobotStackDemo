@@ -47,6 +47,9 @@ def relation_objects_with_protected_structure(
             if str(obj.get("id")) == str(base_id):
                 obj["role"] = "base"
                 obj["state"] = "locked"
+        elif obj.get("role") is None and obj.get("state") is None:
+            obj["role"] = "loose_movable"
+            obj["state"] = "free"
     return relation_objects
 
 
@@ -59,21 +62,7 @@ def _normalized_xy(direction: Iterable[float]) -> List[float]:
 
 
 def candidate_push_directions(obstacle: ObjectDict, target: ObjectDict) -> List[dict]:
-    obstacle_center = get_center(obstacle)
-    target_center = get_center(target)
-    if obstacle_center is None or target_center is None:
-        away = [1.0, 0.0]
-    else:
-        away = _normalized_xy(
-            [
-                obstacle_center[0] - target_center[0],
-                obstacle_center[1] - target_center[1],
-            ]
-        )
     raw_candidates = [
-        ("away_from_target", away),
-        ("perpendicular_left", [-away[1], away[0]]),
-        ("perpendicular_right", [away[1], -away[0]]),
         ("base_positive_x", [1.0, 0.0]),
         ("base_negative_x", [-1.0, 0.0]),
         ("base_positive_y", [0.0, 1.0]),

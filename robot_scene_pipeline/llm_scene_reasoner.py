@@ -5,11 +5,14 @@ import requests
 from .depth_geometry import coordinate_convention, public_object
 from .io_utils import image_to_base64
 from .llm_stack_blocks import (
+    StackColorSelectionError,
     build_stack_blocks_prompt,
     color_mentions,
+    normalize_stack_blocks_decision,
     normalize_stack_blocks_text,
     object_id_for_color,
     rule_stack_blocks_decision,
+    stack_color_requirement_report,
     validate_stack_blocks_decision,
 )
 

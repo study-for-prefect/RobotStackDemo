@@ -37,6 +37,8 @@ def make_object(object_id, center, size=(0.04, 0.04, 0.03)):
         "geometry_center_m": list(center),
         "dimensions_m": list(size),
         "visible": True,
+        "role": "loose_movable",
+        "state": "free",
     }
 
 
@@ -59,7 +61,8 @@ def test_direction_evaluation_selects_open_side():
     )
     feasible = [item for item in evaluations if item["feasible"]]
     assert feasible
-    assert feasible[0]["source"] in ("perpendicular_left", "perpendicular_right")
+    assert feasible[0]["source"] in ("base_positive_y", "base_negative_y")
+    assert len(evaluations) == 4
 
 
 def test_direction_evaluation_reports_no_safe_direction():
@@ -120,6 +123,46 @@ def test_locked_structure_push_candidate_is_rejected():
     )
 
 
+def test_non_loose_movable_push_candidate_is_rejected():
+    target = make_object("target", (0.40, 0.00, 0.015))
+    obstacle = make_object("obstacle", (0.46, 0.00, 0.015), size=(0.08, 0.12, 0.03))
+    obstacle["role"] = "unknown"
+    scene = make_scene([target, obstacle])
+    report = evaluate_push_grasp_joint_candidates(
+        scene,
+        target,
+        ["obstacle"],
+        table_bounds=scene["table_bounds"],
+        gripper_outer_width_m=0.04,
+    )
+    assert report["selected_candidate"] is None
+    assert all(item["pushed_object_loose_movable"] is False for item in report["candidates"])
+
+
+def test_push_reducing_blockers_without_safe_grasp_is_rejected():
+    target = make_object("target", (0.40, 0.00, 0.015))
+    obstacle = make_object("obstacle", (0.46, 0.00, 0.015), size=(0.08, 0.12, 0.03))
+    second_obstacle = make_object("second", (0.40, 0.06, 0.015), size=(0.08, 0.08, 0.03))
+    scene = make_scene([target, obstacle, second_obstacle])
+    result = evaluate_one_push_grasp_candidate(
+        scene,
+        target,
+        obstacle,
+        {
+            "action": "push_away",
+            "obstacle_id": "obstacle",
+            "direction_base": [1.0, 0.0, 0.0],
+            "distance_m": 0.05,
+            "source": "test",
+        },
+        table_bounds=scene["table_bounds"],
+        gripper_outer_width_m=0.04,
+    )
+    assert result["feasible"] is False
+    assert result["post_push_grasp_feasible"] is False
+    assert result["reason"] != "push_reduces_current_blockers_and_preserves_future_tasks"
+
+
 def test_push_candidate_rejected_when_it_blocks_future_target():
     target = make_object("target", (0.40, 0.00, 0.015))
     obstacle = make_object("obstacle", (0.55, 0.00, 0.015))
@@ -141,7 +184,7 @@ def test_push_candidate_rejected_when_it_blocks_future_target():
         gripper_outer_width_m=0.04,
     )
     assert result["feasible"] is False
-    assert result["reason"] == "blocks_future_target"
+    assert result["reason"] in ("push_end_collision", "blocks_future_target")
 
 
 def test_push_candidate_rejected_when_it_blocks_future_place_region():
@@ -190,6 +233,8 @@ if __name__ == "__main__":
     test_direction_evaluation_reports_no_safe_direction()
     test_all_yaws_blocked_selects_safe_joint_push()
     test_locked_structure_push_candidate_is_rejected()
+    test_non_loose_movable_push_candidate_is_rejected()
+    test_push_reducing_blockers_without_safe_grasp_is_rejected()
     test_push_candidate_rejected_when_it_blocks_future_target()
     test_push_candidate_rejected_when_it_blocks_future_place_region()
     test_tool_vertical_approach_collision_rejects_candidate()
