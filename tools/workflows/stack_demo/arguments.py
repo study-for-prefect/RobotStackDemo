@@ -50,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--push-tool-width-m", type=float, default=0.035)
     parser.add_argument("--push-tool-safety-margin-m", type=float, default=0.005)
+    parser.add_argument("--max-automatic-push-clearing-attempts", type=int, default=2)
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--conda-env", default="yolo")
     parser.add_argument("--ros-python", default="/usr/bin/python3")

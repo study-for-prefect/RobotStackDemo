@@ -15,7 +15,7 @@ from .push_context import (
     future_target_objects, observed_push_delta_m, protected_objects, protected_stack_templates, qwen_forbidden_objects,
 )
 from .push_clearing import (
-    build_push_execution_plan, evaluate_push_candidates, object_by_string_id,
+    build_push_execution_plan, current_protected_structure_ids, evaluate_push_candidates, object_by_string_id,
     pushable_blocking_relations, relation_objects_with_protected_structure,
 )
 from .scene import memory_id_for_scene_object, reacquire_target
@@ -26,11 +26,13 @@ def _relations_for_target(
     base_id: Any,
     previous_locked_stack: dict,
     args: Any,
+    base_template: Optional[dict] = None,
 ) -> list:
     relation_objects = relation_objects_with_protected_structure(
         current_state.get("objects", []),
         base_id,
         previous_locked_stack,
+        base_template=base_template,
     )
     return build_geometry_relations(
         relation_objects,
@@ -64,7 +66,7 @@ def _apply_selected_grasp_to_target(held_object: dict, analysis: dict) -> dict:
     return held_object
 
 
-def _raise_if_non_push_action(analysis: dict) -> None:
+def _raise_if_non_push_action(analysis: dict, has_push_candidates: bool = False) -> None:
     action = analysis.get("action")
     if action in (None, "pick", "push_clearing", "pick_away"):
         return
@@ -76,6 +78,8 @@ def _raise_if_non_push_action(analysis: dict) -> None:
                 analysis.get("object_above_target"),
             )
         )
+    if action == "replan_required" and has_push_candidates:
+        return
     if action == "replan_required":
         raise RuntimeError(
             "All grasp yaws are blocked by protected structure; push clearing is refused. "
@@ -97,6 +101,10 @@ def _manual_clear_and_reobserve(
     previous_locked_stack: dict,
     reason: str,
     direction_assessment: dict,
+    base_template: Optional[dict] = None,
+    future_targets: Optional[Iterable[dict]] = None,
+    future_place_regions: Optional[Iterable[dict]] = None,
+    automatic_push_attempt: int = 0,
 ) -> Tuple[dict, dict, dict]:
     request_path = os.path.join(cycle_dir, "manual_clearance_required.json")
     write_json(
@@ -143,15 +151,48 @@ def _manual_clear_and_reobserve(
         base_id,
         previous_locked_stack,
         args,
+        base_template=base_template,
     )
     write_json(os.path.join(cycle_dir, "geometry_relations_after_manual_clearing.json"), relations)
-    remaining_push = pushable_blocking_relations(observed_state, relations, held_object["id"], base_id, previous_locked_stack)
+    protected_ids = current_protected_structure_ids(
+        observed_state.get("objects", []),
+        base_id,
+        previous_locked_stack,
+        base_template=base_template,
+    )
+    remaining_push = pushable_blocking_relations(
+        observed_state,
+        relations,
+        held_object["id"],
+        base_id,
+        previous_locked_stack,
+        protected_object_ids=protected_ids,
+    )
     after_analysis = _target_grasp_analysis(relations, held_object["id"])
     write_json(os.path.join(cycle_dir, "grasp_yaw_analysis_after_manual_clearing.json"), after_analysis)
     if after_analysis.get("action") == "pick" and after_analysis.get("grasp_feasible"):
         held_object = _apply_selected_grasp_to_target(held_object, after_analysis)
     elif remaining_push:
-        raise RuntimeError("Target remains blocked after manual clearing observation; refusing to pick.")
+        request = load_json(request_path)
+        request["execution_status"] = "operator_confirmed_and_reobserved"
+        request["post_manual_action"] = "rerun_automatic_push_planning"
+        request["remaining_push_relations"] = remaining_push
+        write_json(request_path, request)
+        return handle_push_clearing_before_pick(
+            args,
+            cycle_dir,
+            runtime,
+            memory,
+            observed_state,
+            held_template,
+            held_object,
+            base_id,
+            previous_locked_stack,
+            base_template=base_template,
+            future_targets=future_targets,
+            future_place_regions=future_place_regions,
+            automatic_push_attempt=automatic_push_attempt,
+        )
     else:
         raise RuntimeError(
             "Manual clearing did not produce a feasible grasp. action={} base={} locked={} placed={}.".format(
@@ -177,8 +218,10 @@ def handle_push_clearing_before_pick(
     held_object: dict,
     base_id: Any,
     previous_locked_stack: dict,
+    base_template: Optional[dict] = None,
     future_targets: Optional[Iterable[dict]] = None,
     future_place_regions: Optional[Iterable[dict]] = None,
+    automatic_push_attempt: int = 0,
 ) -> Tuple[dict, dict, dict]:
     write_json(os.path.join(cycle_dir, "scene_state_before_action.json"), current_state)
     relations = _relations_for_target(
@@ -187,6 +230,7 @@ def handle_push_clearing_before_pick(
         base_id,
         previous_locked_stack,
         args,
+        base_template=base_template,
     )
     write_json(
         os.path.join(cycle_dir, "geometry_relations_before_pick.json"),
@@ -196,12 +240,19 @@ def handle_push_clearing_before_pick(
         os.path.join(cycle_dir, "geometry_relations_before_action.json"),
         relations,
     )
+    protected_ids = current_protected_structure_ids(
+        current_state.get("objects", []),
+        base_id,
+        previous_locked_stack,
+        base_template=base_template,
+    )
     push_candidates = pushable_blocking_relations(
         current_state,
         relations,
         held_object["id"],
         base_id,
         previous_locked_stack,
+        protected_object_ids=protected_ids,
     )
     analysis = _target_grasp_analysis(relations, held_object["id"])
     write_json(
@@ -212,7 +263,7 @@ def handle_push_clearing_before_pick(
         os.path.join(cycle_dir, "grasp_yaw_analysis_before_action.json"),
         analysis,
     )
-    _raise_if_non_push_action(analysis)
+    _raise_if_non_push_action(analysis, has_push_candidates=bool(push_candidates))
     if analysis.get("action") == "pick" and analysis.get("grasp_feasible"):
         held_object = _apply_selected_grasp_to_target(held_object, analysis)
         write_json(
@@ -242,7 +293,12 @@ def handle_push_clearing_before_pick(
         write_json(os.path.join(cycle_dir, "qwen_candidate_actions_parsed.json"), qwen_report)
     else:
         write_json(qwen_path, qwen_report)
-    protected = protected_objects(current_state, base_id, previous_locked_stack)
+    protected = protected_objects(
+        current_state,
+        base_id,
+        previous_locked_stack,
+        protected_object_ids=protected_ids,
+    )
     protected.extend(qwen_forbidden_objects(current_state, qwen_report))
     direction_assessment = evaluate_push_candidates(
         current_state,
@@ -352,6 +408,10 @@ def handle_push_clearing_before_pick(
                 previous_locked_stack,
                 "no_feasible_automatic_push_direction",
                 direction_assessment,
+                base_template=base_template,
+                future_targets=future_targets,
+                future_place_regions=future_place_regions,
+                automatic_push_attempt=automatic_push_attempt,
             )
         return current_state, memory, held_object
 
@@ -423,7 +483,12 @@ def handle_push_clearing_before_pick(
         memory,
         critical_templates=(
             [held_template]
-            + protected_stack_templates(current_state, base_id, previous_locked_stack)
+            + protected_stack_templates(
+                current_state,
+                base_id,
+                previous_locked_stack,
+                base_template=base_template,
+            )
             + list(future_targets or [])
         ),
         noncritical_templates=[obstacle],
@@ -455,6 +520,7 @@ def handle_push_clearing_before_pick(
         base_id,
         previous_locked_stack,
         args,
+        base_template=base_template,
     )
     write_json(
         os.path.join(cycle_dir, "geometry_relations_after_push.json"),
@@ -476,16 +542,49 @@ def handle_push_clearing_before_pick(
             "post_push_selected_grasp_yaw_deg": after_analysis.get("selected_grasp_yaw_deg"),
         },
     )
+    protected_ids_after_push = current_protected_structure_ids(
+        current_state.get("objects", []),
+        base_id,
+        previous_locked_stack,
+        base_template=base_template,
+    )
     remaining_push = pushable_blocking_relations(
         current_state,
         relations_after_push,
         held_object["id"],
         base_id,
         previous_locked_stack,
+        protected_object_ids=protected_ids_after_push,
     )
     if after_analysis.get("action") == "pick" and after_analysis.get("grasp_feasible"):
         held_object = _apply_selected_grasp_to_target(held_object, after_analysis)
     if remaining_push:
+        max_attempts = max(1, int(getattr(args, "max_automatic_push_clearing_attempts", 2)))
+        if automatic_push_attempt + 1 < max_attempts:
+            write_json(
+                os.path.join(cycle_dir, "automatic_push_replan_{:02d}.json".format(automatic_push_attempt + 1)),
+                {
+                    "reason": "target_still_blocked_after_automatic_push",
+                    "attempt_completed": automatic_push_attempt + 1,
+                    "max_attempts": max_attempts,
+                    "remaining_push_relations": remaining_push,
+                },
+            )
+            return handle_push_clearing_before_pick(
+                args,
+                cycle_dir,
+                runtime,
+                memory,
+                current_state,
+                held_template,
+                held_object,
+                base_id,
+                previous_locked_stack,
+                base_template=base_template,
+                future_targets=future_targets,
+                future_place_regions=future_place_regions,
+                automatic_push_attempt=automatic_push_attempt + 1,
+            )
         return _manual_clear_and_reobserve(
             args,
             cycle_dir,
@@ -496,5 +595,9 @@ def handle_push_clearing_before_pick(
             previous_locked_stack,
             "target_still_blocked_after_one_automatic_push",
             {"remaining_push_relations": remaining_push},
+            base_template=base_template,
+            future_targets=future_targets,
+            future_place_regions=future_place_regions,
+            automatic_push_attempt=automatic_push_attempt + 1,
         )
     return current_state, memory, held_object

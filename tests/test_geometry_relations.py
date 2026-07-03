@@ -16,7 +16,11 @@ from robot_scene_pipeline.geometry_relations import (
 from robot_scene_pipeline.grasp_yaw_search import normalize_yaw_signed_180
 from tools.workflows.stack_demo.pick import build_offline_pick_plan
 from tools.workflows.stack_demo.placement import build_frozen_place_step, validate_place_second_snapshot
-from tools.workflows.stack_demo.push_clearing import pushable_blocking_relations
+from tools.workflows.stack_demo.push_clearing import (
+    current_protected_structure_ids,
+    pushable_blocking_relations,
+    relation_objects_with_protected_structure,
+)
 
 
 def make_object(object_id, center, size=(0.04, 0.04, 0.03), **extra):
@@ -259,6 +263,42 @@ def test_placed_or_locked_structure_blocks_all_yaws_returns_replan_without_push(
         assert not push_candidates(objects, relations, "target")
 
 
+def test_protected_structure_rebinds_by_template_when_detector_id_changes():
+    base_template = make_object(
+        6,
+        (0.36, 0.19, 0.015),
+        label="square red",
+        role="base",
+        state="locked",
+    )
+    current_objects = [
+        make_object(6, (0.37, 0.10, 0.015), label="square yellow"),
+        make_object(5, (0.357, 0.194, 0.015), label="square red"),
+        make_object(0, (0.40, 0.08, 0.015), label="square green"),
+    ]
+
+    protected_ids = current_protected_structure_ids(
+        current_objects,
+        base_id=6,
+        previous_locked_stack=None,
+        base_template=base_template,
+    )
+    relation_objects = relation_objects_with_protected_structure(
+        current_objects,
+        base_id=6,
+        previous_locked_stack=None,
+        base_template=base_template,
+    )
+
+    current_base = next(obj for obj in relation_objects if obj["id"] == 5)
+    stale_id_object = next(obj for obj in relation_objects if obj["id"] == 6)
+    assert protected_ids == {"5"}
+    assert current_base["role"] == "base"
+    assert current_base["state"] == "locked"
+    assert current_base["pushable"] is False
+    assert stale_id_object["role"] == "loose_movable"
+
+
 def test_selected_grasp_yaw_is_written_to_pick_plan():
     target = make_object(
         1,
@@ -439,6 +479,7 @@ if __name__ == "__main__":
     test_loose_objects_block_all_yaws_returns_push_clearing()
     test_base_blocks_all_yaws_returns_replan_without_push()
     test_placed_or_locked_structure_blocks_all_yaws_returns_replan_without_push()
+    test_protected_structure_rebinds_by_template_when_detector_id_changes()
     test_selected_grasp_yaw_is_written_to_pick_plan()
     test_final_held_place_snapshot_rejects_mismatched_base_id_and_yaw()
     test_calibration_json_applies_grasp_and_place_xyz_biases()

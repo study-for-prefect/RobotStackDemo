@@ -9,12 +9,15 @@ def protected_objects(
     current_state: dict,
     base_id: Any,
     previous_locked_stack: Optional[dict],
+    protected_object_ids: Optional[Iterable[Any]] = None,
 ) -> List[dict]:
-    protected_ids = {str(base_id)}
-    if previous_locked_stack:
-        for obj in previous_locked_stack.get("stack_objects", []):
-            if obj.get("id") is not None:
-                protected_ids.add(str(obj["id"]))
+    protected_ids = {str(value) for value in protected_object_ids or []}
+    if not protected_ids:
+        protected_ids = {str(base_id)}
+        if previous_locked_stack:
+            for obj in previous_locked_stack.get("stack_objects", []):
+                if obj.get("id") is not None:
+                    protected_ids.add(str(obj["id"]))
     output = []
     for obj in current_state.get("objects", []):
         if str(obj.get("id")) in protected_ids:
@@ -28,9 +31,12 @@ def protected_stack_templates(
     current_state: dict,
     base_id: Any,
     previous_locked_stack: Optional[dict],
+    base_template: Optional[dict] = None,
 ) -> List[dict]:
     templates = []
-    if base_id is not None:
+    if isinstance(base_template, dict):
+        templates.append(copy.deepcopy(base_template))
+    elif base_id is not None:
         for obj in current_state.get("objects", []):
             if str(obj.get("id")) == str(base_id):
                 templates.append(copy.deepcopy(obj))

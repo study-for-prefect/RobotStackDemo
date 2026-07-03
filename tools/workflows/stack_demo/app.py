@@ -243,6 +243,7 @@ def main() -> int:
                 held_object,
                 base_id,
                 protected_locked_stack or previous_locked_stack,
+                base_template=base_object,
                 future_targets=[held_templates[target_id] for target_id in order[index:]],
                 future_place_regions=_future_place_regions(base_object, previous_stack_xy, args),
             )

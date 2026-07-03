@@ -26,6 +26,9 @@ DEFAULT_GRIPPER_INNER_WIDTH_M = 0.048
 DEFAULT_GRASP_APPROACH_LENGTH_M = 0.02
 DEFAULT_PUSH_TOOL_WIDTH_M = 0.035
 DEFAULT_PUSH_TOOL_SAFETY_MARGIN_M = 0.005
+DEFAULT_PROGRESS_PUSH_DISTANCE_M = 0.025
+DEFAULT_SOFT_TARGET_APPROACH_OVERLAP_M2 = 1e-6
+DEFAULT_SOFT_TARGET_PUSH_OVERLAP_M2 = 3e-5
 
 
 def _object_id(obj: ObjectDict) -> str:
@@ -197,6 +200,7 @@ def _prepare_push_context(
     push_tool_safety_margin_m: float,
     lift_m: float,
     contact_z_offset_m: float,
+    protected_object_ids: Iterable[Any] = (),
 ) -> Optional[Dict[str, Any]]:
     distance_report = estimate_required_push_distance_m(
         obstacle,
@@ -229,8 +233,20 @@ def _prepare_push_context(
     output["push_end_collisions"] = end_collisions
     output["push_end_safe"] = not end_collisions
     if end_collisions:
-        output["reason"] = "push_end_collision"
-        return None
+        protected_ids = {str(value) for value in protected_object_ids or []}
+        soft_end_collision = (
+            float(distance_m) <= DEFAULT_PROGRESS_PUSH_DISTANCE_M + 1e-9
+            and all(
+                str(item.get("id")) != str(target.get("id"))
+                and str(item.get("id")) not in protected_ids
+                and not is_locked(_find_object(predicted_objects, item.get("id")) or {})
+                for item in end_collisions
+            )
+        )
+        output["push_end_soft_collision"] = bool(soft_end_collision)
+        if not soft_end_collision:
+            output["reason"] = "push_end_collision"
+            return None
     push_plan = _push_plan(target, obstacle, candidate, lift_m=lift_m, contact_z_offset_m=contact_z_offset_m)
     swept = check_tool_swept_volume(
         push_plan,
@@ -251,9 +267,18 @@ def _prepare_push_context(
     output["approach_path_safe"] = not approach_collisions
     output["push_swept_safe"] = not push_collisions
     if not swept["feasible"]:
-        output["collision_risk"] = 1.0
-        output["reason"] = swept["reason"]
-        return None
+        soft_swept_collision = _is_soft_swept_collision(
+            swept.get("collisions", []),
+            _objects(scene),
+            target,
+            protected_object_ids,
+            distance_m,
+        )
+        output["tool_swept_soft_collision"] = bool(soft_swept_collision)
+        if not soft_swept_collision:
+            output["collision_risk"] = 1.0
+            output["reason"] = swept["reason"]
+            return None
     return {
         "current_grasp": current_grasp,
         "predicted_scene": predicted_scene,
@@ -304,6 +329,39 @@ def _mark_feasible_candidate(
     )
 
 
+def _mark_progress_candidate(
+    output: Dict[str, Any],
+    predicted_grasp: Dict[str, Any],
+    current_grasp: Dict[str, Any],
+    future: Dict[str, Any],
+    candidate: CandidateDict,
+    predicted_target: ObjectDict,
+    predicted_obstacle: ObjectDict,
+) -> None:
+    before = _blocker_count(current_grasp)
+    after = _blocker_count(predicted_grasp)
+    progress = max(0, before - after)
+    score = (
+        0.45
+        + 0.15 * progress
+        - 0.05 * output["future_blocking_cost"]
+        - 0.05 * output["place_blocking_cost"]
+        - 0.02 * float(future.get("congestion_cost", 0.0))
+        - 0.5 * float(candidate["distance_m"])
+    )
+    output.update(
+        {
+            "feasible": True,
+            "score": round(score, 6),
+            "reason": "push_reduces_current_blockers_and_preserves_future_tasks",
+            "current_blocker_count": before,
+            "predicted_blocker_count": after,
+            "blocker_count_reduction": progress,
+            "target_distance_after_m": round(xy_distance(predicted_obstacle, predicted_target), 6),
+        }
+    )
+
+
 def _blocker_count(grasp: Dict[str, Any]) -> int:
     blockers = {
         str(item.get("id"))
@@ -311,6 +369,65 @@ def _blocker_count(grasp: Dict[str, Any]) -> int:
         if item.get("id") is not None
     }
     return len(blockers)
+
+
+def _is_loose_movable_obstacle(obstacle: ObjectDict) -> bool:
+    role = obstacle.get("role")
+    state = obstacle.get("state")
+    if role in ("base", "structure") or state in ("locked", "placed"):
+        return False
+    if obstacle.get("pushable") is False or is_locked(obstacle):
+        return False
+    if role is None and state is None:
+        return True
+    return role == "loose_movable" and state not in ("locked", "placed")
+
+
+def _is_soft_swept_collision(
+    collisions: Iterable[Dict[str, Any]],
+    objects: Iterable[ObjectDict],
+    target: ObjectDict,
+    protected_ids: Iterable[str],
+    distance_m: float,
+) -> bool:
+    if float(distance_m) > DEFAULT_PROGRESS_PUSH_DISTANCE_M + 1e-9:
+        return False
+    object_list = list(objects)
+    protected = {str(value) for value in protected_ids or []}
+    target_id = str(target.get("id"))
+    for collision in collisions or []:
+        object_id = str(collision.get("id"))
+        obj = _find_object(object_list, object_id) or {}
+        if object_id in protected or is_locked(obj):
+            return False
+        if object_id != target_id:
+            if not _is_loose_movable_obstacle(obj):
+                return False
+            continue
+        overlap_area = float(collision.get("overlap_area_m2") or 0.0)
+        stage = str(collision.get("stage") or "")
+        if stage in ("pre_push_pose", "vertical_approach", "contact_pose"):
+            if overlap_area > DEFAULT_SOFT_TARGET_APPROACH_OVERLAP_M2:
+                return False
+        elif stage in ("horizontal_push", "retreat"):
+            if overlap_area > DEFAULT_SOFT_TARGET_PUSH_OVERLAP_M2:
+                return False
+        else:
+            return False
+    return True
+
+
+def _with_short_progress_variants(candidates: Iterable[CandidateDict]) -> List[CandidateDict]:
+    output: List[CandidateDict] = []
+    for candidate in candidates:
+        output.append(candidate)
+        if candidate.get("distance_m") is not None:
+            continue
+        short_candidate = dict(candidate)
+        short_candidate["distance_m"] = DEFAULT_PROGRESS_PUSH_DISTANCE_M
+        short_candidate["source"] = "{}.short_progress".format(candidate.get("source", "rule"))
+        output.append(short_candidate)
+    return output
 
 
 def evaluate_one_push_grasp_candidate(
@@ -330,13 +447,11 @@ def evaluate_one_push_grasp_candidate(
 ) -> Dict[str, Any]:
     output = _candidate_output(candidate, obstacle)
     protected_ids = {str(obj.get("id")) for obj in protected_objects or []}
-    loose_movable = obstacle.get("role") == "loose_movable" and obstacle.get("state") not in ("locked", "placed")
+    loose_movable = _is_loose_movable_obstacle(obstacle)
     output["pushed_object_loose_movable"] = bool(loose_movable)
     if (
         not loose_movable
         or str(obstacle.get("id")) in protected_ids
-        or is_locked(obstacle)
-        or obstacle.get("pushable") is False
     ):
         output["reason"] = "pushed_object_protected_or_not_pushable"
         return output
@@ -356,6 +471,7 @@ def evaluate_one_push_grasp_candidate(
         push_tool_safety_margin_m=push_tool_safety_margin_m,
         lift_m=lift_m,
         contact_z_offset_m=contact_z_offset_m,
+        protected_object_ids=protected_ids,
     )
     if context is None:
         return output
@@ -392,6 +508,17 @@ def evaluate_one_push_grasp_candidate(
     if not predicted_grasp["grasp_feasible"]:
         output["current_blocker_count"] = _blocker_count(context["current_grasp"])
         output["predicted_blocker_count"] = _blocker_count(predicted_grasp)
+        if output["predicted_blocker_count"] < output["current_blocker_count"]:
+            _mark_progress_candidate(
+                output,
+                predicted_grasp,
+                context["current_grasp"],
+                future,
+                candidate,
+                context["predicted_target"],
+                context["predicted_obstacle"],
+            )
+            return output
         output["reason"] = "push_after_current_target_still_blocked"
         return output
 
@@ -429,7 +556,9 @@ def evaluate_push_grasp_joint_candidates(
     contact_z_offset_m: float = 0.015,
 ) -> Dict[str, Any]:
     objects = _objects(scene)
-    candidates = build_joint_push_candidates(objects, target, obstacle_ids, qwen_candidates=qwen_candidates)
+    candidates = _with_short_progress_variants(
+        build_joint_push_candidates(objects, target, obstacle_ids, qwen_candidates=qwen_candidates)
+    )
     evaluations: List[Dict[str, Any]] = []
     for candidate in candidates:
         obstacle = _find_object(objects, candidate.get("obstacle_id"))

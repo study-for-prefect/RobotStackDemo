@@ -15,6 +15,18 @@ entry point. This package separates the workflow by responsibility:
 | `app.py` | Top-level cycle orchestration and final success/failure output |
 | `constants.py` | Shared project paths |
 
+Object identity in this workflow is snapshot-local:
+
+- `id` is the detector instance id inside the current observation. It is used
+  for pick/place/push planning, but it is not stable across observations.
+- `label` is the detector class name, such as `square green`.
+- `label_id` / `class_id` are YOLO class ids. Objects of the same class share
+  these values; they are not unique instance ids.
+
+After every scoped observation, protected stack objects are rebound from the
+current detector objects by label and geometry template. Do not use an old
+snapshot id as proof that the same physical object still has that id.
+
 Run the workflow through the existing entry:
 
 ```bash
@@ -136,7 +148,9 @@ camera-frame XY compensation.
 2. 否则先选最佳抓取 yaw。
 3. 如果存在可行 yaw，直接 `pick`，并把 `selected_grasp_yaw_deg` 写入 pick plan。
 4. 只有所有 yaw 都被松散可移动物体挡住时，才进入 `push_clearing`。
-5. 如果阻挡物包含 base、locked 或 placed structure，则不 push，返回 `replan_required`。
+5. 未标注 `role/state` 的当前检测物体按松散可移动物体评估；`base`、
+   `structure`、`locked`、`placed` 或 `pushable=false` 的物体仍然不可推。
+6. 如果阻挡物只包含受保护结构，返回 `replan_required`，不自动 push。
 
 Geometry-based push clearing is separately opt-in:
 
@@ -148,11 +162,30 @@ python3 tools/workflows/stack_demo_pipeline.py \
 ```
 
 Without both flags, push plans are recorded only. A real push is preflighted
-through MoveIt and refused when its translated obstacle AABB intersects the
-locked base or existing stack.
+through MoveIt and refused when the push would damage the locked base, placed
+stack, future targets, or future place regions.
 
 The planner evaluates away, opposite, perpendicular, and base-axis directions.
-Each result records collisions, table-bound status, and score. If no direction
-is feasible during live execution, the workflow asks the operator to clear the
-obstacle, then captures one new observation, updates scene memory, and verifies
-that the target is no longer blocked.
+It also evaluates a bounded `0.025 m` short-progress push variant when a full
+clearance push is too aggressive. A progress push is accepted only when it
+reduces the current grasp blockers and preserves future pick/place tasks. Tiny
+swept-volume edge contacts are tolerated only for these short progress pushes;
+contacts with the protected base/stack still reject the candidate.
+
+Each result records collisions, table-bound status, future-task impact, blocker
+counts, and score. After an executed push, the workflow performs a scoped
+observation, rebinds the current ids, and reruns grasp-yaw/push evaluation. If
+the target remains blocked, it can automatically replan more than once:
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  ... \
+  --max-automatic-push-clearing-attempts 2
+```
+
+If no automatic push is feasible during live execution, the workflow asks the
+operator to clear an obstacle, then captures one new observation and updates
+scene memory. Operator confirmation is not treated as proof that the target is
+safe to pick: if the target is still blocked by loose movable objects, the
+workflow returns to automatic push planning; if a critical/protected object is
+missing or still blocks every safe option, it refuses to continue.

@@ -3,11 +3,13 @@
 from tools.robot.push_primitives import build_push_targets
 from robot_scene_pipeline.grasp_yaw_search import select_best_grasp
 from robot_scene_pipeline.push_grasp_joint_evaluator import (
+    _is_soft_swept_collision,
     evaluate_one_push_grasp_candidate,
     evaluate_push_grasp_joint_candidates,
 )
 from robot_scene_pipeline.tool_swept_volume import check_tool_swept_volume
 from tools.workflows.stack_demo.push_clearing import evaluate_push_directions
+from tools.workflows.stack_demo.push_flow import _raise_if_non_push_action
 
 
 def test_push_targets():
@@ -104,6 +106,23 @@ def test_all_yaws_blocked_selects_safe_joint_push():
     assert selected["predicted_selected_grasp_yaw_deg"] is not None
 
 
+def test_unannotated_detector_object_can_be_pushed_as_loose_movable():
+    target = make_object("target", (0.40, 0.00, 0.015))
+    obstacle = make_object("wide_obstacle", (0.46, 0.00, 0.015), size=(0.08, 0.12, 0.03))
+    obstacle.pop("role")
+    obstacle.pop("state")
+    scene = make_scene([target, obstacle])
+    report = evaluate_push_grasp_joint_candidates(
+        scene,
+        target,
+        ["wide_obstacle"],
+        table_bounds=scene["table_bounds"],
+        gripper_outer_width_m=0.04,
+    )
+    assert report["selected_candidate"] is not None
+    assert any(item["pushed_object_loose_movable"] is True for item in report["candidates"])
+
+
 def test_locked_structure_push_candidate_is_rejected():
     target = make_object("target", (0.40, 0.00, 0.015))
     base = make_object("red_base", (0.46, 0.00, 0.015), size=(0.08, 0.12, 0.03))
@@ -139,7 +158,19 @@ def test_non_loose_movable_push_candidate_is_rejected():
     assert all(item["pushed_object_loose_movable"] is False for item in report["candidates"])
 
 
-def test_push_reducing_blockers_without_safe_grasp_is_rejected():
+def test_replan_required_with_push_candidates_is_not_hard_refused():
+    _raise_if_non_push_action(
+        {
+            "action": "replan_required",
+            "blocked_by_base": True,
+            "blocked_by_locked_structure": False,
+            "blocked_by_placed_structure": False,
+        },
+        has_push_candidates=True,
+    )
+
+
+def test_push_reducing_blockers_through_target_is_rejected():
     target = make_object("target", (0.40, 0.00, 0.015))
     obstacle = make_object("obstacle", (0.46, 0.00, 0.015), size=(0.08, 0.12, 0.03))
     second_obstacle = make_object("second", (0.40, 0.06, 0.015), size=(0.08, 0.08, 0.03))
@@ -159,8 +190,45 @@ def test_push_reducing_blockers_without_safe_grasp_is_rejected():
         gripper_outer_width_m=0.04,
     )
     assert result["feasible"] is False
-    assert result["post_push_grasp_feasible"] is False
-    assert result["reason"] != "push_reduces_current_blockers_and_preserves_future_tasks"
+    assert result["reason"] == "tool_swept_collision"
+
+
+def test_soft_swept_collision_only_allows_tiny_short_progress_overlap():
+    target = make_object("target", (0.40, 0.00, 0.015))
+    loose = make_object("loose", (0.45, 0.00, 0.015))
+    protected = make_object("base", (0.50, 0.00, 0.015))
+    protected.update({"role": "base", "state": "locked"})
+    tiny_target_collision = [
+        {
+            "id": "target",
+            "stage": "vertical_approach",
+            "overlap_area_m2": 0.0000008,
+        },
+        {
+            "id": "loose",
+            "stage": "horizontal_push",
+            "overlap_area_m2": 0.00002,
+        },
+    ]
+    large_target_collision = [
+        {
+            "id": "target",
+            "stage": "vertical_approach",
+            "overlap_area_m2": 0.000002,
+        }
+    ]
+    protected_collision = [
+        {
+            "id": "base",
+            "stage": "horizontal_push",
+            "overlap_area_m2": 0.000001,
+        }
+    ]
+
+    assert _is_soft_swept_collision(tiny_target_collision, [target, loose], target, [], 0.025)
+    assert not _is_soft_swept_collision(large_target_collision, [target], target, [], 0.025)
+    assert not _is_soft_swept_collision(protected_collision, [target, protected], target, ["base"], 0.025)
+    assert not _is_soft_swept_collision(tiny_target_collision, [target, loose], target, [], 0.05)
 
 
 def test_push_candidate_rejected_when_it_blocks_future_target():
@@ -232,9 +300,12 @@ if __name__ == "__main__":
     test_direction_evaluation_selects_open_side()
     test_direction_evaluation_reports_no_safe_direction()
     test_all_yaws_blocked_selects_safe_joint_push()
+    test_unannotated_detector_object_can_be_pushed_as_loose_movable()
     test_locked_structure_push_candidate_is_rejected()
     test_non_loose_movable_push_candidate_is_rejected()
-    test_push_reducing_blockers_without_safe_grasp_is_rejected()
+    test_replan_required_with_push_candidates_is_not_hard_refused()
+    test_push_reducing_blockers_through_target_is_rejected()
+    test_soft_swept_collision_only_allows_tiny_short_progress_overlap()
     test_push_candidate_rejected_when_it_blocks_future_target()
     test_push_candidate_rejected_when_it_blocks_future_place_region()
     test_tool_vertical_approach_collision_rejects_candidate()

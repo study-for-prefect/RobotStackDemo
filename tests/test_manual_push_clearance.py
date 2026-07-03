@@ -37,7 +37,15 @@ def test_manual_clearance_reobserves_and_updates_memory():
             {"memory": memory, "path": path}
         )
         push_flow.reacquire_target = lambda state, _template: state["objects"][0]
-        push_flow.build_geometry_relations = lambda _objects, target_id=None: []
+        push_flow.build_geometry_relations = lambda _objects, target_id=None, **_kwargs: [
+            {
+                "type": "target_grasp_analysis",
+                "object": target_id,
+                "action": "pick",
+                "grasp_feasible": True,
+                "selected_grasp_yaw_deg": 0.0,
+            }
+        ]
 
         with tempfile.TemporaryDirectory() as cycle_dir:
             args = SimpleNamespace(memory_json=os.path.join(cycle_dir, "memory.json"))

@@ -34,19 +34,65 @@ def locked_stack_object_ids(base_id: Any, previous_locked_stack: Optional[dict])
     return locked_ids
 
 
+def _xy_distance(first: ObjectDict, second: ObjectDict) -> float:
+    first_center = get_center(first)
+    second_center = get_center(second)
+    if first_center is None or second_center is None:
+        return math.inf
+    return math.hypot(first_center[0] - second_center[0], first_center[1] - second_center[1])
+
+
+def _matches_locked_template(obj: ObjectDict, template: ObjectDict, max_xy_m: float = 0.04) -> bool:
+    if not isinstance(obj, dict) or not isinstance(template, dict):
+        return False
+    obj_label = obj.get("label")
+    template_label = template.get("label")
+    if obj_label is not None and template_label is not None and obj_label != template_label:
+        return False
+    return _xy_distance(obj, template) <= float(max_xy_m)
+
+
+def current_protected_structure_ids(
+    objects: Iterable[ObjectDict],
+    base_id: Any,
+    previous_locked_stack: Optional[dict],
+    base_template: Optional[ObjectDict] = None,
+) -> set:
+    scene_objects = list(objects)
+    protected_ids = set()
+    templates: List[ObjectDict] = []
+    if isinstance(base_template, dict):
+        templates.append(base_template)
+    if previous_locked_stack:
+        templates.extend(previous_locked_stack.get("stack_objects", []) or [])
+    for template in templates:
+        matches = [obj for obj in scene_objects if _matches_locked_template(obj, template)]
+        if matches:
+            matches.sort(key=lambda obj: _xy_distance(obj, template))
+            protected_ids.add(str(matches[0].get("id")))
+    if not templates and base_id is not None:
+        protected_ids.add(str(base_id))
+    return protected_ids
+
+
 def relation_objects_with_protected_structure(
     objects: Iterable[ObjectDict],
     base_id: Any,
     previous_locked_stack: Optional[dict],
+    base_template: Optional[ObjectDict] = None,
 ) -> List[ObjectDict]:
-    locked_ids = locked_stack_object_ids(base_id, previous_locked_stack)
-    relation_objects = copy.deepcopy(list(objects))
+    scene_objects = list(objects)
+    locked_ids = current_protected_structure_ids(scene_objects, base_id, previous_locked_stack, base_template)
+    if base_template is not None:
+        base_ids = current_protected_structure_ids(scene_objects, base_id, None, base_template)
+    else:
+        base_ids = {str(base_id)}
+    relation_objects = copy.deepcopy(scene_objects)
     for obj in relation_objects:
         if str(obj.get("id")) in locked_ids:
             obj["pushable"] = False
-            if str(obj.get("id")) == str(base_id):
-                obj["role"] = "base"
-                obj["state"] = "locked"
+            obj["role"] = "base" if str(obj.get("id")) in base_ids else "structure"
+            obj["state"] = "locked"
         elif obj.get("role") is None and obj.get("state") is None:
             obj["role"] = "loose_movable"
             obj["state"] = "free"
@@ -336,8 +382,11 @@ def pushable_blocking_relations(
     target_object_id: Any,
     base_id: Any,
     previous_locked_stack: Optional[dict],
+    protected_object_ids: Optional[Iterable[Any]] = None,
 ) -> List[RelationDict]:
-    protected_ids = locked_stack_object_ids(base_id, previous_locked_stack)
+    protected_ids = {str(value) for value in protected_object_ids or []}
+    if not protected_ids:
+        protected_ids = locked_stack_object_ids(base_id, previous_locked_stack)
     output = []
     seen = set()
     for relation in relations:

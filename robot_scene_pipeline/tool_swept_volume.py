@@ -98,7 +98,8 @@ def check_tool_swept_volume(
         if not obj_aabb:
             continue
         for swept_aabb in swept:
-            if xy_aabb_overlap(swept_aabb, obj_aabb)[2] <= 0.0 or not _z_overlap(swept_aabb, obj_aabb):
+            _, _, overlap_area = xy_aabb_overlap(swept_aabb, obj_aabb)
+            if overlap_area <= 0.0 or not _z_overlap(swept_aabb, obj_aabb):
                 continue
             stage = str(swept_aabb["stage"])
             reason = "vertical_approach_collision" if stage == "vertical_approach" else "tool_swept_collision"
@@ -110,6 +111,7 @@ def check_tool_swept_volume(
                     "state": obj.get("state"),
                     "stage": stage,
                     "reason": reason,
+                    "overlap_area_m2": round(float(overlap_area), 9),
                 }
             )
 
