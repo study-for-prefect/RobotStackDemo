@@ -231,7 +231,7 @@ def test_soft_swept_collision_only_allows_tiny_short_progress_overlap():
     assert not _is_soft_swept_collision(tiny_target_collision, [target, loose], target, [], 0.05)
 
 
-def test_push_candidate_rejected_when_it_blocks_future_target():
+def test_future_grasp_target_is_not_a_hard_push_clearing_constraint():
     target = make_object("target", (0.40, 0.00, 0.015))
     obstacle = make_object("obstacle", (0.55, 0.00, 0.015))
     future_target = make_object("future", (0.62, 0.00, 0.015))
@@ -251,8 +251,7 @@ def test_push_candidate_rejected_when_it_blocks_future_target():
         table_bounds=scene["table_bounds"],
         gripper_outer_width_m=0.04,
     )
-    assert result["feasible"] is False
-    assert result["reason"] in ("push_end_collision", "blocks_future_target")
+    assert result["reason"] != "blocks_future_target"
 
 
 def test_push_candidate_rejected_when_it_blocks_future_place_region():
@@ -306,7 +305,7 @@ if __name__ == "__main__":
     test_replan_required_with_push_candidates_is_not_hard_refused()
     test_push_reducing_blockers_through_target_is_rejected()
     test_soft_swept_collision_only_allows_tiny_short_progress_overlap()
-    test_push_candidate_rejected_when_it_blocks_future_target()
+    test_future_grasp_target_is_not_a_hard_push_clearing_constraint()
     test_push_candidate_rejected_when_it_blocks_future_place_region()
     test_tool_vertical_approach_collision_rejects_candidate()
     print("push_primitives tests passed")

@@ -287,6 +287,7 @@ def evaluate_push_candidates(
     grasp_approach_length_m: float = 0.02,
     push_tool_width_m: float = 0.035,
     push_tool_safety_margin_m: float = 0.005,
+    protect_future_targets: bool = False,
 ) -> dict:
     relations = list(push_candidates)
     obstacle_ids = []
@@ -315,6 +316,7 @@ def evaluate_push_candidates(
         grasp_approach_length_m=grasp_approach_length_m,
         push_tool_width_m=push_tool_width_m,
         push_tool_safety_margin_m=push_tool_safety_margin_m,
+        protect_future_targets=protect_future_targets,
     )
     candidate_results = []
     for relation in relations:

@@ -12,7 +12,7 @@ from tools.planning.decision_to_execution import write_json
 from .commands import capture_empty_observation, load_json, push_clear_command, run
 from .observation_scope import observe_empty_with_scope
 from .push_context import (
-    future_target_objects, observed_push_delta_m, protected_objects, protected_stack_templates, qwen_forbidden_objects,
+    observed_push_delta_m, protected_objects, protected_stack_templates, qwen_forbidden_objects,
 )
 from .push_clearing import (
     build_push_execution_plan, current_protected_structure_ids, evaluate_push_candidates, object_by_string_id,
@@ -307,7 +307,7 @@ def handle_push_clearing_before_pick(
         distance_m=args.push_clearing_distance_m,
         table_bounds=current_state.get("table_bounds"),
         qwen_candidates=qwen_report.get("candidate_actions", []),
-        future_targets=future_target_objects(current_state, future_targets),
+        future_targets=[],
         future_place_regions=future_place_regions or [],
         protected_objects=protected,
         memory=memory,
@@ -489,7 +489,6 @@ def handle_push_clearing_before_pick(
                 previous_locked_stack,
                 base_template=base_template,
             )
-            + list(future_targets or [])
         ),
         noncritical_templates=[obstacle],
         scope_name="after_push_clearing",

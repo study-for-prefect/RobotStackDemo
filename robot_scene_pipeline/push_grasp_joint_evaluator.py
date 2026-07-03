@@ -444,6 +444,7 @@ def evaluate_one_push_grasp_candidate(
     push_tool_safety_margin_m: float = DEFAULT_PUSH_TOOL_SAFETY_MARGIN_M,
     lift_m: float = 0.05,
     contact_z_offset_m: float = 0.015,
+    protect_future_targets: bool = False,
 ) -> Dict[str, Any]:
     output = _candidate_output(candidate, obstacle)
     protected_ids = {str(obj.get("id")) for obj in protected_objects or []}
@@ -490,7 +491,7 @@ def evaluate_one_push_grasp_candidate(
     future = evaluate_future_task_impact(
         context["predicted_scene"],
         current_target=target,
-        future_targets=future_targets,
+        future_targets=future_targets if protect_future_targets else [],
         future_place_regions=future_place_regions,
         protected_objects=protected_objects,
         moved_object_id=obstacle.get("id"),
@@ -554,6 +555,7 @@ def evaluate_push_grasp_joint_candidates(
     push_tool_safety_margin_m: float = DEFAULT_PUSH_TOOL_SAFETY_MARGIN_M,
     lift_m: float = 0.05,
     contact_z_offset_m: float = 0.015,
+    protect_future_targets: bool = False,
 ) -> Dict[str, Any]:
     objects = _objects(scene)
     candidates = _with_short_progress_variants(
@@ -583,6 +585,7 @@ def evaluate_push_grasp_joint_candidates(
                 push_tool_safety_margin_m=push_tool_safety_margin_m,
                 lift_m=lift_m,
                 contact_z_offset_m=contact_z_offset_m,
+                protect_future_targets=protect_future_targets,
             )
         )
     feasible = [item for item in evaluations if item.get("feasible")]

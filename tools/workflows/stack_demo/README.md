@@ -163,14 +163,17 @@ python3 tools/workflows/stack_demo_pipeline.py \
 
 Without both flags, push plans are recorded only. A real push is preflighted
 through MoveIt and refused when the push would damage the locked base, placed
-stack, future targets, or future place regions.
+stack, or future place regions. Future grasp targets are treated as movable
+loose objects during current-target clearing; they are recovered through the
+next scoped observations instead of blocking the current clearance plan.
 
 The planner evaluates away, opposite, perpendicular, and base-axis directions.
 It also evaluates a bounded `0.025 m` short-progress push variant when a full
 clearance push is too aggressive. A progress push is accepted only when it
-reduces the current grasp blockers and preserves future pick/place tasks. Tiny
-swept-volume edge contacts are tolerated only for these short progress pushes;
-contacts with the protected base/stack still reject the candidate.
+reduces the current grasp blockers and preserves protected structure/place
+constraints. Tiny swept-volume edge contacts are tolerated only for these short
+progress pushes; contacts with the protected base/stack still reject the
+candidate.
 
 Each result records collisions, table-bound status, future-task impact, blocker
 counts, and score. After an executed push, the workflow performs a scoped
@@ -180,7 +183,7 @@ the target remains blocked, it can automatically replan more than once:
 ```bash
 python3 tools/workflows/stack_demo_pipeline.py \
   ... \
-  --max-automatic-push-clearing-attempts 2
+  --max-automatic-push-clearing-attempts 4
 ```
 
 If no automatic push is feasible during live execution, the workflow asks the
