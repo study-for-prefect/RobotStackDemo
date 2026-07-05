@@ -12,6 +12,7 @@ from robot_scene_pipeline.geometry_relations import (
 from robot_scene_pipeline.push_grasp_joint_evaluator import (
     evaluate_push_grasp_joint_candidates,
 )
+from robot_scene_pipeline.push_candidate_generation import build_joint_push_candidates
 
 
 ObjectDict = Dict[str, Any]
@@ -108,15 +109,9 @@ def _normalized_xy(direction: Iterable[float]) -> List[float]:
 
 
 def candidate_push_directions(obstacle: ObjectDict, target: ObjectDict) -> List[dict]:
-    raw_candidates = [
-        ("base_positive_x", [1.0, 0.0]),
-        ("base_negative_x", [-1.0, 0.0]),
-        ("base_positive_y", [0.0, 1.0]),
-        ("base_negative_y", [0.0, -1.0]),
-    ]
     candidates = []
-    for source, direction in raw_candidates:
-        direction = _normalized_xy(direction)
+    for candidate in build_joint_push_candidates([obstacle, target], target, [obstacle.get("id")]):
+        direction = _normalized_xy(candidate["direction_base"])
         if any(
             abs(direction[0] - item["direction_base"][0]) < 1e-6
             and abs(direction[1] - item["direction_base"][1]) < 1e-6
@@ -125,7 +120,7 @@ def candidate_push_directions(obstacle: ObjectDict, target: ObjectDict) -> List[
             continue
         candidates.append(
             {
-                "source": source,
+                "source": candidate.get("source"),
                 "direction_base": [direction[0], direction[1], 0.0],
             }
         )
@@ -331,6 +326,7 @@ def evaluate_push_candidates(
         if feasible:
             best = feasible[0]
             selected = {
+                "candidate_id": best.get("candidate_id"),
                 "source": best.get("source"),
                 "direction_base": best.get("direction_base"),
                 "distance_m": best.get("distance_m", distance_m),
@@ -364,6 +360,29 @@ def evaluate_push_candidates(
         "selected_result": selected_result,
         "joint_evaluation": joint,
     }
+
+
+def select_result_by_candidate_id(direction_assessment: dict, candidate_id: Any) -> Optional[dict]:
+    if candidate_id is None:
+        return None
+    target_id = str(candidate_id)
+    for result in direction_assessment.get("candidate_results", []):
+        for evaluation in result.get("evaluations", []):
+            if str(evaluation.get("candidate_id")) != target_id or not evaluation.get("feasible"):
+                continue
+            selected_result = dict(result)
+            selected_result["selected_direction"] = {
+                "candidate_id": evaluation.get("candidate_id"),
+                "source": evaluation.get("source"),
+                "direction_base": evaluation.get("direction_base"),
+                "distance_m": evaluation.get("distance_m"),
+                "feasible": True,
+                "score": evaluation.get("score", 0.0),
+                "reason": evaluation.get("reason"),
+                "predicted_selected_grasp_yaw_deg": evaluation.get("predicted_selected_grasp_yaw_deg"),
+            }
+            return selected_result
+    return None
 
 
 def blocking_relations_for_target(

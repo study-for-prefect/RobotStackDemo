@@ -19,6 +19,8 @@ from .push_clearing import (
     pushable_blocking_relations, relation_objects_with_protected_structure,
 )
 from .scene import memory_id_for_scene_object, reacquire_target
+from .push_selection import choose_selected_result, selected_push_from_result
+from .target_recovery import missing_target_clearance_relations, state_with_missing_target
 
 def _relations_for_target(
     current_state: dict,
@@ -223,6 +225,7 @@ def handle_push_clearing_before_pick(
     future_place_regions: Optional[Iterable[dict]] = None,
     automatic_push_attempt: int = 0,
 ) -> Tuple[dict, dict, dict]:
+    step_index = int(automatic_push_attempt) + 1
     write_json(os.path.join(cycle_dir, "scene_state_before_action.json"), current_state)
     relations = _relations_for_target(
         current_state,
@@ -254,6 +257,20 @@ def handle_push_clearing_before_pick(
         previous_locked_stack,
         protected_object_ids=protected_ids,
     )
+    if held_object.get("target_detection_status") == "missing_in_current_observation":
+        missing_candidates = missing_target_clearance_relations(
+            current_state,
+            held_object,
+            protected_ids,
+            radius_m=getattr(args, "missing_target_clearance_radius_m", 0.10),
+            min_top_z_delta_m=getattr(args, "high_block_min_top_z_delta_m", 0.01),
+        )
+        seen_subjects = {str(item.get("subject")) for item in push_candidates}
+        for candidate in missing_candidates:
+            if str(candidate.get("subject")) in seen_subjects:
+                continue
+            push_candidates.append(candidate)
+            seen_subjects.add(str(candidate.get("subject")))
     analysis = _target_grasp_analysis(relations, held_object["id"])
     write_json(
         os.path.join(cycle_dir, "grasp_yaw_analysis_before_pick.json"),
@@ -273,6 +290,9 @@ def handle_push_clearing_before_pick(
                 "reason": "direct_or_rotated_grasp_yaw_feasible",
                 "selected_grasp_yaw_deg": analysis.get("selected_grasp_yaw_deg"),
                 "priority": "direct_pick_then_rotated_yaw_pick",
+                "clearance_step_index": step_index,
+                "selection_source": "direct_geometry_grasp",
+                "multi_step_status": "target_graspable",
             },
         )
         return current_state, memory, held_object
@@ -283,6 +303,8 @@ def handle_push_clearing_before_pick(
                 "action": "reobserve",
                 "reason": "no_pushable_blocking_relation",
                 "grasp_action": analysis.get("action"),
+                "clearance_step_index": step_index,
+                "multi_step_status": "no_candidate",
             },
         )
         return current_state, memory, held_object
@@ -323,15 +345,19 @@ def handle_push_clearing_before_pick(
         os.path.join(cycle_dir, "push_grasp_joint_candidates.json"),
         direction_assessment.get("joint_evaluation", {}),
     )
-    selected_result = direction_assessment["selected_result"]
-    selected_push = None
-    if selected_result is not None:
-        selected_push = dict(selected_result["relation"])
-        selected_direction = selected_result["selected_direction"]
-        selected_push["direction_base"] = selected_direction["direction_base"]
-        selected_push["distance_m"] = selected_direction["distance_m"]
-        selected_push["direction_source"] = selected_direction["source"]
-        selected_push["direction_score"] = selected_direction["score"]
+    write_json(
+        os.path.join(cycle_dir, "clearance_step_{:02d}_candidates.json".format(step_index)),
+        direction_assessment.get("joint_evaluation", {}),
+    )
+    selected_result, llm_selection = choose_selected_result(
+        args,
+        cycle_dir,
+        held_object,
+        direction_assessment,
+        memory,
+        step_index,
+    )
+    selected_push = selected_push_from_result(selected_result)
 
     write_json(
         os.path.join(cycle_dir, "push_plan_before_pick.json"),
@@ -343,6 +369,8 @@ def handle_push_clearing_before_pick(
             "push_candidates": push_candidates,
             "selected_push": selected_push,
             "direction_assessment": direction_assessment,
+            "llm_selection": llm_selection,
+            "clearance_step_index": step_index,
             "note": (
                 "Geometry relation suggests clearing obstacle before pick. "
                 "Automatic execution requires one feasible evaluated direction."
@@ -355,6 +383,7 @@ def handle_push_clearing_before_pick(
             "direction_base": item.get("direction_base"),
             "reason": item.get("reason"),
             "score": item.get("score"),
+            "candidate_id": item.get("candidate_id"),
         }
         for item in direction_assessment.get("joint_evaluation", {}).get("candidates", [])
         if not item.get("feasible")
@@ -367,6 +396,9 @@ def handle_push_clearing_before_pick(
                 "action": "replan_required",
                 "reason": "all_push_directions_unsafe" if push_candidates else "no_pushable_blocking_relation",
                 "rejected_candidates": rejected,
+                "clearance_step_index": step_index,
+                "selection_source": llm_selection.get("selection_source"),
+                "multi_step_status": "no_feasible_candidate",
             },
         )
         write_json(
@@ -380,6 +412,7 @@ def handle_push_clearing_before_pick(
                 "action": "replan_required",
                 "result": "not_selected",
                 "reason": "all_push_directions_unsafe" if push_candidates else "no_pushable_blocking_relation",
+                "clearance_step_index": step_index,
             },
         )
         write_json(
@@ -391,6 +424,15 @@ def handle_push_clearing_before_pick(
                 "target_object_id": held_object.get("id"),
                 "target_label": held_object.get("label"),
                 "direction_assessment": direction_assessment,
+            },
+        )
+        write_json(
+            os.path.join(cycle_dir, "clearance_step_{:02d}_result.json".format(step_index)),
+            {
+                "action": "replan_required",
+                "result": "not_selected",
+                "reason": "all_push_directions_unsafe" if push_candidates else "no_pushable_blocking_relation",
+                "clearance_step_index": step_index,
             },
         )
         print(
@@ -436,7 +478,10 @@ def handle_push_clearing_before_pick(
             "reason": selected_push.get("reason"),
             "selected_push": selected_push,
             "rejected_candidates": rejected,
-            "post_push_requirement": "reobserve_and_rerun_grasp_yaw_search",
+            "clearance_step_index": step_index,
+            "selection_source": llm_selection.get("selection_source"),
+            "multi_step_status": "selected_one_step",
+            "post_push_requirement": "reobserve_and_rerun_clearance_loop",
         },
     )
     write_json(
@@ -464,9 +509,20 @@ def handle_push_clearing_before_pick(
             os.path.join(cycle_dir, "action_result.json"),
             {"action": "push_clearing", "result": "dry_run_only", "selected_push": selected_push},
         )
+        write_json(
+            os.path.join(cycle_dir, "clearance_step_{:02d}_result.json".format(step_index)),
+            {
+                "action": "push_clearing",
+                "result": "dry_run_only",
+                "selected_push": selected_push,
+                "clearance_step_index": step_index,
+                "selection_source": llm_selection.get("selection_source"),
+                "post_push_requirement": "reobserve_and_rerun_clearance_loop",
+            },
+        )
         return current_state, memory, held_object
 
-    runtime["current_stage"] = "push_clearing_before_pick"
+    runtime["current_stage"] = "push_clearing_before_pick_step_{:02d}".format(step_index)
     run(push_clear_command(args, push_execution_plan_path))
     push_execution_plan["execution_status"] = "executed"
     write_json(push_execution_plan_path, push_execution_plan)
@@ -512,7 +568,10 @@ def handle_push_clearing_before_pick(
             observed_delta_m=observed_delta_m,
         )
     save_memory(memory, args.memory_json)
-    held_object = copy.deepcopy(reacquire_target(current_state, held_template))
+    try:
+        held_object = copy.deepcopy(reacquire_target(current_state, held_template))
+    except RuntimeError:
+        current_state, held_object = state_with_missing_target(current_state, held_template)
     relations_after_push = _relations_for_target(
         current_state,
         held_object,
@@ -535,10 +594,24 @@ def handle_push_clearing_before_pick(
         {
             "action": "push_clearing",
             "result": "executed_and_reobserved",
+            "clearance_step_index": step_index,
             "post_push_observation": post_push_observation,
             "observed_delta_m": observed_delta_m,
             "post_push_grasp_action": after_analysis.get("action"),
             "post_push_selected_grasp_yaw_deg": after_analysis.get("selected_grasp_yaw_deg"),
+        },
+    )
+    write_json(
+        os.path.join(cycle_dir, "clearance_step_{:02d}_result.json".format(step_index)),
+        {
+            "action": "push_clearing",
+            "result": "executed_and_reobserved",
+            "clearance_step_index": step_index,
+            "selected_push": selected_push,
+            "selection_source": llm_selection.get("selection_source"),
+            "post_push_observation": post_push_observation,
+            "observed_delta_m": observed_delta_m,
+            "post_push_grasp_action": after_analysis.get("action"),
         },
     )
     protected_ids_after_push = current_protected_structure_ids(
@@ -557,6 +630,16 @@ def handle_push_clearing_before_pick(
     )
     if after_analysis.get("action") == "pick" and after_analysis.get("grasp_feasible"):
         held_object = _apply_selected_grasp_to_target(held_object, after_analysis)
+        write_json(
+            os.path.join(cycle_dir, "multi_step_clearance_summary.json"),
+            {
+                "schema_version": "multi_step_clearance_summary_v1",
+                "status": "target_graspable_after_clearance",
+                "steps_completed": step_index,
+                "target_object_id": held_object.get("id"),
+                "selected_grasp_yaw_deg": after_analysis.get("selected_grasp_yaw_deg"),
+            },
+        )
     if remaining_push:
         max_attempts = max(1, int(getattr(args, "max_automatic_push_clearing_attempts", 2)))
         if automatic_push_attempt + 1 < max_attempts:
@@ -584,19 +667,34 @@ def handle_push_clearing_before_pick(
                 future_place_regions=future_place_regions,
                 automatic_push_attempt=automatic_push_attempt + 1,
             )
-        return _manual_clear_and_reobserve(
-            args,
-            cycle_dir,
-            runtime,
-            memory,
-            held_template,
-            base_id,
-            previous_locked_stack,
-            "target_still_blocked_after_one_automatic_push",
-            {"remaining_push_relations": remaining_push},
-            base_template=base_template,
-            future_targets=future_targets,
-            future_place_regions=future_place_regions,
-            automatic_push_attempt=automatic_push_attempt + 1,
+        write_json(
+            os.path.join(cycle_dir, "selected_action.json"),
+            {
+                "action": "replan_required",
+                "reason": "multi_step_clearance_exhausted",
+                "clearance_step_index": step_index,
+                "multi_step_status": "multi_step_clearance_exhausted",
+                "remaining_push_relations": remaining_push,
+            },
         )
+        write_json(
+            os.path.join(cycle_dir, "multi_step_clearance_summary.json"),
+            {
+                "schema_version": "multi_step_clearance_summary_v1",
+                "status": "multi_step_clearance_exhausted",
+                "steps_completed": step_index,
+                "max_attempts": max_attempts,
+                "remaining_push_relations": remaining_push,
+            },
+        )
+        return current_state, memory, held_object
+    write_json(
+        os.path.join(cycle_dir, "multi_step_clearance_summary.json"),
+        {
+            "schema_version": "multi_step_clearance_summary_v1",
+            "status": "no_remaining_push_relations",
+            "steps_completed": step_index,
+            "post_push_grasp_action": after_analysis.get("action"),
+        },
+    )
     return current_state, memory, held_object

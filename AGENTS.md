@@ -172,5 +172,8 @@ Code must follow common ROS 2 / robotics conventions: SI units, explicit coordin
 
 If a change does not meet robotics conventions, state the mismatch clearly and give a warning instead of hiding it.
 
+## Readme Update
+
+When code behavior, commands, configuration, or workflow changes, update README.md accordingly.
 
 让用户最终可以有读懂代码的能力

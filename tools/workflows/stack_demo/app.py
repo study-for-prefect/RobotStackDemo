@@ -58,6 +58,7 @@ from .scene import (
     target_exclusion_for_pre_pick,
     validate_decision,
 )
+from .target_recovery import recover_or_lock_missing_target
 
 SECOND_PICK_OBSERVATION_ERROR_MARKERS = (
     "Second observation center z",
@@ -232,7 +233,23 @@ def main() -> int:
                     save_memory(memory, args.memory_json)
 
             runtime["current_stage"] = "detect_target_and_freeze_place"
-            held_object = copy.deepcopy(reacquire_target(current_state, held_templates[object_id]))
+            try:
+                held_object = copy.deepcopy(reacquire_target(current_state, held_templates[object_id]))
+            except RuntimeError:
+                runtime["current_stage"] = "target_recovery_before_clearance"
+                current_state, memory, held_object, _target_recovery = recover_or_lock_missing_target(
+                    args,
+                    cycle_dir,
+                    runtime,
+                    memory,
+                    current_state,
+                    held_templates[object_id],
+                    protected_templates=[base_object] + (
+                        (protected_locked_stack or previous_locked_stack or {}).get("stack_objects", [])
+                        if isinstance(protected_locked_stack or previous_locked_stack, dict)
+                        else []
+                    ),
+                )
             current_state, memory, held_object = handle_push_clearing_before_pick(
                 args,
                 cycle_dir,

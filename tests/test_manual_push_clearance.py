@@ -78,6 +78,158 @@ def test_manual_clearance_reobserves_and_updates_memory():
         push_flow.build_geometry_relations = originals["relations"]
 
 
+def test_automatic_clearance_reobserves_and_exits_to_pick():
+    target = {
+        "id": "target",
+        "label": "target",
+        "geometry_center_m": [0.40, 0.00, 0.015],
+        "dimensions_m": [0.04, 0.04, 0.03],
+        "role": "loose_movable",
+        "state": "free",
+    }
+    obstacle = {
+        "id": "obstacle",
+        "label": "obstacle",
+        "geometry_center_m": [0.46, 0.00, 0.015],
+        "dimensions_m": [0.04, 0.04, 0.03],
+        "role": "loose_movable",
+        "state": "free",
+    }
+    state_before = {"objects": [target, obstacle], "table_bounds": {"xmin": 0.1, "xmax": 0.9, "ymin": -0.5, "ymax": 0.5}}
+    state_after = {"objects": [target], "table_bounds": state_before["table_bounds"]}
+    blocking_relation = {
+        "type": "blocking_grasp",
+        "subject": "obstacle",
+        "object": "target",
+        "source": "test",
+    }
+    relation_calls = {"count": 0}
+    saved = {}
+    originals = {
+        "relations": push_flow._relations_for_target,
+        "evaluate": push_flow.evaluate_push_candidates,
+        "run": push_flow.run,
+        "command": push_flow.push_clear_command,
+        "observe": push_flow.observe_empty_with_scope,
+        "reacquire": push_flow.reacquire_target,
+        "mark": push_flow.mark_pushed,
+        "save": push_flow.save_memory,
+        "delta": push_flow.observed_push_delta_m,
+    }
+    try:
+        def fake_relations(_state, _held, _base_id, _stack, _args, base_template=None):
+            relation_calls["count"] += 1
+            if relation_calls["count"] == 1:
+                return [
+                    {
+                        "type": "target_grasp_analysis",
+                        "object": "target",
+                        "action": "push_clearing",
+                        "grasp_feasible": False,
+                    },
+                    blocking_relation,
+                ]
+            return [
+                {
+                    "type": "target_grasp_analysis",
+                    "object": "target",
+                    "action": "pick",
+                    "grasp_feasible": True,
+                    "selected_grasp_yaw_deg": 0.0,
+                }
+            ]
+
+        def fake_evaluate(*_args, **_kwargs):
+            selected_direction = {
+                "candidate_id": "safe_1",
+                "source": "test",
+                "direction_base": [1.0, 0.0, 0.0],
+                "distance_m": 0.025,
+                "feasible": True,
+                "score": 1.0,
+                "reason": "push_reduces_current_blockers_and_preserves_future_tasks",
+            }
+            candidate = dict(selected_direction)
+            candidate.update({"obstacle_id": "obstacle"})
+            return {
+                "candidate_results": [
+                    {
+                        "relation": blocking_relation,
+                        "obstacle": obstacle,
+                        "evaluations": [candidate],
+                        "selected_direction": selected_direction,
+                    }
+                ],
+                "selected_result": {
+                    "relation": blocking_relation,
+                    "obstacle": obstacle,
+                    "evaluations": [candidate],
+                    "selected_direction": selected_direction,
+                },
+                "joint_evaluation": {"candidates": [candidate], "selected_candidate": candidate},
+            }
+
+        push_flow._relations_for_target = fake_relations
+        push_flow.evaluate_push_candidates = fake_evaluate
+        push_flow.run = lambda _command: None
+        push_flow.push_clear_command = lambda _args, _path: ["push"]
+        push_flow.observe_empty_with_scope = lambda *_args, **_kwargs: (state_after, {"action_history": []}, {"status": "critical_confirmed"})
+        push_flow.reacquire_target = lambda _state, _template: target
+        push_flow.mark_pushed = lambda memory, *_args, **_kwargs: memory
+        push_flow.save_memory = lambda memory, path: saved.update({"memory": memory, "path": path})
+        push_flow.observed_push_delta_m = lambda _obstacle, _state: 0.03
+
+        with tempfile.TemporaryDirectory() as cycle_dir:
+            args = SimpleNamespace(
+                execute=True,
+                execute_push_clearing=True,
+                enable_llm_push_selection=False,
+                push_clearing_distance_m=0.05,
+                push_clearing_lift_m=0.05,
+                push_clearing_contact_z_offset_m=0.015,
+                grasp_gripper_outer_width_m=0.04,
+                grasp_gripper_inner_width_m=0.02,
+                grasp_approach_length_m=0.02,
+                push_tool_width_m=0.035,
+                push_tool_safety_margin_m=0.005,
+                max_automatic_push_clearing_attempts=2,
+                memory_json=os.path.join(cycle_dir, "memory.json"),
+                instruction="stack target",
+                model="test",
+                ollama_url="http://127.0.0.1:11434/api/chat",
+                timeout=1,
+                num_predict=64,
+            )
+            runtime = {"held_object_id": None, "current_stage": "test"}
+            state, memory, held = push_flow.handle_push_clearing_before_pick(
+                args,
+                cycle_dir,
+                runtime,
+                {"action_history": []},
+                state_before,
+                target,
+                target,
+                base_id="base",
+                previous_locked_stack=None,
+            )
+            assert state is state_after
+            assert held["grasp_feasible"] is True
+            assert relation_calls["count"] == 2
+            assert os.path.exists(os.path.join(cycle_dir, "clearance_step_01_result.json"))
+            assert os.path.exists(os.path.join(cycle_dir, "multi_step_clearance_summary.json"))
+    finally:
+        push_flow._relations_for_target = originals["relations"]
+        push_flow.evaluate_push_candidates = originals["evaluate"]
+        push_flow.run = originals["run"]
+        push_flow.push_clear_command = originals["command"]
+        push_flow.observe_empty_with_scope = originals["observe"]
+        push_flow.reacquire_target = originals["reacquire"]
+        push_flow.mark_pushed = originals["mark"]
+        push_flow.save_memory = originals["save"]
+        push_flow.observed_push_delta_m = originals["delta"]
+
+
 if __name__ == "__main__":
     test_manual_clearance_reobserves_and_updates_memory()
+    test_automatic_clearance_reobserves_and_exits_to_pick()
     print("manual push clearance tests passed")

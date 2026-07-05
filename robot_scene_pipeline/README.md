@@ -10,6 +10,9 @@ This directory contains the split single-frame robot scene pipeline:
 - `tf_transform.py`: TF lookup and camera-to-base point transform.
 - `grasp_yaw_search.py`: 连续抓取 yaw 搜索，输出可行/阻塞 yaw 区间。
 - `grasp_obstruction_decision.py`: 根据 yaw 搜索结果生成 pick、push 或 replan 决策字段。
+- `push_candidate_generation.py`: 生成规则/Qwen 清障候选方向。
+- `push_grasp_joint_evaluator.py`: 用后推抓取可行性、桌面边界、扫掠体积和未来任务影响评估清障候选。
+- `llm_safe_action_selector.py`: 让 LLM 只在已经安全通过的候选 `candidate_id` 中排序选择。
 - `llm_scene_reasoner.py`: LLM prompt and Ollama call.
 
 For hover/TCP offset and XY-bias calibration, see

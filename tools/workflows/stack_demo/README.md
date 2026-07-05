@@ -11,7 +11,9 @@ entry point. This package separates the workflow by responsibility:
 | `pick.py` | Pick plans, motion command construction, dry-run scene simulation |
 | `placement.py` | Place-on-stack geometry and safety validation |
 | `push_clearing.py` | Push-plan construction and locked-structure annotations |
-| `push_flow.py` | Direction evaluation, push execution, manual clearing, re-observation |
+| `push_flow.py` | Multi-step push execution, dry-run reporting, re-observation |
+| `push_selection.py` | LLM/geometry selection among already-safe push candidates |
+| `target_recovery.py` | Missing-target recovery and high-obstacle clearance relations |
 | `app.py` | Top-level cycle orchestration and final success/failure output |
 | `constants.py` | Shared project paths |
 
@@ -167,23 +169,62 @@ stack, or future place regions. Future grasp targets are treated as movable
 loose objects during current-target clearing; they are recovered through the
 next scoped observations instead of blocking the current clearance plan.
 
-The planner evaluates away, opposite, perpendicular, and base-axis directions.
-It also evaluates a bounded `0.025 m` short-progress push variant when a full
-clearance push is too aggressive. A progress push is accepted only when it
-reduces the current grasp blockers and preserves protected structure/place
-constraints. Tiny swept-volume edge contacts are tolerated only for these short
-progress pushes; contacts with the protected base/stack still reject the
-candidate.
+The planner now evaluates a broader direction set: away-from-target, two
+tangential directions, and a fixed 16-direction base-link fan. It also evaluates
+a bounded `0.025 m` short-progress push variant when a full clearance push is
+too aggressive. A progress push is accepted only when it reduces the current
+grasp blockers and preserves protected structure/place constraints. Tiny
+swept-volume edge contacts are tolerated only for these short progress pushes;
+contacts with the protected base/stack still reject the candidate.
 
-Each result records collisions, table-bound status, future-task impact, blocker
-counts, and score. After an executed push, the workflow performs a scoped
-observation, rebinds the current ids, and reruns grasp-yaw/push evaluation. If
-the target remains blocked, it can automatically replan more than once:
+Each evaluated action receives a stable `candidate_id`. When LLM push selection
+is enabled, the LLM receives only candidates that already passed geometry,
+table-bound, swept-volume, protected-structure, and future-place checks. The LLM
+may choose one `candidate_id`; it cannot introduce a new direction or obstacle.
+If the LLM is unavailable or returns an unknown/unsafe id, the workflow falls
+back to the highest geometry score.
+
+LLM push selection is enabled by default and can be disabled explicitly:
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  ... \
+  --disable-llm-push-selection
+```
+
+After an executed push, the workflow performs a scoped observation, rebinds the
+current ids, and reruns grasp-yaw/push evaluation. If the target remains
+blocked, it can automatically replan more than once:
 
 ```bash
 python3 tools/workflows/stack_demo_pipeline.py \
   ... \
   --max-automatic-push-clearing-attempts 4
+```
+
+Each step writes its own reports:
+
+```text
+cycle_*/clearance_step_XX_candidates.json
+cycle_*/clearance_step_XX_llm_selection.json
+cycle_*/clearance_step_XX_result.json
+cycle_*/multi_step_clearance_summary.json
+```
+
+If the target is not detected before pick, the workflow first attempts scoped
+multi-view recovery. If recovery still fails, it keeps the locked first
+observation template as the target region and only considers visible nearby
+loose objects that are high enough to plausibly hide or block that target. These
+missing-target clearing candidates still go through the same safety evaluator
+before any dry-run or real push is selected.
+
+Useful missing-target tuning parameters:
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  ... \
+  --missing-target-clearance-radius-m 0.10 \
+  --high-block-min-top-z-delta-m 0.01
 ```
 
 If no automatic push is feasible during live execution, the workflow asks the

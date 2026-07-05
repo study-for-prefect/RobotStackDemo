@@ -63,8 +63,14 @@ def test_direction_evaluation_selects_open_side():
     )
     feasible = [item for item in evaluations if item["feasible"]]
     assert feasible
-    assert feasible[0]["source"] in ("base_positive_y", "base_negative_y")
-    assert len(evaluations) == 4
+    assert feasible[0]["collisions"] == []
+    assert feasible[0]["source"] in (
+        "tangent_left_from_target",
+        "tangent_right_from_target",
+        "rule_16dir_112deg",
+        "rule_16dir_248deg",
+    )
+    assert len(evaluations) == 16
 
 
 def test_direction_evaluation_reports_no_safe_direction():
@@ -102,6 +108,7 @@ def test_all_yaws_blocked_selects_safe_joint_push():
     selected = report["selected_candidate"]
     assert selected is not None
     assert selected["feasible"] is True
+    assert selected["candidate_id"] is not None
     assert selected["reason"] == "push_enables_current_grasp_and_preserves_future_tasks"
     assert selected["predicted_selected_grasp_yaw_deg"] is not None
 

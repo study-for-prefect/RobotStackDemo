@@ -153,7 +153,7 @@ def _memory_direction_bonus(memory: Optional[dict], obstacle: ObjectDict, direct
     for action in memory.get("action_history", [])[-20:]:
         if action.get("action") != "push":
             continue
-        hist_dir = _normalize_xy(action.get("direction_base"))
+        hist_dir = normalize_xy(action.get("direction_base"))
         if hist_dir is None:
             continue
         dot = direction[0] * hist_dir[0] + direction[1] * hist_dir[1]
@@ -168,6 +168,7 @@ def _memory_direction_bonus(memory: Optional[dict], obstacle: ObjectDict, direct
 
 def _candidate_output(candidate: CandidateDict, obstacle: ObjectDict) -> Dict[str, Any]:
     return {
+        "candidate_id": candidate.get("candidate_id"),
         "action": candidate.get("action", "push_away"),
         "obstacle_id": obstacle.get("id"),
         "direction_base": candidate.get("direction_base"),
@@ -430,6 +431,16 @@ def _with_short_progress_variants(candidates: Iterable[CandidateDict]) -> List[C
     return output
 
 
+def _assign_candidate_ids(candidates: Iterable[CandidateDict]) -> List[CandidateDict]:
+    output: List[CandidateDict] = []
+    for index, candidate in enumerate(candidates, start=1):
+        item = dict(candidate)
+        if item.get("candidate_id") is None:
+            item["candidate_id"] = "push_{:03d}_obj_{}".format(index, item.get("obstacle_id"))
+        output.append(item)
+    return output
+
+
 def evaluate_one_push_grasp_candidate(
     scene: Dict[str, Any], target: ObjectDict, obstacle: ObjectDict, candidate: CandidateDict,
     future_targets: Iterable[ObjectDict] = (),
@@ -558,8 +569,10 @@ def evaluate_push_grasp_joint_candidates(
     protect_future_targets: bool = False,
 ) -> Dict[str, Any]:
     objects = _objects(scene)
-    candidates = _with_short_progress_variants(
-        build_joint_push_candidates(objects, target, obstacle_ids, qwen_candidates=qwen_candidates)
+    candidates = _assign_candidate_ids(
+        _with_short_progress_variants(
+            build_joint_push_candidates(objects, target, obstacle_ids, qwen_candidates=qwen_candidates)
+        )
     )
     evaluations: List[Dict[str, Any]] = []
     for candidate in candidates:

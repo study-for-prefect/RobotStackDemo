@@ -38,19 +38,62 @@ def _find_object(objects: Iterable[ObjectDict], object_id: Any) -> Optional[Obje
     return None
 
 
-def _rule_directions(obstacle: ObjectDict, target: ObjectDict) -> List[CandidateDict]:
-    raw = [
-        ("base_positive_x", [1.0, 0.0, 0.0]),
-        ("base_negative_x", [-1.0, 0.0, 0.0]),
-        ("base_positive_y", [0.0, 1.0, 0.0]),
-        ("base_negative_y", [0.0, -1.0, 0.0]),
-    ]
+def _direction_from_to(first: ObjectDict, second: ObjectDict) -> Optional[List[float]]:
+    first_center = get_center(first)
+    second_center = get_center(second)
+    if first_center is None or second_center is None:
+        return None
+    return normalize_xy([first_center[0] - second_center[0], first_center[1] - second_center[1], 0.0])
+
+
+def _perpendicular(direction: Iterable[float], sign: float) -> Optional[List[float]]:
+    normalized = normalize_xy(direction)
+    if normalized is None:
+        return None
+    return normalize_xy([-sign * normalized[1], sign * normalized[0], 0.0])
+
+
+def _fixed_16_directions() -> List[CandidateDict]:
     candidates: List[CandidateDict] = []
-    for source, direction in raw:
-        normalized = normalize_xy(direction)
+    for index in range(16):
+        yaw_rad = math.radians(index * 22.5)
+        direction = normalize_xy([math.cos(yaw_rad), math.sin(yaw_rad), 0.0])
+        if direction is None:
+            continue
+        candidates.append(
+            {
+                "action": "push_away",
+                "source": "rule_16dir_{:03d}deg".format(int(round(math.degrees(yaw_rad)))),
+                "direction_base": direction,
+            }
+        )
+    return candidates
+
+
+def _rule_directions(obstacle: ObjectDict, target: ObjectDict) -> List[CandidateDict]:
+    raw = _fixed_16_directions()
+    away = _direction_from_to(obstacle, target)
+    if away is not None:
+        raw.insert(0, {"action": "push_away", "source": "away_from_target", "direction_base": away})
+        left = _perpendicular(away, 1.0)
+        right = _perpendicular(away, -1.0)
+        if left is not None:
+            raw.insert(1, {"action": "push_away", "source": "tangent_left_from_target", "direction_base": left})
+        if right is not None:
+            raw.insert(2, {"action": "push_away", "source": "tangent_right_from_target", "direction_base": right})
+    candidates: List[CandidateDict] = []
+    for item in raw:
+        normalized = normalize_xy(item.get("direction_base"))
         if normalized is None or any(_same_direction(normalized, item["direction_base"]) for item in candidates):
             continue
-        candidates.append({"action": "push_away", "obstacle_id": obstacle.get("id"), "source": source, "direction_base": normalized})
+        candidates.append(
+            {
+                "action": item.get("action", "push_away"),
+                "obstacle_id": obstacle.get("id"),
+                "source": item.get("source", "rule"),
+                "direction_base": normalized,
+            }
+        )
     return candidates
 
 
