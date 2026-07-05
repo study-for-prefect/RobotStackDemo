@@ -56,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-llm-push-selection", dest="enable_llm_push_selection", action="store_false")
     parser.add_argument("--missing-target-clearance-radius-m", type=float, default=0.10)
     parser.add_argument("--high-block-min-top-z-delta-m", type=float, default=0.01)
+    parser.add_argument("--obstruction-graph-max-depth", type=int, default=3)
+    parser.add_argument("--clearance-nudge-distance-m", type=float, default=0.025)
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--conda-env", default="yolo")
     parser.add_argument("--ros-python", default="/usr/bin/python3")

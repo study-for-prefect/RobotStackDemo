@@ -52,6 +52,7 @@ def main() -> Optional[int]:
         for value in (
             args.ready_only,
             args.gripper_open_only,
+            args.gripper_close_only,
             args.relative_tool_translation_base is not None,
             args.hover_only,
             push_only,
@@ -59,13 +60,15 @@ def main() -> Optional[int]:
     )
     if exclusive_modes > 1:
         raise RuntimeError(
-            "--push-plan-json, --ready-only, --gripper-open-only, "
+            "--push-plan-json, --ready-only, --gripper-open-only, --gripper-close-only, "
             "--relative-tool-translation-base, and --hover-only are mutually exclusive."
         )
     if args.ready_only and not args.ready_joint_pose_json:
         raise RuntimeError("--ready-only requires --ready-joint-pose-json.")
     if args.gripper_open_only and not args.enable_gripper:
         raise RuntimeError("--gripper-open-only requires --enable-gripper.")
+    if args.gripper_close_only and not args.enable_gripper:
+        raise RuntimeError("--gripper-close-only requires --enable-gripper.")
     if args.hover_only:
         if args.hover_target_base is None:
             raise RuntimeError("--hover-only requires --hover-target-base X Y Z.")
@@ -81,6 +84,7 @@ def main() -> Optional[int]:
         if args.ready_only
         or relative_only
         or args.gripper_open_only
+        or args.gripper_close_only
         or args.hover_only
         or push_only
         else load_plan(args.plan_json)
@@ -135,6 +139,13 @@ def main() -> Optional[int]:
                 status = gripper.wait_until_done(timeout=args.gripper_wait)
                 current = gripper.get_position()
                 node.get_logger().info("Recovery gripper open done: status={}, position={}".format(status, current))
+                return 0
+            if args.gripper_close_only:
+                position = gripper_position_for_command(args, "close")
+                gripper.set_position(position)
+                status = gripper.wait_until_done(timeout=args.gripper_wait)
+                current = gripper.get_position()
+                node.get_logger().info("Rigid paddle gripper close done: status={}, position={}".format(status, current))
                 return 0
             if args.open_gripper_at_start:
                 if gripper is None:

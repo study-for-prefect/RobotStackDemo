@@ -14,9 +14,17 @@ CandidateDict = Dict[str, Any]
 def _compact_candidate(candidate: CandidateDict) -> CandidateDict:
     return {
         "candidate_id": candidate.get("candidate_id"),
+        "action": candidate.get("action") or candidate.get("action_type"),
+        "action_type": candidate.get("action_type"),
         "obstacle_id": candidate.get("obstacle_id"),
         "direction_base": candidate.get("direction_base"),
         "distance_m": candidate.get("distance_m"),
+        "selected_grasp_yaw_deg": candidate.get("selected_grasp_yaw_deg"),
+        "safe_place_center_m": candidate.get("safe_place_center_m"),
+        "frontier_depth": candidate.get("frontier_depth"),
+        "utility_score": candidate.get("utility_score"),
+        "easiness_score": candidate.get("easiness_score"),
+        "risk_score": candidate.get("risk_score"),
         "score": candidate.get("score"),
         "reason": candidate.get("reason"),
         "source": candidate.get("source"),

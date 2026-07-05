@@ -107,9 +107,10 @@ def test_automatic_clearance_reobserves_and_exits_to_pick():
     saved = {}
     originals = {
         "relations": push_flow._relations_for_target,
-        "evaluate": push_flow.evaluate_push_candidates,
+        "frontier": push_flow.build_frontier_clearance_plan,
         "run": push_flow.run,
         "command": push_flow.push_clear_command,
+        "close": push_flow.close_gripper_command,
         "observe": push_flow.observe_empty_with_scope,
         "reacquire": push_flow.reacquire_target,
         "mark": push_flow.mark_pushed,
@@ -139,40 +140,37 @@ def test_automatic_clearance_reobserves_and_exits_to_pick():
                 }
             ]
 
-        def fake_evaluate(*_args, **_kwargs):
-            selected_direction = {
+        def fake_frontier(*_args, **_kwargs):
+            candidate = {
                 "candidate_id": "safe_1",
-                "source": "test",
+                "action": "nudge",
+                "action_type": "nudge",
+                "obstacle_id": "obstacle",
+                "target_object_id": "target",
                 "direction_base": [1.0, 0.0, 0.0],
                 "distance_m": 0.025,
-                "feasible": True,
+                "direction_source": "test",
                 "score": 1.0,
+                "utility_score": 1.0,
+                "easiness_score": 0.5,
+                "risk_score": 0.0,
                 "reason": "push_reduces_current_blockers_and_preserves_future_tasks",
+                "push_evaluation": {"direction_base": [1.0, 0.0, 0.0], "distance_m": 0.025},
+                "blocks": ["target"],
             }
-            candidate = dict(selected_direction)
-            candidate.update({"obstacle_id": "obstacle"})
             return {
-                "candidate_results": [
-                    {
-                        "relation": blocking_relation,
-                        "obstacle": obstacle,
-                        "evaluations": [candidate],
-                        "selected_direction": selected_direction,
-                    }
-                ],
-                "selected_result": {
-                    "relation": blocking_relation,
-                    "obstacle": obstacle,
-                    "evaluations": [candidate],
-                    "selected_direction": selected_direction,
-                },
-                "joint_evaluation": {"candidates": [candidate], "selected_candidate": candidate},
+                "obstruction_graph": {"nodes": [], "edges": [], "frontier": []},
+                "obstacle_frontier_candidates": [],
+                "all_clearance_action_candidates": [candidate],
+                "safe_clearance_candidates": [candidate],
+                "selected_clearance_action": candidate,
             }
 
         push_flow._relations_for_target = fake_relations
-        push_flow.evaluate_push_candidates = fake_evaluate
+        push_flow.build_frontier_clearance_plan = fake_frontier
         push_flow.run = lambda _command: None
         push_flow.push_clear_command = lambda _args, _path: ["push"]
+        push_flow.close_gripper_command = lambda _args: ["close"]
         push_flow.observe_empty_with_scope = lambda *_args, **_kwargs: (state_after, {"action_history": []}, {"status": "critical_confirmed"})
         push_flow.reacquire_target = lambda _state, _template: target
         push_flow.mark_pushed = lambda memory, *_args, **_kwargs: memory
@@ -219,9 +217,10 @@ def test_automatic_clearance_reobserves_and_exits_to_pick():
             assert os.path.exists(os.path.join(cycle_dir, "multi_step_clearance_summary.json"))
     finally:
         push_flow._relations_for_target = originals["relations"]
-        push_flow.evaluate_push_candidates = originals["evaluate"]
+        push_flow.build_frontier_clearance_plan = originals["frontier"]
         push_flow.run = originals["run"]
         push_flow.push_clear_command = originals["command"]
+        push_flow.close_gripper_command = originals["close"]
         push_flow.observe_empty_with_scope = originals["observe"]
         push_flow.reacquire_target = originals["reacquire"]
         push_flow.mark_pushed = originals["mark"]

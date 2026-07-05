@@ -30,6 +30,11 @@ def parse_args():
         help="Open the gripper with no arm motion or plan loading, then exit.",
     )
     parser.add_argument(
+        "--gripper-close-only",
+        action="store_true",
+        help="Close the gripper with no arm motion or plan loading, then exit.",
+    )
+    parser.add_argument(
         "--relative-tool-translation-base",
         nargs=3,
         type=float,

@@ -5,21 +5,22 @@ import os
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from robot_scene_pipeline.geometry_relations import build_geometry_relations
-from robot_scene_pipeline.qwen_action_candidate_parser import parse_qwen_action_candidates
 from robot_scene_pipeline.scene_memory import mark_pushed, save_memory, update_from_detections
 from tools.planning.decision_to_execution import write_json
 
-from .commands import capture_empty_observation, load_json, push_clear_command, run
+from .commands import capture_empty_observation, close_gripper_command, load_json, push_clear_command, run
+from .obstruction_frontier import build_frontier_clearance_plan
 from .observation_scope import observe_empty_with_scope
+from .pick import build_offline_pick_plan, pick_command, place_command, plan_envelope
 from .push_context import (
-    observed_push_delta_m, protected_objects, protected_stack_templates, qwen_forbidden_objects,
+    observed_push_delta_m, protected_stack_templates,
 )
 from .push_clearing import (
     build_push_execution_plan, current_protected_structure_ids, evaluate_push_candidates, object_by_string_id,
     pushable_blocking_relations, relation_objects_with_protected_structure,
 )
 from .scene import memory_id_for_scene_object, reacquire_target
-from .push_selection import choose_selected_result, selected_push_from_result
+from .push_selection import choose_clearance_action
 from .target_recovery import missing_target_clearance_relations, state_with_missing_target
 
 def _relations_for_target(
@@ -91,6 +92,272 @@ def _raise_if_non_push_action(analysis: dict, has_push_candidates: bool = False)
                 analysis.get("blocked_by_placed_structure"),
             )
         )
+
+
+def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
+    write_json(os.path.join(cycle_dir, "obstruction_graph.json"), frontier_plan.get("obstruction_graph", {}))
+    write_json(
+        os.path.join(cycle_dir, "obstacle_frontier_candidates.json"),
+        frontier_plan.get("obstacle_frontier_candidates", []),
+    )
+    write_json(
+        os.path.join(cycle_dir, "all_clearance_action_candidates.json"),
+        frontier_plan.get("all_clearance_action_candidates", []),
+    )
+    write_json(
+        os.path.join(cycle_dir, "safe_clearance_candidates.json"),
+        frontier_plan.get("safe_clearance_candidates", []),
+    )
+    write_json(
+        os.path.join(cycle_dir, "selected_clearance_action.json"),
+        frontier_plan.get("selected_clearance_action") or {"action": "no_feasible_clearance_action"},
+    )
+
+
+def _build_pick_away_place_plan(current_state: dict, obstacle: dict, selected_action: dict, args: Any) -> dict:
+    safe_place = selected_action.get("safe_place_center_m")
+    if not isinstance(safe_place, list) or len(safe_place) < 3:
+        raise RuntimeError("pick_away selected action is missing safe_place_center_m.")
+    release_z = float(safe_place[2]) + float(getattr(args, "release_gap_m", 0.010))
+    step = {
+        "step": 1,
+        "action": "place_relative",
+        "object_id": obstacle.get("id"),
+        "object_label": obstacle.get("label"),
+        "reference_object_id": None,
+        "reference_label": None,
+        "relative_position": "frontier_safe_place",
+        "reason": "Place cleared obstacle at a safe table location.",
+        "status": "planned",
+        "coordinate_frame": "base_frame",
+        "coordinate_source": "obstruction_frontier_safe_place",
+        "target_position_m": [round(float(safe_place[0]), 5), round(float(safe_place[1]), 5), round(release_z, 5)],
+        "approach_position_m": [
+            round(float(safe_place[0]), 5),
+            round(float(safe_place[1]), 5),
+            round(release_z + float(args.approach_height_m), 5),
+        ],
+        "target_yaw_deg": float(selected_action.get("selected_grasp_yaw_deg") or 0.0),
+        "chosen_grasp_yaw_deg": float(selected_action.get("selected_grasp_yaw_deg") or 0.0),
+        "target_yaw_valid": True,
+        "exact_tool_yaw_required": True,
+        "yaw_frame": "base_link",
+        "yaw_source": "obstruction_frontier_pick_away",
+    }
+    return plan_envelope(current_state, step)
+
+
+def _execute_pick_away_and_reobserve(
+    args: Any,
+    cycle_dir: str,
+    runtime: Dict[str, Any],
+    memory: dict,
+    current_state: dict,
+    held_template: dict,
+    selected_action: dict,
+    base_id: Any,
+    previous_locked_stack: dict,
+    base_template: Optional[dict],
+    step_index: int,
+) -> Tuple[dict, dict, dict]:
+    obstacle = object_by_string_id(current_state.get("objects", []), selected_action.get("obstacle_id"))
+    obstacle_for_pick = copy.deepcopy(obstacle)
+    obstacle_for_pick["selected_grasp_yaw_deg"] = selected_action.get("selected_grasp_yaw_deg")
+    obstacle_for_pick["grasp_yaw_source"] = "obstruction_frontier_pick_away"
+    pick_plan_path = os.path.join(cycle_dir, "pick_away_step_{:02d}_pick_plan.json".format(step_index))
+    place_plan_path = os.path.join(cycle_dir, "pick_away_step_{:02d}_place_plan.json".format(step_index))
+    build_offline_pick_plan(current_state, obstacle_for_pick, pick_plan_path, args)
+    place_plan = _build_pick_away_place_plan(current_state, obstacle_for_pick, selected_action, args)
+    write_json(place_plan_path, place_plan)
+    write_json(
+        os.path.join(cycle_dir, "clearance_verification.json"),
+        {
+            "status": "pending_moveit_preflight",
+            "action": "pick_away",
+            "pick_plan": pick_plan_path,
+            "place_plan": place_plan_path,
+            "note": "MoveIt path planning is performed before real pick_away and place execution.",
+        },
+    )
+    if not (args.execute and args.execute_push_clearing):
+        write_json(
+            os.path.join(cycle_dir, "clearance_step_{:02d}_result.json".format(step_index)),
+            {
+                "action": "pick_away",
+                "result": "dry_run_only",
+                "selected_clearance_action": selected_action,
+            },
+        )
+        return current_state, memory, held_template
+
+    runtime["current_stage"] = "pick_away_obstacle_step_{:02d}".format(step_index)
+    runtime["held_object_id"] = obstacle.get("id")
+    run(pick_command(args, pick_plan_path))
+    runtime["current_stage"] = "place_away_obstacle_step_{:02d}".format(step_index)
+    run(place_command(args, place_plan_path))
+    runtime["held_object_id"] = None
+    write_json(
+        os.path.join(cycle_dir, "clearance_verification.json"),
+        {
+            "status": "passed_and_executed",
+            "action": "pick_away",
+            "pick_plan": pick_plan_path,
+            "place_plan": place_plan_path,
+        },
+    )
+    runtime["current_stage"] = "scoped_observation_after_pick_away"
+    observed_state, memory, post_observation = observe_empty_with_scope(
+        args,
+        os.path.join(cycle_dir, "observation_after_pick_away"),
+        runtime,
+        memory,
+        critical_templates=(
+            [held_template]
+            + protected_stack_templates(
+                current_state,
+                base_id,
+                previous_locked_stack,
+                base_template=base_template,
+            )
+        ),
+        noncritical_templates=[obstacle],
+        scope_name="after_pick_away_clearance",
+        description="Post-pick-away scoped observation",
+    )
+    if observed_state is None:
+        raise RuntimeError("pick_away completed but no live observation was produced afterward.")
+    save_memory(memory, args.memory_json)
+    held_object = copy.deepcopy(reacquire_target(observed_state, held_template))
+    return observed_state, memory, held_object
+
+
+def _selected_push_from_clearance_action(selected_action: dict) -> dict:
+    return {
+        "type": "should_push_away",
+        "subject": selected_action.get("obstacle_id"),
+        "object": selected_action.get("blocks", [selected_action.get("target_object_id")])[0],
+        "source": "obstruction_frontier",
+        "reason": selected_action.get("reason"),
+        "candidate_id": selected_action.get("candidate_id"),
+        "direction_base": selected_action.get("direction_base"),
+        "distance_m": selected_action.get("distance_m"),
+        "direction_source": selected_action.get("direction_source"),
+        "direction_score": selected_action.get("score"),
+    }
+
+
+def _execute_nudge_and_reobserve(
+    args: Any,
+    cycle_dir: str,
+    runtime: Dict[str, Any],
+    memory: dict,
+    current_state: dict,
+    held_template: dict,
+    held_object: dict,
+    selected_action: dict,
+    base_id: Any,
+    previous_locked_stack: dict,
+    base_template: Optional[dict],
+    step_index: int,
+) -> Tuple[dict, dict, dict]:
+    selected_push = _selected_push_from_clearance_action(selected_action)
+    obstacle = object_by_string_id(current_state.get("objects", []), selected_push["subject"])
+    obstacle_memory_id = memory_id_for_scene_object(memory, obstacle)
+    push_execution_plan = build_push_execution_plan(
+        current_state,
+        held_object,
+        selected_push,
+        args,
+        direction_evaluations=[selected_action.get("push_evaluation", {})],
+    )
+    push_execution_plan["action_type"] = "nudge"
+    push_execution_plan_path = os.path.join(cycle_dir, "push_execution_plan.json")
+    write_json(push_execution_plan_path, push_execution_plan)
+    write_json(
+        os.path.join(cycle_dir, "clearance_verification.json"),
+        {
+            "status": "pending_moveit_preflight" if (args.execute and args.execute_push_clearing) else "not_requested_dry_run",
+            "action": "nudge",
+            "push_plan": push_execution_plan_path,
+            "gripper_policy": "close_before_push_use_as_rigid_paddle",
+        },
+    )
+    if not (args.execute and args.execute_push_clearing):
+        write_json(os.path.join(cycle_dir, "scene_state_after_action.json"), current_state)
+        write_json(
+            os.path.join(cycle_dir, "clearance_step_{:02d}_result.json".format(step_index)),
+            {
+                "action": "nudge",
+                "result": "dry_run_only",
+                "selected_clearance_action": selected_action,
+                "post_push_requirement": "reobserve_and_rerun_clearance_loop",
+            },
+        )
+        return current_state, memory, held_object
+
+    runtime["current_stage"] = "close_gripper_as_rigid_push_paddle_step_{:02d}".format(step_index)
+    run(close_gripper_command(args))
+    runtime["current_stage"] = "nudge_clearing_before_pick_step_{:02d}".format(step_index)
+    run(push_clear_command(args, push_execution_plan_path))
+    push_execution_plan["execution_status"] = "executed"
+    write_json(push_execution_plan_path, push_execution_plan)
+    write_json(
+        os.path.join(cycle_dir, "clearance_verification.json"),
+        {
+            "status": "passed_and_executed",
+            "action": "nudge",
+            "source": "moveit_plan_preview_push_preflight",
+            "gripper_policy": "closed_rigid_paddle",
+        },
+    )
+    runtime["current_stage"] = "scoped_observation_after_nudge_clearing"
+    pushed_state, memory, post_observation = observe_empty_with_scope(
+        args,
+        os.path.join(cycle_dir, "observation_after_nudge"),
+        runtime,
+        memory,
+        critical_templates=(
+            [held_template]
+            + protected_stack_templates(
+                current_state,
+                base_id,
+                previous_locked_stack,
+                base_template=base_template,
+            )
+        ),
+        noncritical_templates=[obstacle],
+        scope_name="after_nudge_clearing",
+        description="Post-nudge scoped observation",
+    )
+    if pushed_state is None:
+        raise RuntimeError("Nudge clearing completed but no live observation was produced afterward.")
+    observed_delta_m = observed_push_delta_m(obstacle, pushed_state)
+    if obstacle_memory_id is not None:
+        memory = mark_pushed(
+            memory,
+            obstacle_memory_id,
+            selected_push["direction_base"],
+            selected_push.get("distance_m", args.push_clearing_distance_m),
+            reason=selected_push.get("reason") or "frontier_nudge_clearance",
+            result="success",
+            observed_delta_m=observed_delta_m,
+        )
+    save_memory(memory, args.memory_json)
+    try:
+        held_object = copy.deepcopy(reacquire_target(pushed_state, held_template))
+    except RuntimeError:
+        pushed_state, held_object = state_with_missing_target(pushed_state, held_template)
+    write_json(
+        os.path.join(cycle_dir, "clearance_step_{:02d}_result.json".format(step_index)),
+        {
+            "action": "nudge",
+            "result": "executed_and_reobserved",
+            "selected_clearance_action": selected_action,
+            "post_observation": post_observation,
+            "observed_delta_m": observed_delta_m,
+        },
+    )
+    return pushed_state, memory, held_object
 
 
 def _manual_clear_and_reobserve(
@@ -280,7 +547,7 @@ def handle_push_clearing_before_pick(
         os.path.join(cycle_dir, "grasp_yaw_analysis_before_action.json"),
         analysis,
     )
-    _raise_if_non_push_action(analysis, has_push_candidates=bool(push_candidates))
+    _raise_if_non_push_action(analysis, has_push_candidates=True)
     if analysis.get("action") == "pick" and analysis.get("grasp_feasible"):
         held_object = _apply_selected_grasp_to_target(held_object, analysis)
         write_json(
@@ -295,388 +562,104 @@ def handle_push_clearing_before_pick(
                 "multi_step_status": "target_graspable",
             },
         )
-        return current_state, memory, held_object
-    if not push_candidates:
-        write_json(
-            os.path.join(cycle_dir, "selected_action.json"),
-            {
-                "action": "reobserve",
-                "reason": "no_pushable_blocking_relation",
-                "grasp_action": analysis.get("action"),
-                "clearance_step_index": step_index,
-                "multi_step_status": "no_candidate",
-            },
-        )
-        return current_state, memory, held_object
-
-    qwen_path = os.path.join(cycle_dir, "qwen_candidate_actions.json")
-    qwen_report = parse_qwen_action_candidates(qwen_path)
-    if os.path.exists(qwen_path):
-        write_json(os.path.join(cycle_dir, "qwen_candidate_actions_parsed.json"), qwen_report)
-    else:
-        write_json(qwen_path, qwen_report)
-    protected = protected_objects(
-        current_state,
-        base_id,
-        previous_locked_stack,
-        protected_object_ids=protected_ids,
-    )
-    protected.extend(qwen_forbidden_objects(current_state, qwen_report))
-    direction_assessment = evaluate_push_candidates(
-        current_state,
-        held_object,
-        push_candidates,
-        distance_m=args.push_clearing_distance_m,
-        table_bounds=current_state.get("table_bounds"),
-        qwen_candidates=qwen_report.get("candidate_actions", []),
-        future_targets=[],
-        future_place_regions=future_place_regions or [],
-        protected_objects=protected,
-        memory=memory,
-        lift_m=args.push_clearing_lift_m,
-        contact_z_offset_m=args.push_clearing_contact_z_offset_m,
-        gripper_outer_width_m=args.grasp_gripper_outer_width_m,
-        gripper_inner_width_m=args.grasp_gripper_inner_width_m,
-        grasp_approach_length_m=args.grasp_approach_length_m,
-        push_tool_width_m=args.push_tool_width_m,
-        push_tool_safety_margin_m=args.push_tool_safety_margin_m,
-    )
-    write_json(
-        os.path.join(cycle_dir, "push_grasp_joint_candidates.json"),
-        direction_assessment.get("joint_evaluation", {}),
-    )
-    write_json(
-        os.path.join(cycle_dir, "clearance_step_{:02d}_candidates.json".format(step_index)),
-        direction_assessment.get("joint_evaluation", {}),
-    )
-    selected_result, llm_selection = choose_selected_result(
-        args,
-        cycle_dir,
-        held_object,
-        direction_assessment,
-        memory,
-        step_index,
-    )
-    selected_push = selected_push_from_result(selected_result)
-
-    write_json(
-        os.path.join(cycle_dir, "push_plan_before_pick.json"),
-        {
-            "schema_version": "push_plan_v1",
-            "execution_status": "dry_run_only",
-            "target_object_id": held_object.get("id"),
-            "target_label": held_object.get("label"),
-            "push_candidates": push_candidates,
-            "selected_push": selected_push,
-            "direction_assessment": direction_assessment,
-            "llm_selection": llm_selection,
-            "clearance_step_index": step_index,
-            "note": (
-                "Geometry relation suggests clearing obstacle before pick. "
-                "Automatic execution requires one feasible evaluated direction."
-            ),
-        },
-    )
-    rejected = [
-        {
-            "obstacle_id": item.get("obstacle_id"),
-            "direction_base": item.get("direction_base"),
-            "reason": item.get("reason"),
-            "score": item.get("score"),
-            "candidate_id": item.get("candidate_id"),
-        }
-        for item in direction_assessment.get("joint_evaluation", {}).get("candidates", [])
-        if not item.get("feasible")
-    ]
-
-    if selected_push is None:
-        write_json(
-            os.path.join(cycle_dir, "selected_action.json"),
-            {
-                "action": "replan_required",
-                "reason": "all_push_directions_unsafe" if push_candidates else "no_pushable_blocking_relation",
-                "rejected_candidates": rejected,
-                "clearance_step_index": step_index,
-                "selection_source": llm_selection.get("selection_source"),
-                "multi_step_status": "no_feasible_candidate",
-            },
-        )
-        write_json(
-            os.path.join(cycle_dir, "moveit_verification.json"),
-            {"status": "not_requested", "reason": "no_feasible_joint_push_candidate"},
-        )
-        write_json(os.path.join(cycle_dir, "scene_state_after_action.json"), current_state)
-        write_json(
-            os.path.join(cycle_dir, "action_result.json"),
-            {
-                "action": "replan_required",
-                "result": "not_selected",
-                "reason": "all_push_directions_unsafe" if push_candidates else "no_pushable_blocking_relation",
-                "clearance_step_index": step_index,
-            },
-        )
-        write_json(
-            os.path.join(cycle_dir, "manual_clearance_required.json"),
-            {
-                "schema_version": "manual_clearance_request_v1",
-                "execution_status": "dry_run_only",
-                "reason": "no_feasible_automatic_push_direction",
-                "target_object_id": held_object.get("id"),
-                "target_label": held_object.get("label"),
-                "direction_assessment": direction_assessment,
-            },
-        )
-        write_json(
-            os.path.join(cycle_dir, "clearance_step_{:02d}_result.json".format(step_index)),
-            {
-                "action": "replan_required",
-                "result": "not_selected",
-                "reason": "all_push_directions_unsafe" if push_candidates else "no_pushable_blocking_relation",
-                "clearance_step_index": step_index,
-            },
-        )
-        print(
-            "No feasible automatic push direction; manual clearing is required.",
-            flush=True,
-        )
-        if args.execute and args.execute_push_clearing:
-            return _manual_clear_and_reobserve(
-                args,
-                cycle_dir,
-                runtime,
-                memory,
-                held_template,
-                base_id,
-                previous_locked_stack,
-                "no_feasible_automatic_push_direction",
-                direction_assessment,
-                base_template=base_template,
-                future_targets=future_targets,
-                future_place_regions=future_place_regions,
-                automatic_push_attempt=automatic_push_attempt,
-            )
-        return current_state, memory, held_object
-
-    obstacle = object_by_string_id(
-        current_state.get("objects", []),
-        selected_push["subject"],
-    )
-    obstacle_memory_id = memory_id_for_scene_object(memory, obstacle)
-    push_execution_plan = build_push_execution_plan(
-        current_state,
-        held_object,
-        selected_push,
-        args,
-        direction_evaluations=selected_result["evaluations"],
-    )
-    push_execution_plan_path = os.path.join(cycle_dir, "push_execution_plan.json")
-    write_json(push_execution_plan_path, push_execution_plan)
-    write_json(
-        os.path.join(cycle_dir, "selected_action.json"),
-        {
-            "action": "short_safe_push",
-            "reason": selected_push.get("reason"),
-            "selected_push": selected_push,
-            "rejected_candidates": rejected,
-            "clearance_step_index": step_index,
-            "selection_source": llm_selection.get("selection_source"),
-            "multi_step_status": "selected_one_step",
-            "post_push_requirement": "reobserve_and_rerun_clearance_loop",
-        },
-    )
-    write_json(
-        os.path.join(cycle_dir, "moveit_verification.json"),
-        {
-            "status": "pending_execute_mode" if (args.execute and args.execute_push_clearing) else "not_requested_dry_run",
-            "reason": "MoveIt verification is performed by tools/robot/moveit_plan_preview.py before execution.",
-            "max_pre_rotate_joint_delta": getattr(args, "max_pre_rotate_joint_delta", None),
-        },
-    )
-    print(
-        "Geometry relation suggests push before pick: "
-        "obstacle={} target={} direction={} source={} distance={}".format(
-            selected_push.get("subject"),
-            selected_push.get("object"),
-            selected_push.get("direction_base"),
-            selected_push.get("direction_source"),
-            selected_push.get("distance_m"),
-        ),
-        flush=True,
-    )
-    if not (args.execute and args.execute_push_clearing):
-        write_json(os.path.join(cycle_dir, "scene_state_after_action.json"), current_state)
-        write_json(
-            os.path.join(cycle_dir, "action_result.json"),
-            {"action": "push_clearing", "result": "dry_run_only", "selected_push": selected_push},
-        )
-        write_json(
-            os.path.join(cycle_dir, "clearance_step_{:02d}_result.json".format(step_index)),
-            {
-                "action": "push_clearing",
-                "result": "dry_run_only",
-                "selected_push": selected_push,
-                "clearance_step_index": step_index,
-                "selection_source": llm_selection.get("selection_source"),
-                "post_push_requirement": "reobserve_and_rerun_clearance_loop",
-            },
-        )
-        return current_state, memory, held_object
-
-    runtime["current_stage"] = "push_clearing_before_pick_step_{:02d}".format(step_index)
-    run(push_clear_command(args, push_execution_plan_path))
-    push_execution_plan["execution_status"] = "executed"
-    write_json(push_execution_plan_path, push_execution_plan)
-    write_json(
-        os.path.join(cycle_dir, "moveit_verification.json"),
-        {"status": "passed_and_executed", "source": "moveit_plan_preview_push_preflight"},
-    )
-
-    runtime["current_stage"] = "scoped_observation_after_push_clearing"
-    pushed_state, memory, post_push_observation = observe_empty_with_scope(
-        args,
-        os.path.join(cycle_dir, "observation_after_push"),
-        runtime,
-        memory,
-        critical_templates=(
-            [held_template]
-            + protected_stack_templates(
-                current_state,
-                base_id,
-                previous_locked_stack,
-                base_template=base_template,
-            )
-        ),
-        noncritical_templates=[obstacle],
-        scope_name="after_push_clearing",
-        description="Post-push scoped observation",
-    )
-    if pushed_state is None:
-        raise RuntimeError(
-            "Push clearing completed but no live observation was produced afterward."
-        )
-    current_state = pushed_state
-    write_json(os.path.join(cycle_dir, "scene_state_after_action.json"), current_state)
-    observed_delta_m = observed_push_delta_m(obstacle, current_state)
-    if obstacle_memory_id is not None:
-        memory = mark_pushed(
-            memory,
-            obstacle_memory_id,
-            selected_push["direction_base"],
-            selected_push.get("distance_m", args.push_clearing_distance_m),
-            reason=selected_push.get("reason") or "clear_obstacle",
-            result="success",
-            observed_delta_m=observed_delta_m,
-        )
-    save_memory(memory, args.memory_json)
-    try:
-        held_object = copy.deepcopy(reacquire_target(current_state, held_template))
-    except RuntimeError:
-        current_state, held_object = state_with_missing_target(current_state, held_template)
-    relations_after_push = _relations_for_target(
-        current_state,
-        held_object,
-        base_id,
-        previous_locked_stack,
-        args,
-        base_template=base_template,
-    )
-    write_json(
-        os.path.join(cycle_dir, "geometry_relations_after_push.json"),
-        relations_after_push,
-    )
-    after_analysis = _target_grasp_analysis(relations_after_push, held_object["id"])
-    write_json(
-        os.path.join(cycle_dir, "grasp_yaw_analysis_after_push.json"),
-        after_analysis,
-    )
-    write_json(
-        os.path.join(cycle_dir, "action_result.json"),
-        {
-            "action": "push_clearing",
-            "result": "executed_and_reobserved",
-            "clearance_step_index": step_index,
-            "post_push_observation": post_push_observation,
-            "observed_delta_m": observed_delta_m,
-            "post_push_grasp_action": after_analysis.get("action"),
-            "post_push_selected_grasp_yaw_deg": after_analysis.get("selected_grasp_yaw_deg"),
-        },
-    )
-    write_json(
-        os.path.join(cycle_dir, "clearance_step_{:02d}_result.json".format(step_index)),
-        {
-            "action": "push_clearing",
-            "result": "executed_and_reobserved",
-            "clearance_step_index": step_index,
-            "selected_push": selected_push,
-            "selection_source": llm_selection.get("selection_source"),
-            "post_push_observation": post_push_observation,
-            "observed_delta_m": observed_delta_m,
-            "post_push_grasp_action": after_analysis.get("action"),
-        },
-    )
-    protected_ids_after_push = current_protected_structure_ids(
-        current_state.get("objects", []),
-        base_id,
-        previous_locked_stack,
-        base_template=base_template,
-    )
-    remaining_push = pushable_blocking_relations(
-        current_state,
-        relations_after_push,
-        held_object["id"],
-        base_id,
-        previous_locked_stack,
-        protected_object_ids=protected_ids_after_push,
-    )
-    if after_analysis.get("action") == "pick" and after_analysis.get("grasp_feasible"):
-        held_object = _apply_selected_grasp_to_target(held_object, after_analysis)
         write_json(
             os.path.join(cycle_dir, "multi_step_clearance_summary.json"),
             {
                 "schema_version": "multi_step_clearance_summary_v1",
-                "status": "target_graspable_after_clearance",
-                "steps_completed": step_index,
+                "status": "target_graspable",
+                "steps_completed": max(0, step_index - 1),
                 "target_object_id": held_object.get("id"),
-                "selected_grasp_yaw_deg": after_analysis.get("selected_grasp_yaw_deg"),
+                "selected_grasp_yaw_deg": analysis.get("selected_grasp_yaw_deg"),
             },
         )
-    if remaining_push:
-        max_attempts = max(1, int(getattr(args, "max_automatic_push_clearing_attempts", 2)))
-        if automatic_push_attempt + 1 < max_attempts:
-            write_json(
-                os.path.join(cycle_dir, "automatic_push_replan_{:02d}.json".format(automatic_push_attempt + 1)),
-                {
-                    "reason": "target_still_blocked_after_automatic_push",
-                    "attempt_completed": automatic_push_attempt + 1,
-                    "max_attempts": max_attempts,
-                    "remaining_push_relations": remaining_push,
-                },
-            )
-            return handle_push_clearing_before_pick(
-                args,
-                cycle_dir,
-                runtime,
-                memory,
-                current_state,
-                held_template,
-                held_object,
-                base_id,
-                previous_locked_stack,
-                base_template=base_template,
-                future_targets=future_targets,
-                future_place_regions=future_place_regions,
-                automatic_push_attempt=automatic_push_attempt + 1,
-            )
+        return current_state, memory, held_object
+
+    frontier_plan = build_frontier_clearance_plan(
+        current_state,
+        held_object,
+        protected_ids,
+        args,
+        future_place_regions=future_place_regions or [],
+        evaluate_push_fn=evaluate_push_candidates,
+    )
+    selected_clearance, llm_selection = choose_clearance_action(
+        args,
+        cycle_dir,
+        held_object,
+        frontier_plan.get("safe_clearance_candidates", []),
+        memory,
+        step_index,
+    )
+    frontier_plan["selected_clearance_action"] = selected_clearance
+    frontier_plan["llm_selection"] = llm_selection
+    _write_frontier_debug_files(cycle_dir, frontier_plan)
+
+    if selected_clearance is None:
         write_json(
             os.path.join(cycle_dir, "selected_action.json"),
             {
                 "action": "replan_required",
-                "reason": "multi_step_clearance_exhausted",
+                "reason": "no_feasible_clearance_action",
+                "grasp_action": analysis.get("action"),
                 "clearance_step_index": step_index,
-                "multi_step_status": "multi_step_clearance_exhausted",
-                "remaining_push_relations": remaining_push,
+                "multi_step_status": "no_feasible_clearance_action",
             },
         )
+        write_json(
+            os.path.join(cycle_dir, "clearance_verification.json"),
+            {
+                "status": "not_requested",
+                "reason": "no_feasible_clearance_action",
+                "safe_candidate_count": 0,
+            },
+        )
+        return current_state, memory, held_object
+
+    write_json(
+        os.path.join(cycle_dir, "selected_action.json"),
+        {
+            "action": selected_clearance.get("action"),
+            "reason": selected_clearance.get("reason"),
+            "selected_clearance_action": selected_clearance,
+            "clearance_step_index": step_index,
+            "selection_source": llm_selection.get("selection_source"),
+            "multi_step_status": "selected_one_frontier_action",
+            "post_action_requirement": "reobserve_and_rebuild_obstruction_graph",
+        },
+    )
+    if selected_clearance.get("action_type") == "pick_away":
+        next_state, memory, next_held = _execute_pick_away_and_reobserve(
+            args,
+            cycle_dir,
+            runtime,
+            memory,
+            current_state,
+            held_template,
+            selected_clearance,
+            base_id,
+            previous_locked_stack,
+            base_template,
+            step_index,
+        )
+    else:
+        next_state, memory, next_held = _execute_nudge_and_reobserve(
+            args,
+            cycle_dir,
+            runtime,
+            memory,
+            current_state,
+            held_template,
+            held_object,
+            selected_clearance,
+            base_id,
+            previous_locked_stack,
+            base_template,
+            step_index,
+        )
+    if not (args.execute and args.execute_push_clearing):
+        return next_state, memory, next_held
+    max_attempts = max(1, int(getattr(args, "max_automatic_push_clearing_attempts", 2)))
+    if automatic_push_attempt + 1 >= max_attempts:
         write_json(
             os.path.join(cycle_dir, "multi_step_clearance_summary.json"),
             {
@@ -684,17 +667,21 @@ def handle_push_clearing_before_pick(
                 "status": "multi_step_clearance_exhausted",
                 "steps_completed": step_index,
                 "max_attempts": max_attempts,
-                "remaining_push_relations": remaining_push,
             },
         )
-        return current_state, memory, held_object
-    write_json(
-        os.path.join(cycle_dir, "multi_step_clearance_summary.json"),
-        {
-            "schema_version": "multi_step_clearance_summary_v1",
-            "status": "no_remaining_push_relations",
-            "steps_completed": step_index,
-            "post_push_grasp_action": after_analysis.get("action"),
-        },
+        return next_state, memory, next_held
+    return handle_push_clearing_before_pick(
+        args,
+        cycle_dir,
+        runtime,
+        memory,
+        next_state,
+        held_template,
+        next_held,
+        base_id,
+        previous_locked_stack,
+        base_template=base_template,
+        future_targets=future_targets,
+        future_place_regions=future_place_regions,
+        automatic_push_attempt=automatic_push_attempt + 1,
     )
-    return current_state, memory, held_object

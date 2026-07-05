@@ -96,6 +96,17 @@ def open_gripper_command(args):
     return command
 
 
+def close_gripper_command(args):
+    command = [
+        args.ros_python, "tools/robot/moveit_plan_preview.py",
+        "--gripper-close-only", "--enable-gripper",
+        "--gripper-port", args.gripper_port, "--execute",
+    ]
+    if args.yes:
+        command.append("--yes")
+    return command
+
+
 def init_ready_pose(args):
     """Put the empty-gripper robot in the configured observation pose."""
     print("\ninit_ready_pose: moving to ready pose", flush=True)

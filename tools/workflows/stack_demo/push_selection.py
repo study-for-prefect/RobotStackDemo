@@ -63,3 +63,36 @@ def selected_push_from_result(selected_result: Optional[dict]) -> Optional[Dict[
     selected_push["direction_score"] = selected_direction["score"]
     selected_push["reason"] = selected_direction.get("reason") or selected_push.get("reason")
     return selected_push
+
+
+def choose_clearance_action(
+    args: Any,
+    cycle_dir: str,
+    held_object: dict,
+    safe_candidates: list,
+    memory: dict,
+    step_index: int,
+) -> Tuple[Optional[dict], dict]:
+    llm_report = select_safe_push_candidate(
+        args,
+        getattr(args, "instruction", ""),
+        held_object,
+        {"candidates": safe_candidates},
+        step_index,
+        history=push_history(memory),
+    )
+    write_json(
+        os.path.join(cycle_dir, "clearance_step_{:02d}_llm_selection.json".format(step_index)),
+        llm_report,
+    )
+    selected = None
+    if llm_report.get("selection_status") == "selected":
+        selected_id = str(llm_report.get("selected_candidate_id"))
+        selected = next(
+            (candidate for candidate in safe_candidates if str(candidate.get("candidate_id")) == selected_id),
+            None,
+        )
+    if selected is None and safe_candidates:
+        selected = safe_candidates[0]
+        llm_report["selection_source"] = "geometry_score_fallback"
+    return selected, llm_report
