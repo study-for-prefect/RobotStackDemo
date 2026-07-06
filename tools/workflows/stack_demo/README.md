@@ -154,17 +154,25 @@ camera-frame XY compensation.
 5. graph 从直接阻挡目标抓取的障碍开始；若障碍本身不可操作，继续展开阻挡该障碍的二级/三级障碍。
 6. 未标注 `role/state` 的当前检测物体按松散可移动物体评估；`base`、
    `structure`、`locked`、`placed` 或 `pushable=false` 的物体仍然不可推。
-7. 如果 frontier 中没有任何安全动作，才输出 `no_feasible_clearance_action`。
+7. 如果目标 `all_grasps_blocked=true` 且没有可执行清障动作，写入
+   `no_feasible_clearance_action` / `failure_state`，当前目标进入
+   `manual_required`/`replan`，不会继续生成 pick plan，也不会退回
+   `min_area_rect` yaw 硬抓。
 
 Frontier clearing 的候选动作统一评分：
 
 - `pick_away`: 障碍物自身有可抓 yaw 时优先生成，安全放置点必须在桌面边界内且避开目标/受保护结构。
 - `nudge`: 障碍物不可抓或 pick_away 不安全时，才生成小距离拨动候选，默认距离 `0.025 m`。
-- `utility`: 是否直接挡住目标、挡住多个对象、移除后是否增加目标可抓 yaw。
+- `direct_target_gain`: 清除后目标可抓 yaw 数量增加，或目标变得可抓。
+- `enabling_gain`: 清除后关键 blocker 变得可抓、可推，或释放其接近/扫掠通道。
+- `free_space_gain`: 清除后产生新的局部空隙、安全接近通道或临时落点。
 - `easiness`: 障碍物自身可抓 yaw 数量、几何评分、操作路径复杂度代理。
 - `risk`: 间接层级、碰撞/扫掠/未来放置风险。风险是硬过滤之外的排序惩罚，不能绕过安全检查。
 
-最终按 `utility + easiness - risk` 排序。清障目标不是清空桌面，而是制造当前目标的抓取空间；如果某动作不能增加目标可抓 yaw，也不能释放关键通道，它会被降权。
+最终按 `utility + easiness - risk` 排序。`utility` 由上面三类收益合成。
+清障目标不是清空桌面，而是制造当前目标的抓取空间；`target_yaw_gain=0`
+的动作只有在 `enabling_gain` 或 `free_space_gain` 可验证时才会作为多步清障候选。
+否则它只能留在全集里作为低优先级 exploratory candidate，不能进入可执行安全候选。
 
 Hardware execution remains separately opt-in:
 
@@ -176,18 +184,25 @@ python3 tools/workflows/stack_demo_pipeline.py \
 ```
 
 Without both flags, selected clearance actions are recorded only. Real nudge
-actions are preflighted through MoveIt and refused when they would damage the
-locked base, placed stack, target grasp path, table bounds, or future place
-regions. Before a real nudge, the gripper is closed and used as a rigid paddle;
-the next ready/observation stage opens it again. Real `pick_away` actions build
-an obstacle pick plan plus a safe-place plan, and both are sent through the
-existing MoveIt pick/place preview before motion.
+actions first build a push execution plan and run MoveIt preflight for every
+stage: `pre_push`, `contact`, `push_end`, and `retreat`. Only after that
+preflight succeeds does the workflow close the gripper and use it as a rigid
+paddle. If preflight fails, the gripper stays open, no arm motion is executed,
+the candidate is marked `moveit_feasible=false`, and the next candidate is tried.
+Real `pick_away` actions build an obstacle pick plan plus a safe-place plan, and
+both are sent through the existing MoveIt pick/place preview before motion.
 
-Each evaluated action receives a stable `candidate_id`. When LLM selection is
-enabled, the LLM receives only safe candidates that already passed code-side
-filters. The LLM may choose one `candidate_id`; it cannot introduce a new
-direction, obstacle, or action. If the LLM is unavailable or returns an
-unknown/unsafe id, the workflow falls back to the highest code score.
+Each evaluated action receives a stable `candidate_id`.
+`all_clearance_action_candidates.json` contains the full scored set.
+`preflight_clearance_candidates.json` contains geometry-feasible, task-effective
+candidates that still require MoveIt preflight. `safe_clearance_candidates.json`
+contains only executable candidates with
+`geometry_feasible=true`, `moveit_feasible=true`, `task_effective=true`, and
+`protected_structure_safe=true`. When LLM selection is enabled, the LLM receives
+only code-generated candidate ids from the current candidate set. It may choose
+one `candidate_id`; it cannot introduce a new direction, obstacle, or action. If
+the LLM is unavailable or returns an unknown/unsafe id, the workflow falls back
+to the highest code score.
 
 LLM push selection is enabled by default and can be disabled explicitly:
 
@@ -217,6 +232,7 @@ Each step writes its own reports:
 cycle_*/obstruction_graph.json
 cycle_*/obstacle_frontier_candidates.json
 cycle_*/all_clearance_action_candidates.json
+cycle_*/preflight_clearance_candidates.json
 cycle_*/safe_clearance_candidates.json
 cycle_*/selected_clearance_action.json
 cycle_*/clearance_verification.json

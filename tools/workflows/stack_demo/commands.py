@@ -227,6 +227,27 @@ def push_clear_command(args, push_plan_path):
     return command
 
 
+def push_preflight_command(args, push_plan_path):
+    command = [
+        args.ros_python,
+        "tools/robot/moveit_plan_preview.py",
+        "--push-plan-json",
+        push_plan_path,
+        "--tcp-offset-tool",
+        *[str(value) for value in getattr(args, "tcp_offset_tool", [0.0, 0.0, 0.0])],
+        "--velocity",
+        str(getattr(args, "velocity", 0.20)),
+        "--acceleration",
+        str(getattr(args, "acceleration", 0.20)),
+        "--tf-timeout",
+        str(getattr(args, "tf_timeout", 8.0)),
+        *moveit_frame_args(args),
+    ]
+    if args.yes:
+        command.append("--yes")
+    return command
+
+
 def retry_close_observation(
     args,
     output_dir,

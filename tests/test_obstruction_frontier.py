@@ -31,26 +31,48 @@ def args():
     )
 
 
-def test_frontier_prefers_pick_away_for_graspable_direct_obstacle():
+def test_frontier_generates_preflight_nudge_for_direct_obstacle():
     target = obj("target", [0.40, 0.00, 0.015])
     obstacle = obj("obstacle", [0.435, 0.00, 0.015])
     state = {
         "objects": [target, obstacle],
         "table_bounds": {"xmin": 0.10, "xmax": 0.90, "ymin": -0.50, "ymax": 0.50},
     }
+    def fake_push(*_args, **_kwargs):
+        return {
+            "candidate_results": [
+                {
+                    "relation": {},
+                    "evaluations": [
+                        {
+                            "candidate_id": "nudge_obstacle",
+                            "source": "away_from_target",
+                            "direction_base": [1.0, 0.0, 0.0],
+                            "distance_m": 0.025,
+                            "feasible": True,
+                            "score": 0.5,
+                            "target_distance_after_m": 0.06,
+                        }
+                    ],
+                }
+            ]
+        }
+
     plan = build_frontier_clearance_plan(
         state,
         target,
         protected_ids=[],
         args=args(),
-        evaluate_push_fn=lambda *_args, **_kwargs: {"candidate_results": []},
+        evaluate_push_fn=fake_push,
     )
     assert plan["obstruction_graph"]["edges"]
     assert plan["obstruction_graph"]["frontier"][0]["object_id"] == "obstacle"
-    selected = plan["safe_clearance_candidates"][0]
-    assert selected["action_type"] == "pick_away"
-    assert selected["safe_place_center_m"] is not None
-    assert selected["target_yaw_gain"]["after_grasp_feasible"] is True
+    assert plan["safe_clearance_candidates"] == []
+    selected = plan["preflight_clearance_candidates"][0]
+    assert selected["action_type"] == "nudge"
+    assert selected["geometry_feasible"] is True
+    assert selected["moveit_feasible"] is False
+    assert selected["task_effective"] is True
 
 
 def test_protected_obstacle_is_not_frontier_candidate():
@@ -70,9 +92,33 @@ def test_protected_obstacle_is_not_frontier_candidate():
     assert plan["obstruction_graph"]["edges"]
     assert plan["obstacle_frontier_candidates"] == []
     assert plan["safe_clearance_candidates"] == []
+    assert plan["preflight_clearance_candidates"] == []
+
+
+def test_duplicate_target_detection_is_merged_before_frontier():
+    target = obj("target", [0.40, 0.00, 0.015])
+    duplicate_target = obj("target_dup", [0.402, 0.001, 0.015])
+    duplicate_target["label"] = "target"
+    obstacle = obj("obstacle", [0.435, 0.00, 0.015])
+    state = {
+        "objects": [target, duplicate_target, obstacle],
+        "table_bounds": {"xmin": 0.10, "xmax": 0.90, "ymin": -0.50, "ymax": 0.50},
+    }
+    plan = build_frontier_clearance_plan(
+        state,
+        target,
+        protected_ids=[],
+        args=args(),
+        evaluate_push_fn=lambda *_args, **_kwargs: {"candidate_results": []},
+    )
+    frontier_ids = {item["object_id"] for item in plan["obstacle_frontier_candidates"]}
+    assert "target" not in frontier_ids
+    assert "target_dup" not in frontier_ids
+    assert "obstacle" in frontier_ids
 
 
 if __name__ == "__main__":
-    test_frontier_prefers_pick_away_for_graspable_direct_obstacle()
+    test_frontier_generates_preflight_nudge_for_direct_obstacle()
     test_protected_obstacle_is_not_frontier_candidate()
+    test_duplicate_target_detection_is_merged_before_frontier()
     print("obstruction frontier tests passed")

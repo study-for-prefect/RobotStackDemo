@@ -6,6 +6,7 @@ import copy
 import math
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from robot_scene_pipeline.detection_merge import merge_duplicate_objects_3d
 from robot_scene_pipeline.geometry_relations import get_center, get_size, object_xy_aabb, xy_aabb_overlap
 from robot_scene_pipeline.grasp_yaw_search import select_best_grasp
 
@@ -34,6 +35,15 @@ def _is_protected(obj: ObjectDict, protected_ids: Iterable[Any]) -> bool:
         or obj.get("state") in ("locked", "placed")
         or obj.get("pushable") is False
     )
+
+
+def _status_tags(obj: ObjectDict, protected_ids: Iterable[Any]) -> dict:
+    return {
+        "protected_structure_safe": not _is_protected(obj, protected_ids),
+        "role": obj.get("role"),
+        "state": obj.get("state"),
+        "pushable": obj.get("pushable"),
+    }
 
 
 def _top_z(obj: ObjectDict) -> float:
@@ -82,6 +92,7 @@ def build_obstruction_graph(
     max_depth: int = 3,
 ) -> dict:
     objects = [obj for obj in current_state.get("objects", []) if isinstance(obj, dict)]
+    target_id = str(target.get("id"))
     queue: List[Tuple[ObjectDict, int, Optional[str]]] = [(target, 0, None)]
     expanded = set()
     nodes: Dict[str, dict] = {}
@@ -112,6 +123,7 @@ def build_obstruction_graph(
                 "selected_grasp_yaw_deg": grasp.get("selected_grasp_yaw_deg"),
                 "feasible_yaw_count": _feasible_yaw_count(grasp),
                 "blocking_objects": grasp.get("blocking_objects", []),
+                **_status_tags(blocked_obj, protected_ids),
             },
         )
         if grasp.get("grasp_feasible"):
@@ -131,6 +143,8 @@ def build_obstruction_graph(
                     "blocker_category": blocker.get("blocker_category"),
                 }
             )
+            if blocker_key == target_id:
+                continue
             if _is_protected(blocker_obj, protected_ids):
                 continue
             item = frontier.setdefault(
@@ -140,6 +154,7 @@ def build_obstruction_graph(
                     "label": blocker_obj.get("label"),
                     "min_depth": depth + 1,
                     "blocks": [],
+                    **_status_tags(blocker_obj, protected_ids),
                 },
             )
             item["min_depth"] = min(int(item["min_depth"]), depth + 1)
@@ -222,10 +237,66 @@ def _safe_place_for_object(
 
 
 def _score_candidate(candidate: dict) -> dict:
-    utility = float(candidate.get("utility_score", 0.0))
+    direct_gain = float(candidate.get("direct_target_gain", 0.0))
+    enabling_gain = float(candidate.get("enabling_gain", 0.0))
+    free_space_gain = float(candidate.get("free_space_gain", 0.0))
+    candidate["task_effective"] = bool(direct_gain > 0.0 or enabling_gain > 0.0 or free_space_gain > 0.0)
+    if not candidate["task_effective"]:
+        candidate["exploratory"] = True
+    utility = (3.0 * direct_gain) + (1.8 * enabling_gain) + (0.9 * free_space_gain)
     easiness = float(candidate.get("easiness_score", 0.0))
     risk = float(candidate.get("risk_score", 0.0))
+    candidate["utility_score"] = round(utility, 6)
     candidate["score"] = round(utility + easiness - risk, 6)
+    return candidate
+
+
+def _direct_target_gain(yaw_gain: dict) -> float:
+    gain = float(yaw_gain.get("gain", 0.0))
+    if yaw_gain.get("after_grasp_feasible"):
+        gain += 1.0
+    return gain
+
+
+def _enabling_gain(
+    obj: ObjectDict,
+    target: ObjectDict,
+    objects: List[ObjectDict],
+    graph_item: dict,
+    args: Any,
+) -> float:
+    gains = []
+    target_id = str(target.get("id"))
+    for blocked_id in graph_item.get("blocks", []):
+        if str(blocked_id) == target_id:
+            continue
+        blocked_obj = _find_object(objects, blocked_id)
+        if blocked_obj is None:
+            continue
+        yaw_gain = _target_yaw_gain(blocked_obj, objects, obj.get("id"), args)
+        gain = float(yaw_gain.get("gain", 0.0))
+        if yaw_gain.get("after_grasp_feasible"):
+            gain += 1.0
+        gains.append(gain)
+    return max(gains) if gains else 0.0
+
+
+def _candidate_safety_fields(
+    candidate: dict,
+    *,
+    geometry_feasible: bool,
+    protected_structure_safe: bool,
+    moveit_feasible: bool = False,
+) -> dict:
+    candidate["geometry_feasible"] = bool(geometry_feasible)
+    candidate["moveit_feasible"] = bool(moveit_feasible)
+    candidate["protected_structure_safe"] = bool(protected_structure_safe)
+    candidate["executable_safe"] = bool(
+        candidate["geometry_feasible"]
+        and candidate["moveit_feasible"]
+        and candidate.get("task_effective")
+        and candidate["protected_structure_safe"]
+    )
     return candidate
 
 
@@ -239,11 +310,9 @@ def _make_pick_away_candidate(
     index: int,
     table_bounds: Optional[dict],
 ) -> Optional[dict]:
-    blocked_ids = {str(value) for value in graph_item.get("blocks", [])}
-    grasp_objects = [item for item in objects if _object_id(item) not in blocked_ids]
     grasp = select_best_grasp(
         obj,
-        grasp_objects,
+        objects,
         gripper_outer_width_m=getattr(args, "grasp_gripper_outer_width_m", 0.112),
         gripper_inner_width_m=getattr(args, "grasp_gripper_inner_width_m", 0.048),
         approach_length_m=getattr(args, "grasp_approach_length_m", 0.02),
@@ -254,35 +323,38 @@ def _make_pick_away_candidate(
     if safe_place is None:
         return None
     yaw_gain = _target_yaw_gain(target, objects, obj.get("id"), args)
-    direct = int(graph_item.get("min_depth", 99)) == 1
-    utility = 2.0 if direct else 1.0
-    utility += 0.3 * len(set(str(value) for value in graph_item.get("blocks", [])))
-    utility += 0.2 * float(yaw_gain["gain"])
-    if yaw_gain["after_grasp_feasible"]:
-        utility += 1.0
+    direct_gain = _direct_target_gain(yaw_gain)
+    enabling_gain = _enabling_gain(obj, target, objects, graph_item, args)
+    free_space_gain = 0.5
     easiness = 1.0 + 0.05 * _feasible_yaw_count(grasp)
     risk = 0.1 * max(0, int(graph_item.get("min_depth", 1)) - 1)
-    return _score_candidate(
-        {
-            "candidate_id": "clear_{:03d}_pick_away_{}".format(index, obj.get("id")),
-            "action": "pick_away",
-            "action_type": "pick_away",
-            "obstacle_id": obj.get("id"),
-            "target_object_id": target.get("id"),
-            "frontier_depth": graph_item.get("min_depth"),
-            "blocks": graph_item.get("blocks", []),
-            "selected_grasp_yaw_deg": grasp.get("selected_grasp_yaw_deg"),
-            "feasible_yaw_count": _feasible_yaw_count(grasp),
-            "safe_place_center_m": safe_place,
-            "utility_score": round(utility, 6),
-            "easiness_score": round(easiness, 6),
-            "risk_score": round(risk, 6),
-            "target_yaw_gain": yaw_gain,
-            "reason": "frontier_obstacle_graspable_pick_away_first",
-            "requires_moveit_preflight": True,
-            "ignored_blocked_objects_for_grasp_check": sorted(blocked_ids),
-        }
+    candidate = _score_candidate(
+        _candidate_safety_fields(
+            {
+                "candidate_id": "clear_{:03d}_pick_away_{}".format(index, obj.get("id")),
+                "action": "pick_away",
+                "action_type": "pick_away",
+                "obstacle_id": obj.get("id"),
+                "target_object_id": target.get("id"),
+                "frontier_depth": graph_item.get("min_depth"),
+                "blocks": graph_item.get("blocks", []),
+                "selected_grasp_yaw_deg": grasp.get("selected_grasp_yaw_deg"),
+                "feasible_yaw_count": _feasible_yaw_count(grasp),
+                "safe_place_center_m": safe_place,
+                "direct_target_gain": round(direct_gain, 6),
+                "enabling_gain": round(enabling_gain, 6),
+                "free_space_gain": round(free_space_gain, 6),
+                "easiness_score": round(easiness, 6),
+                "risk_score": round(risk, 6),
+                "target_yaw_gain": yaw_gain,
+                "reason": "frontier_obstacle_graspable_pick_away_first",
+                "requires_moveit_preflight": True,
+            },
+            geometry_feasible=True,
+            protected_structure_safe=not _is_protected(obj, protected_ids),
+        )
     )
+    return candidate
 
 
 def build_frontier_clearance_plan(
@@ -293,9 +365,15 @@ def build_frontier_clearance_plan(
     future_place_regions: Optional[Iterable[dict]] = None,
     evaluate_push_fn: Callable[..., dict] = evaluate_push_candidates,
 ) -> dict:
-    objects = [obj for obj in current_state.get("objects", []) if isinstance(obj, dict)]
+    objects = merge_duplicate_objects_3d(
+        [obj for obj in current_state.get("objects", []) if isinstance(obj, dict)],
+        preferred_id=target.get("id"),
+    )
+    target = _find_object(objects, target.get("id")) or target
+    graph_state = copy.deepcopy(current_state)
+    graph_state["objects"] = objects
     graph = build_obstruction_graph(
-        current_state,
+        graph_state,
         target,
         protected_ids,
         args,
@@ -308,7 +386,7 @@ def build_frontier_clearance_plan(
 
     for frontier_item in graph.get("frontier", []):
         obstacle = _find_object(objects, frontier_item.get("object_id"))
-        if obstacle is None or _is_protected(obstacle, protected_ids):
+        if obstacle is None or _object_id(obstacle) == _object_id(target) or _is_protected(obstacle, protected_ids):
             continue
         pick_candidate = _make_pick_away_candidate(
             obstacle,
@@ -360,48 +438,55 @@ def build_frontier_clearance_plan(
                 if float(evaluation.get("distance_m") or 0.0) > nudge_max + 1e-9:
                     continue
                 yaw_gain = _target_yaw_gain(target, objects, obstacle.get("id"), args)
-                direct = int(frontier_item.get("min_depth", 99)) == 1
-                utility = (1.2 if direct else 0.6) + 0.1 * float(yaw_gain["gain"])
-                if yaw_gain["after_grasp_feasible"]:
-                    utility += 0.5
+                direct_gain = _direct_target_gain(yaw_gain)
+                enabling_gain = _enabling_gain(obstacle, target, objects, frontier_item, args)
+                free_space_gain = 0.2 if float(evaluation.get("target_distance_after_m") or 0.0) > 0.0 else 0.0
                 easiness = 0.4 + max(0.0, float(evaluation.get("score", 0.0)))
                 risk = 0.4 + 0.2 * max(0, int(frontier_item.get("min_depth", 1)) - 1)
                 candidate = _score_candidate(
-                    {
-                        "candidate_id": evaluation.get("candidate_id") or "clear_{:03d}_nudge_{}".format(candidate_index, obstacle.get("id")),
-                        "action": "nudge",
-                        "action_type": "nudge",
-                        "obstacle_id": obstacle.get("id"),
-                        "target_object_id": target.get("id"),
-                        "frontier_depth": frontier_item.get("min_depth"),
-                        "blocks": frontier_item.get("blocks", []),
-                        "direction_base": evaluation.get("direction_base"),
-                        "distance_m": evaluation.get("distance_m"),
-                        "direction_source": evaluation.get("source"),
-                        "utility_score": round(utility, 6),
-                        "easiness_score": round(easiness, 6),
-                        "risk_score": round(risk, 6),
-                        "target_yaw_gain": yaw_gain,
-                        "reason": evaluation.get("reason"),
-                        "feasible": bool(evaluation.get("feasible")),
-                        "push_evaluation": evaluation,
-                        "push_relation": relation,
-                        "push_selected_result": result,
-                        "requires_moveit_preflight": True,
-                    }
+                    _candidate_safety_fields(
+                        {
+                            "candidate_id": evaluation.get("candidate_id") or "clear_{:03d}_nudge_{}".format(candidate_index, obstacle.get("id")),
+                            "action": "nudge",
+                            "action_type": "nudge",
+                            "obstacle_id": obstacle.get("id"),
+                            "target_object_id": target.get("id"),
+                            "frontier_depth": frontier_item.get("min_depth"),
+                            "blocks": frontier_item.get("blocks", []),
+                            "direction_base": evaluation.get("direction_base"),
+                            "distance_m": evaluation.get("distance_m"),
+                            "direction_source": evaluation.get("source"),
+                            "direct_target_gain": round(direct_gain, 6),
+                            "enabling_gain": round(enabling_gain, 6),
+                            "free_space_gain": round(free_space_gain, 6),
+                            "easiness_score": round(easiness, 6),
+                            "risk_score": round(risk, 6),
+                            "target_yaw_gain": yaw_gain,
+                            "reason": evaluation.get("reason"),
+                            "feasible": bool(evaluation.get("feasible")),
+                            "push_evaluation": evaluation,
+                            "push_relation": relation,
+                            "push_selected_result": result,
+                            "requires_moveit_preflight": True,
+                        },
+                        geometry_feasible=bool(evaluation.get("feasible")),
+                        protected_structure_safe=not _is_protected(obstacle, protected_ids),
+                    )
                 )
                 all_candidates.append(candidate)
-                if evaluation.get("feasible"):
+                if candidate.get("geometry_feasible") and candidate.get("task_effective") and candidate.get("protected_structure_safe"):
                     safe_candidates.append(candidate)
                 candidate_index += 1
 
     safe_candidates.sort(key=lambda item: (-float(item.get("score", 0.0)), int(item.get("frontier_depth", 99)), str(item.get("candidate_id"))))
     all_candidates.sort(key=lambda item: (-float(item.get("score", 0.0)), int(item.get("frontier_depth", 99)), str(item.get("candidate_id"))))
+    executable_safe_candidates = [candidate for candidate in safe_candidates if candidate.get("executable_safe")]
     return {
         "schema_version": "obstruction_frontier_clearance_v1",
         "obstruction_graph": graph,
         "obstacle_frontier_candidates": graph.get("frontier", []),
         "all_clearance_action_candidates": all_candidates,
-        "safe_clearance_candidates": safe_candidates,
+        "preflight_clearance_candidates": safe_candidates,
+        "safe_clearance_candidates": executable_safe_candidates,
         "selected_clearance_action": safe_candidates[0] if safe_candidates else None,
     }

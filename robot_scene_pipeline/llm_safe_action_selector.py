@@ -46,7 +46,8 @@ def build_selection_request(
     feasible = [
         _compact_candidate(candidate)
         for candidate in joint_evaluation.get("candidates", [])
-        if candidate.get("feasible") and candidate.get("candidate_id") is not None
+        if candidate.get("candidate_id") is not None
+        and bool(candidate.get("feasible", candidate.get("geometry_feasible", True)))
     ]
     return {
         "schema_version": "llm_safe_push_selection_request_v1",
