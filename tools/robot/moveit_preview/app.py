@@ -3,9 +3,11 @@
 import math
 import sys
 import time
+import threading
 from typing import Optional
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import JointState
 
 from robot_scene_pipeline.grasp_orientation import quaternion_distance_rad
@@ -44,8 +46,20 @@ from .trajectory import (
     setup_gripper,
 )
 
+
+def _install_quiet_external_shutdown_hook():
+    previous_hook = threading.excepthook
+
+    def quiet_hook(args):
+        if args.exc_type is ExternalShutdownException:
+            return
+        previous_hook(args)
+
+    threading.excepthook = quiet_hook
+
 def main() -> Optional[int]:
     args = parse_args()
+    _install_quiet_external_shutdown_hook()
     push_only = bool(args.push_plan_json)
     exclusive_modes = sum(
         bool(value)
@@ -76,8 +90,14 @@ def main() -> Optional[int]:
             raise RuntimeError("--hover-only requires --hover-orientation-xyzw QX QY QZ QW.")
         if args.enable_gripper:
             raise RuntimeError("--hover-only refuses --enable-gripper.")
-    if push_only and args.enable_gripper:
-        raise RuntimeError("--push-plan-json refuses --enable-gripper.")
+    if push_only and args.enable_gripper and not args.close_gripper_for_push:
+        raise RuntimeError("--push-plan-json accepts --enable-gripper only with --close-gripper-for-push.")
+    if args.close_gripper_for_push and not push_only:
+        raise RuntimeError("--close-gripper-for-push requires --push-plan-json.")
+    if args.close_gripper_for_push and not args.enable_gripper:
+        raise RuntimeError("--close-gripper-for-push requires --enable-gripper.")
+    if args.close_gripper_for_push and not args.execute:
+        raise RuntimeError("--close-gripper-for-push requires --execute.")
     relative_only = args.relative_tool_translation_base is not None
     plan = (
         None
@@ -230,7 +250,7 @@ def main() -> Optional[int]:
             return 0
 
         if push_only:
-            if not run_push_plan(node, args, planning_start_state):
+            if not run_push_plan(node, args, planning_start_state, gripper=gripper):
                 return 2
             return 0
 
@@ -534,4 +554,11 @@ def main() -> Optional[int]:
     finally:
         if gripper is not None:
             gripper.close()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        try:
+            rclpy.shutdown()
+        except ExternalShutdownException:
+            pass

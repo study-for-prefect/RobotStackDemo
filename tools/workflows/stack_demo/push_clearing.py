@@ -449,6 +449,7 @@ def build_push_execution_plan(
         "execution_status": "not_executed",
         "target_object_id": held_object["id"],
         "obstacle_object_id": selected_push["subject"],
+        "candidate_id": selected_push.get("candidate_id"),
         "direction_base": selected_push["direction_base"],
         "distance_m": selected_push.get("distance_m", args.push_clearing_distance_m),
         "lift_m": args.push_clearing_lift_m,

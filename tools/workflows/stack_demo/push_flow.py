@@ -18,8 +18,9 @@ from .clearance_execution import (
     ClearancePreflightFailed,
     execute_nudge_and_reobserve,
     execute_pick_away_and_reobserve,
+    preflight_nudge_candidate,
 )
-from .obstruction_frontier import build_frontier_clearance_plan
+from .obstruction_frontier import build_frontier_clearance_plan, refresh_executable_safe
 from .push_clearing import (
     current_protected_structure_ids,
     evaluate_push_candidates,
@@ -103,6 +104,24 @@ def _raise_if_non_push_action(analysis: dict, has_push_candidates: bool = False)
 
 
 def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
+    def candidate_summary(candidate: dict) -> dict:
+        keys = (
+            "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
+            "frontier_depth", "blocks", "direction_base", "distance_m", "direction_source",
+            "selected_grasp_yaw_deg", "safe_place_center_m", "feasible",
+            "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
+            "future_task_feasible", "protected_structure_safe", "moveit_feasible",
+            "task_effective", "direct_clearance_candidate", "exploratory",
+            "automatic_execution_allowed", "executable_safe", "direct_target_gain",
+            "enabling_gain", "free_space_gain", "utility_score", "easiness_score",
+            "risk_score", "score", "target_yaw_gain", "reason",
+            "moveit_preflight_error", "push_execution_plan_path",
+        )
+        return {key: candidate.get(key) for key in keys if key in candidate}
+
+    def summarize(candidates: Iterable[dict]) -> list:
+        return [candidate_summary(candidate) for candidate in candidates or []]
+
     write_json(os.path.join(cycle_dir, "obstruction_graph.json"), frontier_plan.get("obstruction_graph", {}))
     write_json(
         os.path.join(cycle_dir, "obstacle_frontier_candidates.json"),
@@ -110,20 +129,114 @@ def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
     )
     write_json(
         os.path.join(cycle_dir, "all_clearance_action_candidates.json"),
-        frontier_plan.get("all_clearance_action_candidates", []),
+        summarize(frontier_plan.get("all_clearance_action_candidates", [])),
     )
     write_json(
         os.path.join(cycle_dir, "safe_clearance_candidates.json"),
-        frontier_plan.get("safe_clearance_candidates", []),
+        summarize(frontier_plan.get("safe_clearance_candidates", [])),
     )
     write_json(
         os.path.join(cycle_dir, "preflight_clearance_candidates.json"),
-        frontier_plan.get("preflight_clearance_candidates", []),
+        summarize(frontier_plan.get("preflight_clearance_candidates", [])),
     )
     write_json(
         os.path.join(cycle_dir, "selected_clearance_action.json"),
-        frontier_plan.get("selected_clearance_action") or {"action": "no_feasible_clearance_action"},
+        candidate_summary(frontier_plan.get("selected_clearance_action") or {})
+        or {"action": "no_feasible_clearance_action"},
     )
+    if frontier_plan.get("debug_dump_full_candidates"):
+        write_json(
+            os.path.join(cycle_dir, "debug_full_clearance_candidates.json"),
+            {
+                "all_clearance_action_candidates": frontier_plan.get("all_clearance_action_candidates", []),
+                "preflight_clearance_candidates": frontier_plan.get("preflight_clearance_candidates", []),
+                "safe_clearance_candidates": frontier_plan.get("safe_clearance_candidates", []),
+            },
+        )
+
+
+def _candidate_summary(candidate: dict) -> dict:
+    keys = (
+        "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
+        "direction_base", "distance_m", "moveit_feasible", "executable_safe",
+        "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
+        "protected_structure_safe", "task_effective", "exploratory",
+        "automatic_execution_allowed", "target_yaw_gain", "score", "reason",
+    )
+    return {key: candidate.get(key) for key in keys if key in candidate}
+
+
+def _preflight_safe_candidates(
+    args: Any,
+    cycle_dir: str,
+    current_state: dict,
+    held_object: dict,
+    frontier_plan: dict,
+    step_index: int,
+) -> dict:
+    candidates = list(frontier_plan.get("preflight_clearance_candidates", []))
+    safe_candidates = []
+    failures = []
+    if not (args.execute and args.execute_push_clearing):
+        frontier_plan["safe_clearance_candidates"] = []
+        return {"safe_candidates": safe_candidates, "failures": failures}
+    for candidate in candidates:
+        if candidate.get("action_type") != "nudge":
+            continue
+        if candidate.get("exploratory"):
+            failures.append(
+                {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "reason": "exploratory_candidate_requires_manual_confirmation",
+                }
+            )
+            continue
+        checked = preflight_nudge_candidate(args, cycle_dir, current_state, held_object, candidate, step_index)
+        refresh_executable_safe(checked)
+        if checked.get("executable_safe"):
+            safe_candidates.append(checked)
+        else:
+            failures.append(
+                {
+                    "candidate_id": checked.get("candidate_id"),
+                    "reason": checked.get("moveit_preflight_error") or "hard_safety_filter_failed",
+                    "moveit_feasible": checked.get("moveit_feasible"),
+                    "executable_safe": checked.get("executable_safe"),
+                }
+            )
+    safe_candidates.sort(
+        key=lambda item: (
+            -float(item.get("score", 0.0)),
+            int(item.get("frontier_depth", 99)),
+            str(item.get("candidate_id")),
+        )
+    )
+    frontier_plan["safe_clearance_candidates"] = safe_candidates
+    write_json(
+        os.path.join(cycle_dir, "clearance_step_{:02d}_moveit_preflight.json".format(step_index)),
+        {
+            "safe_candidate_ids": [item.get("candidate_id") for item in safe_candidates],
+            "failures": failures,
+        },
+    )
+    return {"safe_candidates": safe_candidates, "failures": failures}
+
+
+def _assert_selection_consistency(selected_clearance: Optional[dict], llm_selection: dict) -> None:
+    if selected_clearance is None:
+        return
+    candidate_id = selected_clearance.get("candidate_id")
+    if candidate_id is None:
+        raise RuntimeError("Selected clearance action is missing candidate_id.")
+    if llm_selection.get("selection_status") == "selected":
+        llm_id = llm_selection.get("selected_candidate_id")
+        if str(llm_id) != str(candidate_id):
+            raise RuntimeError(
+                "LLM selected_candidate_id {} does not match selected_clearance_action {}.".format(
+                    llm_id,
+                    candidate_id,
+                )
+            )
 
 
 def _merge_scene_duplicates(current_state: dict, held_object: dict, cycle_dir: str) -> Tuple[dict, dict]:
@@ -403,10 +516,16 @@ def handle_push_clearing_before_pick(
         future_place_regions=future_place_regions or [],
         evaluate_push_fn=evaluate_push_candidates,
     )
-    selectable_clearance_candidates = (
-        frontier_plan.get("preflight_clearance_candidates")
-        or frontier_plan.get("safe_clearance_candidates", [])
+    frontier_plan["debug_dump_full_candidates"] = bool(getattr(args, "debug_dump_full_candidates", False))
+    preflight_report = _preflight_safe_candidates(
+        args,
+        cycle_dir,
+        current_state,
+        held_object,
+        frontier_plan,
+        step_index,
     )
+    selectable_clearance_candidates = frontier_plan.get("safe_clearance_candidates", [])
     selected_clearance, llm_selection = choose_clearance_action(
         args,
         cycle_dir,
@@ -415,6 +534,7 @@ def handle_push_clearing_before_pick(
         memory,
         step_index,
     )
+    _assert_selection_consistency(selected_clearance, llm_selection)
     frontier_plan["selected_clearance_action"] = selected_clearance
     frontier_plan["llm_selection"] = llm_selection
     _write_frontier_debug_files(cycle_dir, frontier_plan)
@@ -429,6 +549,7 @@ def handle_push_clearing_before_pick(
                 "grasp_action": analysis.get("action"),
                 "clearance_step_index": step_index,
                 "multi_step_status": "no_feasible_clearance_action",
+                "moveit_preflight_failures": preflight_report.get("failures", []),
             },
         )
         write_json(
@@ -439,6 +560,7 @@ def handle_push_clearing_before_pick(
                 "safe_candidate_count": 0,
                 "failure_state": "manual_required",
                 "failure_reason": "grasp_blocked_no_executable_clearance",
+                "moveit_preflight_failures": preflight_report.get("failures", []),
             },
         )
         raise RuntimeError(
@@ -460,9 +582,10 @@ def handle_push_clearing_before_pick(
             {
                 "action": clearance_action.get("action"),
                 "reason": clearance_action.get("reason"),
-                "selected_clearance_action": clearance_action,
+                "selected_clearance_action": _candidate_summary(clearance_action),
                 "clearance_step_index": step_index,
                 "selection_source": llm_selection.get("selection_source"),
+                "selected_candidate_id": clearance_action.get("candidate_id"),
                 "multi_step_status": "selected_one_frontier_action",
                 "post_action_requirement": "reobserve_and_rebuild_obstruction_graph",
             },

@@ -183,26 +183,37 @@ python3 tools/workflows/stack_demo_pipeline.py \
   --execute-push-clearing
 ```
 
-Without both flags, selected clearance actions are recorded only. Real nudge
-actions first build a push execution plan and run MoveIt preflight for every
-stage: `pre_push`, `contact`, `push_end`, and `retreat`. Only after that
-preflight succeeds does the workflow close the gripper and use it as a rigid
-paddle. If preflight fails, the gripper stays open, no arm motion is executed,
-the candidate is marked `moveit_feasible=false`, and the next candidate is tried.
+Without both flags, clearance candidates are recorded only; they are not called
+`safe` unless MoveIt has actually accepted them. In live execution, nudge
+candidates first run MoveIt preflight as candidate filtering. Only candidates
+that satisfy all hard code-side gates enter `safe_clearance_candidates.json`:
+`feasible=true`, `geometry_feasible=true`, `approach_path_safe=true`,
+`push_swept_safe=true`, `push_end_safe=true`, `protected_structure_safe=true`,
+`task_effective=true`, and `moveit_feasible=true`.
+
+The selected real nudge then runs in one MoveIt process with
+`--close-gripper-for-push`: close gripper as a rigid paddle, refresh joint
+state, preflight `pre_push`, `contact`, `push_end`, and `retreat`, execute those
+same preflight trajectories, retreat, then open the gripper. If any stage fails,
+the workflow writes `clearance_step_XX_result.json`, requests gripper-open
+recovery, and stops instead of continuing from a stale scene.
 Real `pick_away` actions build an obstacle pick plan plus a safe-place plan, and
 both are sent through the existing MoveIt pick/place preview before motion.
 
 Each evaluated action receives a stable `candidate_id`.
-`all_clearance_action_candidates.json` contains the full scored set.
+`all_clearance_action_candidates.json` contains a compact scored summary.
 `preflight_clearance_candidates.json` contains geometry-feasible, task-effective
 candidates that still require MoveIt preflight. `safe_clearance_candidates.json`
 contains only executable candidates with
-`geometry_feasible=true`, `moveit_feasible=true`, `task_effective=true`, and
-`protected_structure_safe=true`. When LLM selection is enabled, the LLM receives
-only code-generated candidate ids from the current candidate set. It may choose
-one `candidate_id`; it cannot introduce a new direction, obstacle, or action. If
-the LLM is unavailable or returns an unknown/unsafe id, the workflow falls back
-to the highest code score.
+`geometry_feasible=true`, `moveit_feasible=true`, `approach_path_safe=true`,
+`push_swept_safe=true`, `push_end_safe=true`, `task_effective=true`, and
+`protected_structure_safe=true`. Full nested evaluator dumps are written only
+with `--debug-dump-full-candidates`. When LLM selection is enabled, the LLM
+receives only `safe_clearance_candidates`. It may choose one `candidate_id`; it
+cannot introduce a new direction, obstacle, or action. If the LLM is unavailable
+or returns an unknown/unsafe id, the workflow falls back to the highest code
+score from the safe list. If the safe list is empty, no selected clearance action
+is produced.
 
 LLM push selection is enabled by default and can be disabled explicitly:
 
@@ -236,6 +247,7 @@ cycle_*/preflight_clearance_candidates.json
 cycle_*/safe_clearance_candidates.json
 cycle_*/selected_clearance_action.json
 cycle_*/clearance_verification.json
+cycle_*/clearance_step_XX_moveit_preflight.json
 cycle_*/clearance_step_XX_llm_selection.json
 cycle_*/clearance_step_XX_result.json
 cycle_*/multi_step_clearance_summary.json

@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from tools.planning.decision_to_execution import write_json
 
-from .commands import close_gripper_command, push_clear_command, push_preflight_command, run
+from .commands import open_gripper_command, push_clear_command, push_preflight_command, run
 from .observation_scope import observe_empty_with_scope
 from .pick import build_offline_pick_plan, pick_command, place_command, plan_envelope
 from .push_context import observed_push_delta_m, protected_stack_templates
@@ -20,6 +20,103 @@ from robot_scene_pipeline.scene_memory import mark_pushed, save_memory
 
 class ClearancePreflightFailed(RuntimeError):
     """A selected clearance action failed MoveIt preflight before hardware motion."""
+
+
+def _candidate_summary(candidate: dict) -> dict:
+    keys = (
+        "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
+        "direction_base", "distance_m", "moveit_feasible", "executable_safe",
+        "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
+        "protected_structure_safe", "task_effective", "exploratory",
+        "automatic_execution_allowed", "target_yaw_gain", "score", "reason",
+    )
+    return {key: candidate.get(key) for key in keys if key in candidate}
+
+
+def _direction_matches(first: object, second: object, tolerance: float = 1e-6) -> bool:
+    if not isinstance(first, (list, tuple)) or not isinstance(second, (list, tuple)):
+        return False
+    if len(first) < 2 or len(second) < 2:
+        return False
+    return all(abs(float(first[index]) - float(second[index])) <= tolerance for index in range(2))
+
+
+def _assert_nudge_candidate_consistency(selected_action: dict, push_execution_plan: dict) -> None:
+    candidate_id = selected_action.get("candidate_id")
+    plan_candidate_id = push_execution_plan.get("candidate_id")
+    if candidate_id is None:
+        raise RuntimeError("Selected nudge action is missing candidate_id.")
+    if plan_candidate_id is not None and str(plan_candidate_id) != str(candidate_id):
+        raise RuntimeError(
+            "Nudge candidate_id mismatch: selected={} plan={}.".format(candidate_id, plan_candidate_id)
+        )
+    if not _direction_matches(selected_action.get("direction_base"), push_execution_plan.get("direction_base")):
+        raise RuntimeError(
+            "Nudge direction mismatch for candidate {}: selected={} plan={}.".format(
+                candidate_id,
+                selected_action.get("direction_base"),
+                push_execution_plan.get("direction_base"),
+            )
+        )
+
+
+def _build_nudge_execution_plan(args: Any, current_state: dict, held_object: dict, selected_action: dict) -> dict:
+    selected_push = _selected_push_from_clearance_action(selected_action)
+    push_execution_plan = build_push_execution_plan(
+        current_state,
+        held_object,
+        selected_push,
+        args,
+        direction_evaluations=[selected_action.get("push_evaluation", {})],
+    )
+    push_execution_plan["action_type"] = "nudge"
+    push_execution_plan["candidate_id"] = selected_action.get("candidate_id")
+    _assert_nudge_candidate_consistency(selected_action, push_execution_plan)
+    return push_execution_plan
+
+
+def preflight_nudge_candidate(
+    args: Any,
+    cycle_dir: str,
+    current_state: dict,
+    held_object: dict,
+    selected_action: dict,
+    step_index: int,
+) -> dict:
+    push_execution_plan = _build_nudge_execution_plan(args, current_state, held_object, selected_action)
+    plan_path = os.path.join(
+        cycle_dir,
+        "clearance_step_{:02d}_candidate_{}_push_plan.json".format(
+            step_index,
+            str(selected_action.get("candidate_id")).replace(os.sep, "_"),
+        ),
+    )
+    write_json(plan_path, push_execution_plan)
+    try:
+        run(push_preflight_command(args, plan_path))
+    except Exception as exc:
+        output = dict(selected_action)
+        output["moveit_feasible"] = False
+        output["executable_safe"] = False
+        output["moveit_preflight_error"] = str(exc)
+        output["push_execution_plan_path"] = plan_path
+        return output
+    output = dict(selected_action)
+    output["moveit_feasible"] = True
+    output["push_execution_plan_path"] = plan_path
+    return output
+
+
+def _recover_open_gripper(args: Any, cycle_dir: str, reason: str) -> dict:
+    report = {"requested": True, "reason": reason, "status": "not_attempted"}
+    try:
+        run(open_gripper_command(args))
+        report["status"] = "opened"
+    except Exception as exc:
+        report["status"] = "failed"
+        report["error"] = str(exc)
+    write_json(os.path.join(cycle_dir, "gripper_open_recovery.json"), report)
+    return report
 
 
 def _build_pick_away_place_plan(current_state: dict, obstacle: dict, selected_action: dict, args: Any) -> dict:
@@ -93,7 +190,7 @@ def execute_pick_away_and_reobserve(
             {
                 "action": "pick_away",
                 "result": "dry_run_only",
-                "selected_clearance_action": selected_action,
+                "selected_clearance_action": _candidate_summary(selected_action),
             },
         )
         return current_state, memory, held_template
@@ -171,14 +268,7 @@ def execute_nudge_and_reobserve(
     selected_push = _selected_push_from_clearance_action(selected_action)
     obstacle = object_by_string_id(current_state.get("objects", []), selected_push["subject"])
     obstacle_memory_id = memory_id_for_scene_object(memory, obstacle)
-    push_execution_plan = build_push_execution_plan(
-        current_state,
-        held_object,
-        selected_push,
-        args,
-        direction_evaluations=[selected_action.get("push_evaluation", {})],
-    )
-    push_execution_plan["action_type"] = "nudge"
+    push_execution_plan = _build_nudge_execution_plan(args, current_state, held_object, selected_action)
     push_execution_plan_path = os.path.join(cycle_dir, "push_execution_plan.json")
     write_json(push_execution_plan_path, push_execution_plan)
     write_json(
@@ -197,40 +287,49 @@ def execute_nudge_and_reobserve(
             {
                 "action": "nudge",
                 "result": "dry_run_only",
-                "selected_clearance_action": selected_action,
+                "selected_clearance_action": _candidate_summary(selected_action),
                 "post_push_requirement": "reobserve_and_rerun_clearance_loop",
             },
         )
         return current_state, memory, held_object
 
-    runtime["current_stage"] = "moveit_preflight_nudge_clearing_step_{:02d}".format(step_index)
+    if not selected_action.get("executable_safe"):
+        raise ClearancePreflightFailed(
+            "Selected nudge candidate {} is not executable_safe.".format(selected_action.get("candidate_id"))
+        )
+
+    runtime["current_stage"] = "nudge_single_process_preflight_execute_step_{:02d}".format(step_index)
     try:
-        run(push_preflight_command(args, push_execution_plan_path))
+        run(push_clear_command(args, push_execution_plan_path))
     except Exception as exc:
         selected_action["moveit_feasible"] = False
         selected_action["executable_safe"] = False
+        runtime["current_stage"] = "nudge_failed_before_or_during_motion_step_{:02d}".format(step_index)
+        recovery = _recover_open_gripper(args, cycle_dir, "nudge_push_execute_failed")
         write_json(
             os.path.join(cycle_dir, "clearance_verification.json"),
             {
-                "status": "moveit_preflight_failed",
+                "status": "push_execute_failed",
                 "action": "nudge",
-                "source": "moveit_plan_preview_push_preflight",
+                "source": "moveit_plan_preview_single_process_push_execute",
                 "push_plan": push_execution_plan_path,
-                "gripper_policy": "gripper_remained_open_no_motion_executed",
+                "gripper_policy": "open_recovery_requested",
+                "error": str(exc),
+                "gripper_open_recovery": recovery,
+            },
+        )
+        write_json(
+            os.path.join(cycle_dir, "clearance_step_{:02d}_result.json".format(step_index)),
+            {
+                "action": "nudge",
+                "result": "failed_before_or_during_motion",
+                "selected_candidate_id": selected_action.get("candidate_id"),
+                "selected_clearance_action": _candidate_summary(selected_action),
+                "gripper_open_recovery": recovery,
                 "error": str(exc),
             },
         )
-        raise ClearancePreflightFailed("Nudge MoveIt preflight failed before gripper close: {}".format(exc))
-    selected_action["moveit_feasible"] = True
-    selected_action["executable_safe"] = bool(
-        selected_action.get("geometry_feasible")
-        and selected_action.get("task_effective")
-        and selected_action.get("protected_structure_safe")
-    )
-    runtime["current_stage"] = "close_gripper_as_rigid_push_paddle_step_{:02d}".format(step_index)
-    run(close_gripper_command(args))
-    runtime["current_stage"] = "nudge_clearing_before_pick_step_{:02d}".format(step_index)
-    run(push_clear_command(args, push_execution_plan_path))
+        raise RuntimeError("Nudge single-process push execution failed: {}".format(exc))
     push_execution_plan["execution_status"] = "executed"
     write_json(push_execution_plan_path, push_execution_plan)
     write_json(
@@ -284,7 +383,7 @@ def execute_nudge_and_reobserve(
         {
             "action": "nudge",
             "result": "executed_and_reobserved",
-            "selected_clearance_action": selected_action,
+            "selected_clearance_action": _candidate_summary(selected_action),
             "post_observation": post_observation,
             "observed_delta_m": observed_delta_m,
         },

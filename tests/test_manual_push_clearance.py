@@ -5,6 +5,7 @@ import os
 import tempfile
 from types import SimpleNamespace
 
+from tools.workflows.stack_demo.commands import push_clear_command
 from tools.workflows.stack_demo import clearance_execution, push_flow
 
 
@@ -111,7 +112,6 @@ def test_automatic_clearance_reobserves_and_exits_to_pick():
         "run": clearance_execution.run,
         "command": clearance_execution.push_clear_command,
         "preflight": clearance_execution.push_preflight_command,
-        "close": clearance_execution.close_gripper_command,
         "observe": clearance_execution.observe_empty_with_scope,
         "reacquire": push_flow.reacquire_target,
         "mark": clearance_execution.mark_pushed,
@@ -159,6 +159,14 @@ def test_automatic_clearance_reobserves_and_exits_to_pick():
                 "push_evaluation": {"direction_base": [1.0, 0.0, 0.0], "distance_m": 0.025},
                 "blocks": ["target"],
                 "feasible": True,
+                "geometry_feasible": True,
+                "approach_path_safe": True,
+                "push_swept_safe": True,
+                "push_end_safe": True,
+                "protected_structure_safe": True,
+                "task_effective": True,
+                "automatic_execution_allowed": True,
+                "target_yaw_gain": {"gain": 1, "after_grasp_feasible": True},
             }
             return {
                 "obstruction_graph": {"nodes": [], "edges": [], "frontier": []},
@@ -174,7 +182,6 @@ def test_automatic_clearance_reobserves_and_exits_to_pick():
         clearance_execution.run = lambda _command: None
         clearance_execution.push_clear_command = lambda _args, _path: ["push"]
         clearance_execution.push_preflight_command = lambda _args, _path: ["preflight"]
-        clearance_execution.close_gripper_command = lambda _args: ["close"]
         clearance_execution.observe_empty_with_scope = lambda *_args, **_kwargs: (state_after, {"action_history": []}, {"status": "critical_confirmed"})
         push_flow.reacquire_target = lambda _state, _template: target
         clearance_execution.mark_pushed = lambda memory, *_args, **_kwargs: memory
@@ -224,7 +231,6 @@ def test_automatic_clearance_reobserves_and_exits_to_pick():
         clearance_execution.run = originals["run"]
         clearance_execution.push_clear_command = originals["command"]
         clearance_execution.push_preflight_command = originals["preflight"]
-        clearance_execution.close_gripper_command = originals["close"]
         clearance_execution.observe_empty_with_scope = originals["observe"]
         push_flow.reacquire_target = originals["reacquire"]
         clearance_execution.mark_pushed = originals["mark"]
@@ -295,7 +301,7 @@ def test_no_feasible_clearance_stops_before_pick():
         push_flow.build_frontier_clearance_plan = originals["frontier"]
 
 
-def test_nudge_preflight_failure_does_not_close_gripper():
+def test_nudge_preflight_failure_does_not_execute_push():
     target = {
         "id": "target",
         "label": "target",
@@ -327,13 +333,11 @@ def test_nudge_preflight_failure_does_not_close_gripper():
         "run": clearance_execution.run,
         "preflight": clearance_execution.push_preflight_command,
         "push": clearance_execution.push_clear_command,
-        "close": clearance_execution.close_gripper_command,
     }
     calls = []
     try:
         clearance_execution.push_preflight_command = lambda _args, _path: ["preflight"]
         clearance_execution.push_clear_command = lambda _args, _path: ["push"]
-        clearance_execution.close_gripper_command = lambda _args: ["close"]
 
         def fake_run(command):
             calls.append(command[0])
@@ -355,37 +359,46 @@ def test_nudge_preflight_failure_does_not_close_gripper():
                 push_tool_safety_margin_m=0.005,
                 memory_json=os.path.join(cycle_dir, "memory.json"),
             )
-            runtime = {"held_object_id": None, "current_stage": "test"}
-            try:
-                clearance_execution.execute_nudge_and_reobserve(
-                    args,
-                    cycle_dir,
-                    runtime,
-                    {"action_history": []},
-                    state,
-                    target,
-                    target,
-                    selected,
-                    base_id="base",
-                    previous_locked_stack=None,
-                    base_template=None,
-                    step_index=1,
-                )
-                raise AssertionError("expected preflight failure")
-            except clearance_execution.ClearancePreflightFailed:
-                pass
+            checked = clearance_execution.preflight_nudge_candidate(
+                args,
+                cycle_dir,
+                state,
+                target,
+                selected,
+                step_index=1,
+            )
+            assert checked["moveit_feasible"] is False
         assert calls == ["preflight"]
-        assert selected["moveit_feasible"] is False
     finally:
         clearance_execution.run = originals["run"]
         clearance_execution.push_preflight_command = originals["preflight"]
         clearance_execution.push_clear_command = originals["push"]
-        clearance_execution.close_gripper_command = originals["close"]
+
+
+def test_push_clear_command_uses_single_process_gripper_push():
+    args = SimpleNamespace(
+        ros_python="/usr/bin/python3",
+        tcp_offset_tool=[0.0, 0.0, 0.15],
+        velocity=0.08,
+        acceleration=0.08,
+        tf_timeout=8.0,
+        base_frame="base_link",
+        tool_frame="tool0",
+        gripper_port="/dev/ttyUSB0",
+        yes=True,
+    )
+    command = push_clear_command(args, "/tmp/push_plan.json")
+    assert "--push-plan-json" in command
+    assert "--execute" in command
+    assert "--enable-gripper" in command
+    assert "--close-gripper-for-push" in command
+    assert "--gripper-close-only" not in command
 
 
 if __name__ == "__main__":
     test_manual_clearance_reobserves_and_updates_memory()
     test_automatic_clearance_reobserves_and_exits_to_pick()
     test_no_feasible_clearance_stops_before_pick()
-    test_nudge_preflight_failure_does_not_close_gripper()
+    test_nudge_preflight_failure_does_not_execute_push()
+    test_push_clear_command_uses_single_process_gripper_push()
     print("manual push clearance tests passed")

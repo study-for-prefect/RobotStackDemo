@@ -20,6 +20,11 @@ def parse_args():
         help="Run one four-stage tabletop push from push_execution_plan_v1 JSON.",
     )
     parser.add_argument(
+        "--close-gripper-for-push",
+        action="store_true",
+        help="In --push-plan-json --execute mode, close the gripper as a rigid paddle, preflight, execute, then reopen.",
+    )
+    parser.add_argument(
         "--ready-only",
         action="store_true",
         help="Only plan/execute --ready-joint-pose-json, then exit without loading or running a pick plan.",

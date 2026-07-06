@@ -16,6 +16,22 @@ from .push_clearing import evaluate_push_candidates
 ObjectDict = Dict[str, Any]
 
 
+def refresh_executable_safe(candidate: dict) -> dict:
+    candidate["executable_safe"] = bool(
+        candidate.get("feasible")
+        and candidate.get("geometry_feasible")
+        and candidate.get("approach_path_safe")
+        and candidate.get("push_swept_safe")
+        and candidate.get("push_end_safe")
+        and candidate.get("future_task_feasible", True)
+        and candidate.get("moveit_feasible")
+        and candidate.get("task_effective")
+        and candidate.get("protected_structure_safe")
+        and candidate.get("automatic_execution_allowed", False)
+    )
+    return candidate
+
+
 def _object_id(obj: ObjectDict) -> str:
     return str(obj.get("id"))
 
@@ -44,14 +60,6 @@ def _status_tags(obj: ObjectDict, protected_ids: Iterable[Any]) -> dict:
         "state": obj.get("state"),
         "pushable": obj.get("pushable"),
     }
-
-
-def _top_z(obj: ObjectDict) -> float:
-    center = get_center(obj)
-    size = get_size(obj)
-    if center is None or size is None:
-        return 0.0
-    return float(center[2]) + 0.5 * float(size[2])
 
 
 def _feasible_yaw_count(grasp: dict) -> int:
@@ -241,14 +249,23 @@ def _score_candidate(candidate: dict) -> dict:
     enabling_gain = float(candidate.get("enabling_gain", 0.0))
     free_space_gain = float(candidate.get("free_space_gain", 0.0))
     candidate["task_effective"] = bool(direct_gain > 0.0 or enabling_gain > 0.0 or free_space_gain > 0.0)
-    if not candidate["task_effective"]:
-        candidate["exploratory"] = True
+    yaw_gain = candidate.get("target_yaw_gain", {})
+    has_direct_target_gain = bool(
+        float(yaw_gain.get("gain", 0.0)) > 0.0
+        or yaw_gain.get("after_grasp_feasible")
+        or direct_gain > 0.0
+    )
+    candidate["direct_clearance_candidate"] = has_direct_target_gain
+    candidate["exploratory"] = not has_direct_target_gain
+    candidate["automatic_execution_allowed"] = bool(has_direct_target_gain and candidate["task_effective"])
     utility = (3.0 * direct_gain) + (1.8 * enabling_gain) + (0.9 * free_space_gain)
+    if candidate["exploratory"]:
+        utility *= 0.35
     easiness = float(candidate.get("easiness_score", 0.0))
     risk = float(candidate.get("risk_score", 0.0))
     candidate["utility_score"] = round(utility, 6)
     candidate["score"] = round(utility + easiness - risk, 6)
-    return candidate
+    return refresh_executable_safe(candidate)
 
 
 def _direct_target_gain(yaw_gain: dict) -> float:
@@ -291,13 +308,11 @@ def _candidate_safety_fields(
     candidate["geometry_feasible"] = bool(geometry_feasible)
     candidate["moveit_feasible"] = bool(moveit_feasible)
     candidate["protected_structure_safe"] = bool(protected_structure_safe)
-    candidate["executable_safe"] = bool(
-        candidate["geometry_feasible"]
-        and candidate["moveit_feasible"]
-        and candidate.get("task_effective")
-        and candidate["protected_structure_safe"]
-    )
-    return candidate
+    candidate.setdefault("feasible", bool(geometry_feasible))
+    candidate.setdefault("approach_path_safe", bool(geometry_feasible))
+    candidate.setdefault("push_swept_safe", bool(geometry_feasible))
+    candidate.setdefault("push_end_safe", bool(geometry_feasible))
+    return refresh_executable_safe(candidate)
 
 
 def _make_pick_away_candidate(
@@ -464,6 +479,10 @@ def build_frontier_clearance_plan(
                             "target_yaw_gain": yaw_gain,
                             "reason": evaluation.get("reason"),
                             "feasible": bool(evaluation.get("feasible")),
+                            "approach_path_safe": bool(evaluation.get("approach_path_safe")),
+                            "push_swept_safe": bool(evaluation.get("push_swept_safe")),
+                            "push_end_safe": bool(evaluation.get("push_end_safe")),
+                            "future_task_feasible": bool((evaluation.get("future_task_impact") or {}).get("feasible", True)),
                             "push_evaluation": evaluation,
                             "push_relation": relation,
                             "push_selected_result": result,
@@ -488,5 +507,5 @@ def build_frontier_clearance_plan(
         "all_clearance_action_candidates": all_candidates,
         "preflight_clearance_candidates": safe_candidates,
         "safe_clearance_candidates": executable_safe_candidates,
-        "selected_clearance_action": safe_candidates[0] if safe_candidates else None,
+        "selected_clearance_action": executable_safe_candidates[0] if executable_safe_candidates else None,
     }
