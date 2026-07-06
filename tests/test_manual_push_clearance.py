@@ -163,6 +163,7 @@ def test_automatic_clearance_reobserves_and_exits_to_pick():
                 "approach_path_safe": True,
                 "push_swept_safe": True,
                 "push_end_safe": True,
+                "future_task_feasible": True,
                 "protected_structure_safe": True,
                 "task_effective": True,
                 "automatic_execution_allowed": True,

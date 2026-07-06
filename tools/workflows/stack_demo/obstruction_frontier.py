@@ -255,9 +255,13 @@ def _score_candidate(candidate: dict) -> dict:
         or yaw_gain.get("after_grasp_feasible")
         or direct_gain > 0.0
     )
+    has_enabling_gain = bool(enabling_gain > 0.0)
     candidate["direct_clearance_candidate"] = has_direct_target_gain
-    candidate["exploratory"] = not has_direct_target_gain
-    candidate["automatic_execution_allowed"] = bool(has_direct_target_gain and candidate["task_effective"])
+    candidate["enabling_clearance_candidate"] = has_enabling_gain
+    candidate["exploratory"] = not (has_direct_target_gain or has_enabling_gain)
+    candidate["automatic_execution_allowed"] = bool(
+        candidate["task_effective"] and (has_direct_target_gain or has_enabling_gain)
+    )
     utility = (3.0 * direct_gain) + (1.8 * enabling_gain) + (0.9 * free_space_gain)
     if candidate["exploratory"]:
         utility *= 0.35
@@ -296,6 +300,39 @@ def _enabling_gain(
             gain += 1.0
         gains.append(gain)
     return max(gains) if gains else 0.0
+
+
+def _evaluation_direct_target_gain(
+    evaluation: dict,
+    relation_target: ObjectDict,
+    target: ObjectDict,
+) -> float:
+    if _object_id(relation_target) != _object_id(target):
+        return 0.0
+    gain = 0.0
+    if evaluation.get("post_push_grasp_feasible"):
+        gain += 1.0
+    gain += max(0.0, float(evaluation.get("current_grasp_gain") or 0.0))
+    return gain
+
+
+def _evaluation_enabling_gain(
+    evaluation: dict,
+    relation_target: ObjectDict,
+    target: ObjectDict,
+) -> Tuple[float, Optional[str]]:
+    if _object_id(relation_target) == _object_id(target):
+        return 0.0, None
+    blocker_count_reduction = max(0, int(evaluation.get("blocker_count_reduction") or 0))
+    grasp_gain = max(0.0, float(evaluation.get("current_grasp_gain") or 0.0))
+    post_push_grasp_feasible = bool(evaluation.get("post_push_grasp_feasible"))
+    if post_push_grasp_feasible:
+        return 1.0 + grasp_gain + 0.25 * blocker_count_reduction, "post_push_blocker_grasp_feasible"
+    if blocker_count_reduction > 0:
+        return 0.5 + 0.25 * blocker_count_reduction + grasp_gain, "blocker_count_reduction"
+    if grasp_gain > 0.0:
+        return grasp_gain, "blocker_grasp_clearance_gain"
+    return 0.0, None
 
 
 def _candidate_safety_fields(
@@ -453,11 +490,24 @@ def build_frontier_clearance_plan(
                 if float(evaluation.get("distance_m") or 0.0) > nudge_max + 1e-9:
                     continue
                 yaw_gain = _target_yaw_gain(target, objects, obstacle.get("id"), args)
-                direct_gain = _direct_target_gain(yaw_gain)
-                enabling_gain = _enabling_gain(obstacle, target, objects, frontier_item, args)
+                direct_gain = _direct_target_gain(yaw_gain) + _evaluation_direct_target_gain(
+                    evaluation,
+                    relation_target,
+                    target,
+                )
+                graph_enabling_gain = _enabling_gain(obstacle, target, objects, frontier_item, args)
+                eval_enabling_gain, eval_enabling_reason = _evaluation_enabling_gain(
+                    evaluation,
+                    relation_target,
+                    target,
+                )
+                enabling_gain = max(graph_enabling_gain, eval_enabling_gain)
                 free_space_gain = 0.2 if float(evaluation.get("target_distance_after_m") or 0.0) > 0.0 else 0.0
                 easiness = 0.4 + max(0.0, float(evaluation.get("score", 0.0)))
                 risk = 0.4 + 0.2 * max(0, int(frontier_item.get("min_depth", 1)) - 1)
+                enabling_reason = eval_enabling_reason
+                if enabling_reason is None and graph_enabling_gain > 0.0:
+                    enabling_reason = "graph_removed_obstacle_improves_blocked_object_grasp"
                 candidate = _score_candidate(
                     _candidate_safety_fields(
                         {
@@ -474,6 +524,14 @@ def build_frontier_clearance_plan(
                             "direct_target_gain": round(direct_gain, 6),
                             "enabling_gain": round(enabling_gain, 6),
                             "free_space_gain": round(free_space_gain, 6),
+                            "current_grasp_gain": evaluation.get("current_grasp_gain", 0.0),
+                            "current_blocker_count": evaluation.get("current_blocker_count"),
+                            "predicted_blocker_count": evaluation.get("predicted_blocker_count"),
+                            "blocker_count_reduction": evaluation.get("blocker_count_reduction", 0),
+                            "post_push_grasp_feasible": bool(evaluation.get("post_push_grasp_feasible")),
+                            "enables_blocker_object_id": evaluation.get("enables_blocker_object_id")
+                            or relation_target.get("id"),
+                            "enabling_reason": enabling_reason,
                             "easiness_score": round(easiness, 6),
                             "risk_score": round(risk, 6),
                             "target_yaw_gain": yaw_gain,

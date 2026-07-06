@@ -177,6 +177,12 @@ def _candidate_output(candidate: CandidateDict, obstacle: ObjectDict) -> Dict[st
         "score": 0.0,
         "reason": "not_evaluated",
         "current_grasp_gain": 0.0,
+        "current_blocker_count": None,
+        "predicted_blocker_count": None,
+        "blocker_count_reduction": 0,
+        "post_push_grasp_feasible": False,
+        "enables_blocker_object_id": None,
+        "enabling_reason": None,
         "future_blocking_cost": 0.0,
         "place_blocking_cost": 0.0,
         "collision_risk": 0.0,
@@ -324,6 +330,8 @@ def _mark_feasible_candidate(
             "score": round(score, 6),
             "reason": "push_enables_current_grasp_and_preserves_future_tasks",
             "current_grasp_gain": round(current_gain, 6),
+            "enables_blocker_object_id": predicted_target.get("id"),
+            "enabling_reason": "post_push_grasp_feasible",
             "history_reason": history_reason,
             "target_distance_after_m": round(xy_distance(predicted_obstacle, predicted_target), 6),
         }
@@ -358,6 +366,8 @@ def _mark_progress_candidate(
             "current_blocker_count": before,
             "predicted_blocker_count": after,
             "blocker_count_reduction": progress,
+            "enables_blocker_object_id": predicted_target.get("id"),
+            "enabling_reason": "blocker_count_reduction",
             "target_distance_after_m": round(xy_distance(predicted_obstacle, predicted_target), 6),
         }
     )

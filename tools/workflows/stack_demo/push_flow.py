@@ -111,9 +111,12 @@ def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
             "selected_grasp_yaw_deg", "safe_place_center_m", "feasible",
             "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
             "future_task_feasible", "protected_structure_safe", "moveit_feasible",
-            "task_effective", "direct_clearance_candidate", "exploratory",
+            "task_effective", "direct_clearance_candidate", "enabling_clearance_candidate", "exploratory",
             "automatic_execution_allowed", "executable_safe", "direct_target_gain",
-            "enabling_gain", "free_space_gain", "utility_score", "easiness_score",
+            "enabling_gain", "free_space_gain", "current_grasp_gain",
+            "current_blocker_count", "predicted_blocker_count", "blocker_count_reduction",
+            "post_push_grasp_feasible", "enables_blocker_object_id", "enabling_reason",
+            "utility_score", "easiness_score",
             "risk_score", "score", "target_yaw_gain", "reason",
             "moveit_preflight_error", "push_execution_plan_path",
         )
@@ -160,10 +163,28 @@ def _candidate_summary(candidate: dict) -> dict:
         "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
         "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
-        "protected_structure_safe", "task_effective", "exploratory",
-        "automatic_execution_allowed", "target_yaw_gain", "score", "reason",
+        "protected_structure_safe", "task_effective", "direct_clearance_candidate",
+        "enabling_clearance_candidate", "exploratory", "automatic_execution_allowed",
+        "target_yaw_gain", "direct_target_gain", "enabling_gain", "free_space_gain",
+        "blocker_count_reduction", "current_grasp_gain", "post_push_grasp_feasible",
+        "enables_blocker_object_id", "enabling_reason", "score", "reason",
     )
     return {key: candidate.get(key) for key in keys if key in candidate}
+
+
+def _failed_clearance_hard_safety_fields(candidate: dict) -> list:
+    required_true_fields = (
+        "feasible",
+        "geometry_feasible",
+        "approach_path_safe",
+        "push_swept_safe",
+        "push_end_safe",
+        "future_task_feasible",
+        "protected_structure_safe",
+        "task_effective",
+        "automatic_execution_allowed",
+    )
+    return [field for field in required_true_fields if not candidate.get(field)]
 
 
 def _preflight_safe_candidates(
@@ -188,6 +209,18 @@ def _preflight_safe_candidates(
                 {
                     "candidate_id": candidate.get("candidate_id"),
                     "reason": "exploratory_candidate_requires_manual_confirmation",
+                }
+            )
+            continue
+        failed_fields = _failed_clearance_hard_safety_fields(candidate)
+        if failed_fields:
+            failures.append(
+                {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "reason": "hard_safety_fields_failed",
+                    "failed_fields": failed_fields,
+                    "moveit_feasible": candidate.get("moveit_feasible"),
+                    "executable_safe": candidate.get("executable_safe"),
                 }
             )
             continue

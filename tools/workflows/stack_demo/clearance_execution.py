@@ -27,8 +27,11 @@ def _candidate_summary(candidate: dict) -> dict:
         "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
         "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
-        "protected_structure_safe", "task_effective", "exploratory",
-        "automatic_execution_allowed", "target_yaw_gain", "score", "reason",
+        "protected_structure_safe", "task_effective", "direct_clearance_candidate",
+        "enabling_clearance_candidate", "exploratory", "automatic_execution_allowed",
+        "target_yaw_gain", "direct_target_gain", "enabling_gain", "free_space_gain",
+        "blocker_count_reduction", "current_grasp_gain", "post_push_grasp_feasible",
+        "enables_blocker_object_id", "enabling_reason", "score", "reason",
     )
     return {key: candidate.get(key) for key in keys if key in candidate}
 
