@@ -279,6 +279,10 @@ def _prepare_push_context(
     output["approach_path_safe"] = not approach_collisions
     output["push_swept_safe"] = not push_collisions
     if not swept["feasible"]:
+        if swept.get("reason") == "invalid_push_plan":
+            output["collision_risk"] = 1.0
+            output["reason"] = swept.get("error") or swept["reason"]
+            return None
         soft_swept_collision = _is_soft_swept_collision(
             swept.get("collisions", []),
             _objects(scene),

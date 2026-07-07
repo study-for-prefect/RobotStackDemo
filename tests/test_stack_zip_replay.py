@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from robot_scene_pipeline.llm_stack_blocks import rule_stack_blocks_decision
 from tools.workflows.stack_demo.obstruction_frontier import build_frontier_clearance_plan
+from tools.workflows.stack_demo.scene import estimate_current_stack
 
 
 ZIP_213559 = (
@@ -29,6 +30,14 @@ ZIP_77_6_LATEST = (
     "/Users/wujl/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/"
     "wxid_at6wr1ixd8dv22_7973/temp/drag/stack_push_execute77-6(1).zip"
 )
+ZIP_77_11 = (
+    "/Users/wujl/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/"
+    "wxid_at6wr1ixd8dv22_7973/temp/drag/stack_push_execute77-11.zip"
+)
+ZIP_77_12 = (
+    "/Users/wujl/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/"
+    "wxid_at6wr1ixd8dv22_7973/temp/drag/stack_push_execute77-12.zip"
+)
 
 
 def args():
@@ -44,6 +53,7 @@ def args():
         push_clearing_contact_z_offset_m=0.015,
         push_tool_width_m=0.035,
         push_tool_safety_margin_m=0.005,
+        search_radius_m=0.06,
     )
 
 
@@ -110,8 +120,40 @@ def test_77_replays_generate_preflight_candidates_for_simple_clearance():
         assert all(candidate.get("protected_structure_safe") for candidate in nudge_candidates)
 
 
+def test_77_11_replay_excludes_soft_collision_nudges_from_preflight():
+    if not os.path.exists(ZIP_77_11):
+        print("skip: zip fixture not present {}".format(ZIP_77_11))
+        return
+    cycle = _cycle_name(ZIP_77_11)
+    state = _load_zip_json(ZIP_77_11, "{}/scene_state_before_action.json".format(cycle))
+    selected = _load_zip_json(ZIP_77_11, "{}/selected_action.json".format(cycle))
+    target_id = selected["selected_clearance_action"]["target_object_id"]
+    target = next(obj for obj in state["objects"] if str(obj.get("id")) == str(target_id))
+    candidates = build_frontier_clearance_plan(state, target, protected_ids=[], args=args())["preflight_clearance_candidates"]
+    assert candidates
+    assert not any(
+        candidate.get("action_type") == "nudge"
+        and (not candidate.get("approach_path_safe") or not candidate.get("push_swept_safe"))
+        for candidate in candidates
+    )
+
+
+def test_77_12_first_stack_estimate_uses_requested_red_base_only():
+    if not os.path.exists(ZIP_77_12):
+        print("skip: zip fixture not present {}".format(ZIP_77_12))
+        return
+    state = _load_zip_json(ZIP_77_12, "cycle_01_object_2/scene_state_before_action.json")
+    decision = _load_zip_json(ZIP_77_12, "stack_blocks_decision.json")
+    base = next(obj for obj in state["objects"] if str(obj.get("id")) == str(decision["base_object_id"]))
+    _base, stack = estimate_current_stack(state, base, None, args())
+    assert stack["placement_base_object_id"] == decision["base_object_id"]
+    assert stack["stack_height_object_count"] == 1
+
+
 if __name__ == "__main__":
     test_213757_color_rule_avoids_low_confidence_green_8()
     test_213559_replay_generates_enabling_preflight_candidates()
     test_77_replays_generate_preflight_candidates_for_simple_clearance()
+    test_77_11_replay_excludes_soft_collision_nudges_from_preflight()
+    test_77_12_first_stack_estimate_uses_requested_red_base_only()
     print("stack zip replay tests passed")

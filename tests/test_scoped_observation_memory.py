@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 from robot_scene_pipeline.scene_memory import update_from_detections, update_from_scoped_detections
-from tools.workflows.stack_demo.observation_scope import expected_placed_template
+from tools.workflows.stack_demo.observation_scope import _scope_report, expected_placed_template
 from tools.workflows.stack_demo.post_place_observation import _planned_height_fallback
 
 
@@ -116,9 +116,27 @@ def test_planned_height_fallback_accepts_confirmed_placed_object_xy():
     assert corrected["height_estimation_method"] == "planned_place_height_fallback"
 
 
+def test_post_place_scope_rejects_xy_match_with_bad_height():
+    template = {
+        "id": 3,
+        "label": "square green",
+        "geometry_center_m": [0.3271, 0.209, 0.0342],
+    }
+    wrong_height = detection("square green", [0.3186, 0.2387, -0.0146])
+    observed, missing = _scope_report(
+        {"objects": [wrong_height]},
+        [template],
+        max_dist_m=0.07,
+        max_z_delta_m=0.025,
+    )
+    assert observed == []
+    assert missing[0]["template_id"] == 3
+
+
 if __name__ == "__main__":
     test_scoped_update_keeps_missing_objects_low_confidence_not_operable()
     test_scoped_update_marks_missing_critical_as_unconfirmed_missing()
     test_expected_placed_template_uses_tcp_place_center()
     test_planned_height_fallback_accepts_confirmed_placed_object_xy()
+    test_post_place_scope_rejects_xy_match_with_bad_height()
     print("scoped observation memory tests passed")

@@ -431,6 +431,8 @@ def reacquire_stack_anchor(current_state, base_template, previous_stack_xy=None)
 
 def estimate_current_stack(current_state, base_template, previous_stack_xy, args, search_radius_m=None, **kwargs):
     base_for_yaw, base_id, anchor_xy = reacquire_stack_anchor(current_state, base_template, previous_stack_xy)
+    if previous_stack_xy is None and base_id is not None and "allowed_stack_object_ids" not in kwargs:
+        kwargs["allowed_stack_object_ids"] = [base_id]
     stack = estimate_stack_state(
         current_state,
         base_object_id=base_id,

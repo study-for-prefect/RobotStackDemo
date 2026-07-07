@@ -188,6 +188,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--scoped-observation-max-attempts", type=int, default=5)
     parser.add_argument("--scoped-observation-match-distance-m", type=float, default=0.07)
+    parser.add_argument("--post-place-match-z-tolerance-m", type=float, default=0.025)
     parser.add_argument(
         "--clearance-safe-place-max-distance-m",
         type=float,

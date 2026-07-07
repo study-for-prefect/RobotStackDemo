@@ -78,6 +78,7 @@ def handle_post_place_observation(
         noncritical_templates=[current_base_object] + list(future_templates),
         scope_name="after_place",
         description="Post-place scoped observation",
+        critical_match_z_tolerance_m=getattr(args, "post_place_match_z_tolerance_m", 0.025),
     )
     if post_place_state is not None:
         current_state = post_place_state

@@ -59,6 +59,7 @@ def estimate_stack_state(
     excluded_xy=None,
     exclusion_radius_m=0.0,
     excluded_object_ids=None,
+    allowed_stack_object_ids=None,
     expected_top_z_base_m=None,
     top_z_tolerance_m=0.0,
 ):
@@ -80,7 +81,19 @@ def estimate_stack_state(
             excluded_ids.add(int(value))
         except (TypeError, ValueError):
             pass
-    stack_candidates = [obj for obj in objects if obj["id"] not in excluded_ids]
+    allowed_ids = None
+    if allowed_stack_object_ids is not None:
+        allowed_ids = set()
+        for value in allowed_stack_object_ids or []:
+            try:
+                allowed_ids.add(int(value))
+            except (TypeError, ValueError):
+                pass
+    stack_candidates = [
+        obj for obj in objects
+        if obj["id"] not in excluded_ids
+        and (allowed_ids is None or obj["id"] in allowed_ids)
+    ]
     expected_top_z = None if expected_top_z_base_m is None else float(expected_top_z_base_m)
     top_z_tolerance = float(top_z_tolerance_m)
     base = None
@@ -102,6 +115,7 @@ def estimate_stack_state(
             "stack_xy_base_m": previous_xy,
             "top_z_base_m": None,
             "excluded_object_ids": sorted(excluded_ids),
+            "allowed_stack_object_ids": None if allowed_ids is None else sorted(allowed_ids),
             "stack_objects": [],
         }
 
@@ -141,6 +155,7 @@ def estimate_stack_state(
             "stack_anchor_source": anchor_source,
             "base_selection_source": base_source,
             "excluded_object_ids": sorted(excluded_ids),
+            "allowed_stack_object_ids": None if allowed_ids is None else sorted(allowed_ids),
             "stack_objects": [],
         }
     stack_objects.sort(key=lambda obj: (obj["top_z_base_m"], obj["id"]))
@@ -181,6 +196,7 @@ def estimate_stack_state(
         "excluded_xy_base_m": excluded_xy,
         "exclusion_radius_m": exclusion_radius,
         "excluded_object_ids": sorted(excluded_ids),
+        "allowed_stack_object_ids": None if allowed_ids is None else sorted(allowed_ids),
         "expected_top_z_base_m": expected_top_z,
         "top_z_tolerance_m": top_z_tolerance,
         "stack_height_object_count": len(stack_objects),

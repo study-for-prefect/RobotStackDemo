@@ -73,6 +73,23 @@ def choose_clearance_action(
     memory: dict,
     step_index: int,
 ) -> Tuple[Optional[dict], dict]:
+    pick_away_candidates = [
+        candidate for candidate in safe_candidates
+        if candidate.get("action_type") == "pick_away"
+    ]
+    if pick_away_candidates:
+        selected = pick_away_candidates[0]
+        report = {
+            "selection_status": "selected",
+            "selection_source": "deterministic_pick_away_priority",
+            "selected_candidate_id": selected.get("candidate_id"),
+            "reason": "A directly graspable obstacle can be picked away; prefer it over nudge clearing.",
+        }
+        write_json(
+            os.path.join(cycle_dir, "clearance_step_{:02d}_llm_selection.json".format(step_index)),
+            report,
+        )
+        return selected, report
     llm_report = select_safe_push_candidate(
         args,
         getattr(args, "instruction", ""),

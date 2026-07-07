@@ -190,10 +190,11 @@ Frontier clearing 的候选动作统一评分：
 清障目标不是清空桌面，而是制造当前目标的抓取空间；`target_yaw_gain=0`
 的动作只有在 `direct_progress_gain`、`enabling_gain`、`blocker_count_reduction`
 或 `current_grasp_gain` 可验证时才会作为多步清障候选。短距离 nudge
-如果只是保守几何模型标出软接触，但它能减少当前阻挡并且不碰受保护结构，
-仍会写入 `clearance_preflight_allowed=true` 进入 MoveIt 预检。若候选本身
-`geometry_feasible=false` 或 `future_task_feasible=false`，即使它看起来能清理
-未来放置区，也只能留在全集里作为诊断候选，不能进入可执行安全候选。
+如果被保守几何模型标出软接触，只能保留在全集诊断里；即使它能减少当前
+阻挡，只要 `approach_path_safe=false` 或 `push_swept_safe=false`，也不能进入
+MoveIt 预检或真实执行。若候选本身 `geometry_feasible=false` 或
+`future_task_feasible=false`，即使它看起来能清理未来放置区，也只能留在全集里
+作为诊断候选，不能进入可执行安全候选。
 
 Hardware execution remains separately opt-in:
 
@@ -212,9 +213,9 @@ that satisfy all hard code-side gates enter `safe_clearance_candidates.json`:
 `push_swept_safe=true`, `push_end_safe=true`, `protected_structure_safe=true`,
 `task_effective=true`, and `moveit_feasible=true`.
 For staged nudge clearing, `clearance_preflight_allowed=true` records the
-equivalent code-side gate. It may be true through
-`soft_clearance_geometry_allowed`, but MoveIt reachability never overrides
-`geometry_feasible=false` or `future_task_feasible=false`. The candidate still
+equivalent code-side gate. `soft_clearance_geometry_allowed=true` is diagnostic
+only; MoveIt reachability never overrides failed approach/swept geometry,
+`geometry_feasible=false`, or `future_task_feasible=false`. The candidate still
 becomes `safe` only after MoveIt preflight sets `moveit_feasible=true`.
 
 The selected real nudge then runs in one MoveIt process with
@@ -228,6 +229,10 @@ Real `pick_away` actions build an obstacle pick plan plus a safe-place plan, and
 both are sent through the existing MoveIt pick/place preview before motion.
 `relaxed_top_pick_away_grasp` actions are not automatic hardware actions because
 they deliberately ignore current grasp blockers.
+When at least one executable full-scene `pick_away` candidate exists, the
+workflow chooses the highest-ranked pick-away deterministically before asking
+the LLM to choose among nudge candidates. This keeps directly graspable
+obstacles from being converted into less stable pushes.
 
 Each evaluated action receives a stable `candidate_id`.
 `all_clearance_action_candidates.json` contains a compact scored summary.
@@ -243,6 +248,13 @@ cannot introduce a new direction, obstacle, or action. If the LLM is unavailable
 or returns an unknown/unsafe id, the workflow falls back to the highest code
 score from the safe list. If the safe list is empty, no selected clearance action
 is produced.
+
+Before the first placement, stack estimation is anchored to the requested base
+object only. Nearby loose blocks inside the search radius are not allowed to
+become the stack top before anything has actually been placed. After a place,
+scoped confirmation checks both XY and Z; a same-label object near the planned
+XY but with a height error larger than `--post-place-match-z-tolerance-m`
+(default `0.025 m`) is treated as missing instead of confirming the placement.
 
 LLM push selection is enabled by default and can be disabled explicitly:
 

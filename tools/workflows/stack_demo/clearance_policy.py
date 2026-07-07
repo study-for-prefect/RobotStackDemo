@@ -58,7 +58,7 @@ def annotate_nudge_preflight_policy(candidate: dict, nudge_max_m: float) -> dict
         and candidate.get("push_swept_safe")
         and candidate.get("push_end_safe")
     )
-    geometry_ok = strict_geometry or soft_geometry
+    geometry_ok = strict_geometry
     future_ok = bool(candidate.get("future_task_feasible", True))
     decision_ok = bool(candidate.get("automatic_execution_allowed") or verified_progress)
     candidate["verified_clearance_progress"] = verified_progress

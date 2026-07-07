@@ -46,14 +46,25 @@ def _xy_distance(first: ObjectDict, second: ObjectDict) -> float:
     return math.hypot(first_center[0] - second_center[0], first_center[1] - second_center[1])
 
 
-def _matching_object(objects: Iterable[ObjectDict], template: ObjectDict, max_dist_m: float) -> Optional[ObjectDict]:
+def _matching_object(
+    objects: Iterable[ObjectDict],
+    template: ObjectDict,
+    max_dist_m: float,
+    max_z_delta_m: Optional[float] = None,
+) -> Optional[ObjectDict]:
     label = _label(template)
     if label is None:
         return None
+    template_center = _finite_xyz(template)
     candidates = [
         obj for obj in objects
         if isinstance(obj, dict) and _label(obj) == label and _finite_xyz(obj) is not None
     ]
+    if max_z_delta_m is not None and template_center is not None:
+        candidates = [
+            obj for obj in candidates
+            if abs(_finite_xyz(obj)[2] - template_center[2]) <= float(max_z_delta_m)
+        ]
     candidates.sort(key=lambda obj: _xy_distance(obj, template))
     if candidates and _xy_distance(candidates[0], template) <= float(max_dist_m):
         return candidates[0]
@@ -120,12 +131,13 @@ def _scope_report(
     critical_templates: Iterable[ObjectDict],
     max_dist_m: float,
     allow_label_fallback: bool = False,
+    max_z_delta_m: Optional[float] = None,
 ) -> Tuple[List[dict], List[dict]]:
     observed = []
     missing = []
     objects = fused_state.get("objects", [])
     for template in critical_templates:
-        match = _matching_object(objects, template, max_dist_m)
+        match = _matching_object(objects, template, max_dist_m, max_z_delta_m=max_z_delta_m)
         match_policy = "nearest_label_within_distance_gate"
         if match is None and allow_label_fallback:
             match = _unique_label_fallback_match(objects, template)
@@ -142,6 +154,9 @@ def _scope_report(
                 "observed_id": match.get("id"),
                 "observed_center_m": _finite_xyz(match),
                 "distance_m": round(_xy_distance(match, template), 6),
+                "z_delta_m": round(abs(_finite_xyz(match)[2] - _finite_xyz(template)[2]), 6)
+                if _finite_xyz(match) is not None and _finite_xyz(template) is not None
+                else None,
                 "match_policy": match_policy,
             })
             observed.append(item)
@@ -196,6 +211,7 @@ def observe_empty_with_scope(
     scope_name: str = "post_action",
     description: str = "Post-action observation",
     allow_critical_label_fallback: bool = False,
+    critical_match_z_tolerance_m: Optional[float] = None,
 ) -> Tuple[Optional[dict], dict, dict]:
     critical = [copy.deepcopy(obj) for obj in critical_templates if isinstance(obj, dict)]
     noncritical = [copy.deepcopy(obj) for obj in (noncritical_templates or []) if isinstance(obj, dict)]
@@ -238,6 +254,7 @@ def observe_empty_with_scope(
             critical,
             max_dist_m,
             allow_label_fallback=allow_critical_label_fallback,
+            max_z_delta_m=critical_match_z_tolerance_m,
         )
         attempts.append({
             "attempt": attempt_index,

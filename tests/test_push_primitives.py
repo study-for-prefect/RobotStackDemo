@@ -32,6 +32,26 @@ def test_push_targets():
     assert targets["retreat"] == [0.455, 0.1, 0.07]
 
 
+def test_push_targets_reject_contact_above_thin_obstacle():
+    plan = {
+        "schema_version": "push_execution_plan_v1",
+        "frame_id": "base_link",
+        "direction_base": [1.0, 0.0, 0.0],
+        "distance_m": 0.025,
+        "lift_m": 0.05,
+        "contact_z_offset_m": 0.015,
+        "obstacle": {
+            "geometry_center_m": [0.42, 0.10, -0.0059],
+            "dimensions_m": [0.055, 0.031, 0.0145],
+        },
+    }
+    try:
+        build_push_targets(plan)
+        raise AssertionError("expected thin obstacle contact height rejection")
+    except ValueError as exc:
+        assert "too high for obstacle height" in str(exc)
+
+
 def make_object(object_id, center, size=(0.04, 0.04, 0.03)):
     return {
         "id": object_id,
@@ -303,6 +323,7 @@ def test_tool_vertical_approach_collision_rejects_candidate():
 
 if __name__ == "__main__":
     test_push_targets()
+    test_push_targets_reject_contact_above_thin_obstacle()
     test_direction_evaluation_selects_open_side()
     test_direction_evaluation_reports_no_safe_direction()
     test_all_yaws_blocked_selects_safe_joint_push()
