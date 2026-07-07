@@ -77,15 +77,16 @@ def max_joint_delta(trajectory):
     joint_names, points = parsed
     if len(points) < 2:
         return None
-    start = points[0].positions
     max_name = None
     max_delta = None
+    previous_positions = points[0].positions
     for point in points[1:]:
-        for name, start_value, value in zip(joint_names, start, point.positions):
-            delta = abs(float(value) - float(start_value))
+        for name, previous_value, value in zip(joint_names, previous_positions, point.positions):
+            delta = abs(float(value) - float(previous_value))
             if max_delta is None or delta > max_delta:
                 max_name = name
                 max_delta = delta
+        previous_positions = point.positions
     if max_delta is None:
         return None
     return max_name, max_delta
@@ -126,6 +127,20 @@ def gripper_position_for_command(args, name):
     if name == "close":
         return int(args.gripper_close_position)
     raise ValueError("Unsupported gripper command: {}".format(name))
+
+
+def gripper_command_accepted(args: object, command: str, status: object, current_position: object) -> bool:
+    if status:
+        return True
+    if command != "close" or current_position is None:
+        return False
+    close_position = int(args.gripper_close_position)
+    open_position = int(args.gripper_open_position)
+    span = max(1, abs(open_position - close_position))
+    tolerance = getattr(args, "gripper_close_contact_tolerance", None)
+    if tolerance is None:
+        tolerance = 0.35 * span
+    return abs(int(current_position) - close_position) <= float(tolerance)
 
 
 def maybe_confirm(args, prompt):

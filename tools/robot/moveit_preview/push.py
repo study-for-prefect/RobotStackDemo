@@ -10,7 +10,12 @@ from tools.robot.push_primitives import build_push_targets
 
 from .execution import plan_and_maybe_execute_motion, plan_motion_trajectory
 from .orientation import tool0_goal_from_tcp, transform_position_quat
-from .trajectory import gripper_position_for_command, joint_state_from_trajectory, max_joint_delta
+from .trajectory import (
+    gripper_command_accepted,
+    gripper_position_for_command,
+    joint_state_from_trajectory,
+    max_joint_delta,
+)
 
 
 def load_push_plan(path: str) -> Dict[str, Any]:
@@ -49,7 +54,15 @@ def _set_gripper(node: Any, args: Any, gripper: Any, command: str) -> bool:
     node.get_logger().info(
         "Push gripper {} done: status={}, position={}".format(command, status, current)
     )
-    return bool(status)
+    accepted = gripper_command_accepted(args, command, status, current)
+    if accepted and not status:
+        node.get_logger().warning(
+            "Push gripper close accepted by contact position: position={} target={}.".format(
+                current,
+                gripper_position_for_command(args, command),
+            )
+        )
+    return accepted
 
 
 def _recover_open_gripper(node: Any, args: Any, gripper: Any, reason: str) -> None:
