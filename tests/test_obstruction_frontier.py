@@ -76,7 +76,10 @@ def test_frontier_generates_preflight_nudge_for_direct_obstacle():
     assert plan["obstruction_graph"]["edges"]
     assert plan["obstruction_graph"]["frontier"][0]["object_id"] == "obstacle"
     assert plan["safe_clearance_candidates"] == []
-    selected = plan["preflight_clearance_candidates"][0]
+    selected = next(
+        candidate for candidate in plan["preflight_clearance_candidates"]
+        if candidate["action_type"] == "nudge"
+    )
     assert selected["action_type"] == "nudge"
     assert selected["geometry_feasible"] is True
     assert selected["moveit_feasible"] is False
@@ -305,7 +308,91 @@ def test_failed_swept_path_is_not_preflight_candidate():
         evaluate_push_fn=fake_push,
     )
     assert any(item["candidate_id"] == "unsafe_swept" for item in plan["all_clearance_action_candidates"])
-    assert plan["preflight_clearance_candidates"] == []
+    assert not any(
+        item["candidate_id"] == "unsafe_swept"
+        for item in plan["preflight_clearance_candidates"]
+    )
+
+
+def test_pick_away_uses_observed_scene_safe_place_without_table_bounds():
+    target = obj("target", [0.40, 0.00, 0.015])
+    obstacle = obj("obstacle", [0.435, 0.00, 0.015])
+    other = obj("other", [0.50, 0.00, 0.015])
+    state = {"objects": [target, obstacle, other]}
+    original_select = frontier_module.select_best_grasp
+
+    def fake_select_best_grasp(target_obj, objects, **_kwargs):
+        if target_obj["id"] == "target":
+            return {"grasp_feasible": False, "candidate_results": [], "blocking_objects": [{"id": "obstacle"}]}
+        return {
+            "grasp_feasible": True,
+            "selected_grasp_yaw_deg": 0.0,
+            "candidate_results": [{"feasible": True}],
+            "blocking_objects": [],
+        }
+
+    try:
+        frontier_module.select_best_grasp = fake_select_best_grasp
+        plan = build_frontier_clearance_plan(
+            state,
+            target,
+            protected_ids=[],
+            args=args(),
+            evaluate_push_fn=lambda *_args, **_kwargs: {"candidate_results": []},
+        )
+    finally:
+        frontier_module.select_best_grasp = original_select
+
+    candidate = next(
+        item for item in plan["preflight_clearance_candidates"]
+        if item["action_type"] == "pick_away"
+    )
+    assert candidate["action_type"] == "pick_away"
+    assert candidate["safe_place_center_m"]
+    assert candidate["grasp_policy"] == "full_scene_grasp"
+
+
+def test_pick_away_allows_relaxed_top_grasp_for_blocking_loose_object():
+    target = obj("target", [0.40, 0.00, 0.015])
+    obstacle = obj("obstacle", [0.435, 0.00, 0.015])
+    state = {"objects": [target, obstacle]}
+    original_select = frontier_module.select_best_grasp
+
+    def fake_select_best_grasp(target_obj, objects, **_kwargs):
+        if target_obj["id"] == "target":
+            return {"grasp_feasible": False, "candidate_results": [], "blocking_objects": [{"id": "obstacle"}]}
+        if len(objects) > 1:
+            return {
+                "grasp_feasible": False,
+                "candidate_results": [],
+                "blocking_objects": [{"id": "target", "label": "target"}],
+            }
+        return {
+            "grasp_feasible": True,
+            "selected_grasp_yaw_deg": 0.0,
+            "candidate_results": [{"feasible": True}],
+            "blocking_objects": [],
+        }
+
+    try:
+        frontier_module.select_best_grasp = fake_select_best_grasp
+        plan = build_frontier_clearance_plan(
+            state,
+            target,
+            protected_ids=[],
+            args=args(),
+            evaluate_push_fn=lambda *_args, **_kwargs: {"candidate_results": []},
+        )
+    finally:
+        frontier_module.select_best_grasp = original_select
+
+    candidate = next(
+        item for item in plan["preflight_clearance_candidates"]
+        if item["action_type"] == "pick_away"
+    )
+    assert candidate["action_type"] == "pick_away"
+    assert candidate["relaxed_pick_away_grasp"] is True
+    assert candidate["ignored_grasp_blockers"] == [{"id": "target", "label": "target"}]
 
 
 def test_verified_progress_soft_geometry_can_enter_preflight():
@@ -351,7 +438,10 @@ def test_verified_progress_soft_geometry_can_enter_preflight():
         args=args(),
         evaluate_push_fn=fake_push,
     )
-    candidate = plan["preflight_clearance_candidates"][0]
+    candidate = next(
+        item for item in plan["preflight_clearance_candidates"]
+        if item["candidate_id"] == "soft_progress"
+    )
     assert candidate["candidate_id"] == "soft_progress"
     assert candidate["verified_clearance_progress"] is True
     assert candidate["soft_clearance_geometry_allowed"] is True
@@ -403,7 +493,10 @@ def test_future_place_soft_block_with_progress_can_enter_preflight():
         future_place_regions=[{"center_base_m": [0.50, 0.00, 0.0], "radius_m": 0.04}],
         evaluate_push_fn=fake_push,
     )
-    candidate = plan["preflight_clearance_candidates"][0]
+    candidate = next(
+        item for item in plan["preflight_clearance_candidates"]
+        if item["candidate_id"] == "future_place_progress"
+    )
     assert candidate["candidate_id"] == "future_place_progress"
     assert candidate["future_task_feasible"] is False
     assert candidate["future_task_clearance_override"] is True
@@ -418,6 +511,8 @@ if __name__ == "__main__":
     test_blocker_count_reduction_is_enabling_candidate()
     test_free_space_gain_alone_stays_exploratory()
     test_failed_swept_path_is_not_preflight_candidate()
+    test_pick_away_uses_observed_scene_safe_place_without_table_bounds()
+    test_pick_away_allows_relaxed_top_grasp_for_blocking_loose_object()
     test_verified_progress_soft_geometry_can_enter_preflight()
     test_future_place_soft_block_with_progress_can_enter_preflight()
     print("obstruction frontier tests passed")

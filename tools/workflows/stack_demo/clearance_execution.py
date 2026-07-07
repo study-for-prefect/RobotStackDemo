@@ -26,6 +26,8 @@ def _candidate_summary(candidate: dict) -> dict:
     keys = (
         "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
+        "selected_grasp_yaw_deg", "safe_place_center_m",
+        "grasp_policy", "relaxed_pick_away_grasp", "ignored_grasp_blockers",
         "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
         "protected_structure_safe", "task_effective", "direct_clearance_candidate", "direct_progress_candidate",
         "enabling_clearance_candidate", "exploratory", "automatic_execution_allowed",

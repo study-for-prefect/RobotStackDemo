@@ -110,6 +110,7 @@ def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
             "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
             "frontier_depth", "blocks", "direction_base", "distance_m", "direction_source",
             "selected_grasp_yaw_deg", "safe_place_center_m", "feasible",
+            "grasp_policy", "relaxed_pick_away_grasp", "ignored_grasp_blockers",
             "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
             "future_task_feasible", "protected_structure_safe", "moveit_feasible",
             "task_effective", "direct_clearance_candidate", "direct_progress_candidate",
@@ -176,6 +177,8 @@ def _candidate_summary(candidate: dict) -> dict:
     keys = (
         "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
+        "selected_grasp_yaw_deg", "safe_place_center_m",
+        "grasp_policy", "relaxed_pick_away_grasp", "ignored_grasp_blockers",
         "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
         "protected_structure_safe", "task_effective", "direct_clearance_candidate", "direct_progress_candidate",
         "enabling_clearance_candidate", "exploratory", "automatic_execution_allowed",
@@ -233,6 +236,9 @@ def _preflight_safe_candidates(
         frontier_plan["safe_clearance_candidates"] = []
         return {"safe_candidates": safe_candidates, "failures": failures}
     for candidate in candidates:
+        if candidate.get("action_type") == "pick_away":
+            safe_candidates.append(candidate)
+            continue
         if candidate.get("action_type") != "nudge":
             continue
         candidate = _ensure_clearance_preflight_policy(candidate)

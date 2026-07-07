@@ -97,9 +97,13 @@ def test_77_replays_generate_preflight_candidates_for_simple_clearance():
             return
         candidates = _replay_preflight_candidates(zip_path)
         assert candidates
-        assert all(candidate.get("approach_path_safe") for candidate in candidates)
-        assert all(candidate.get("push_swept_safe") for candidate in candidates)
-        assert all(candidate.get("push_end_safe") for candidate in candidates)
+        assert all(candidate.get("clearance_preflight_allowed") for candidate in candidates)
+        nudge_candidates = [
+            candidate for candidate in candidates
+            if candidate.get("action_type") == "nudge"
+        ]
+        assert all(candidate.get("push_end_safe") for candidate in nudge_candidates)
+        assert all(candidate.get("protected_structure_safe") for candidate in nudge_candidates)
 
 
 if __name__ == "__main__":

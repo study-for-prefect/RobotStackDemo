@@ -7,9 +7,10 @@ import math
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from robot_scene_pipeline.detection_merge import merge_duplicate_objects_3d
-from robot_scene_pipeline.geometry_relations import get_center, get_size, object_xy_aabb, xy_aabb_overlap
+from robot_scene_pipeline.geometry_relations import get_center
 from robot_scene_pipeline.grasp_yaw_search import select_best_grasp
 
+from .clearance_placement import safe_place_for_object
 from .clearance_policy import annotate_nudge_preflight_policy, refresh_executable_safe
 from .push_clearing import evaluate_push_candidates
 
@@ -163,70 +164,6 @@ def build_obstruction_graph(
         "edges": edges,
         "frontier": list(frontier.values()),
     }
-
-
-def _translated_object(obj: ObjectDict, center_xy: Iterable[float]) -> ObjectDict:
-    output = copy.deepcopy(obj)
-    center = get_center(output)
-    if center is None:
-        return output
-    xy = [float(value) for value in list(center_xy)[:2]]
-    output["geometry_center_m"] = [xy[0], xy[1], float(center[2])]
-    return output
-
-
-def _safe_place_for_object(
-    obj: ObjectDict,
-    target: ObjectDict,
-    objects: List[ObjectDict],
-    protected_ids: Iterable[Any],
-    table_bounds: Optional[dict],
-    margin_m: float = 0.02,
-) -> Optional[List[float]]:
-    center = get_center(obj)
-    size = get_size(obj)
-    if center is None or size is None or not table_bounds:
-        return None
-    try:
-        xmin = float(table_bounds["xmin"]) + 0.5 * size[0] + margin_m
-        xmax = float(table_bounds["xmax"]) - 0.5 * size[0] - margin_m
-        ymin = float(table_bounds["ymin"]) + 0.5 * size[1] + margin_m
-        ymax = float(table_bounds["ymax"]) - 0.5 * size[1] - margin_m
-    except (KeyError, TypeError, ValueError):
-        return None
-    if xmin >= xmax or ymin >= ymax:
-        return None
-    target_center = get_center(target) or center
-    samples = [
-        [xmin, ymin],
-        [xmin, ymax],
-        [xmax, ymin],
-        [xmax, ymax],
-        [(xmin + xmax) / 2.0, ymin],
-        [(xmin + xmax) / 2.0, ymax],
-        [xmin, (ymin + ymax) / 2.0],
-        [xmax, (ymin + ymax) / 2.0],
-    ]
-    protected = {str(value) for value in protected_ids or []}
-    samples.sort(key=lambda xy: -math.hypot(xy[0] - target_center[0], xy[1] - target_center[1]))
-    for xy in samples:
-        placed = _translated_object(obj, xy)
-        placed_aabb = object_xy_aabb(placed, margin_m=0.005)
-        if not placed_aabb:
-            continue
-        blocked = False
-        for other in objects:
-            if _object_id(other) == _object_id(obj):
-                continue
-            if _object_id(other) not in protected and _object_id(other) != _object_id(target):
-                continue
-            other_aabb = object_xy_aabb(other, margin_m=0.005)
-            if other_aabb and xy_aabb_overlap(placed_aabb, other_aabb)[2] > 0.0:
-                blocked = True
-                break
-        if not blocked:
-            return [round(float(xy[0]), 5), round(float(xy[1]), 5), round(float(center[2]), 5)]
-    return None
 
 
 def _score_candidate(candidate: dict) -> dict:
@@ -399,17 +336,19 @@ def _make_pick_away_candidate(
     args: Any,
     index: int,
     table_bounds: Optional[dict],
+    future_place_regions: Iterable[dict] = (),
 ) -> Optional[dict]:
-    grasp = select_best_grasp(
-        obj,
-        objects,
-        gripper_outer_width_m=getattr(args, "grasp_gripper_outer_width_m", 0.112),
-        gripper_inner_width_m=getattr(args, "grasp_gripper_inner_width_m", 0.048),
-        approach_length_m=getattr(args, "grasp_approach_length_m", 0.02),
-    )
+    grasp = _pick_away_grasp(obj, objects, args)
     if not grasp.get("grasp_feasible"):
         return None
-    safe_place = _safe_place_for_object(obj, target, objects, protected_ids, table_bounds)
+    safe_place = safe_place_for_object(
+        obj,
+        target,
+        objects,
+        protected_ids,
+        table_bounds,
+        future_place_regions=future_place_regions,
+    )
     if safe_place is None:
         return None
     yaw_gain = _target_yaw_gain(target, objects, obj.get("id"), args)
@@ -438,6 +377,9 @@ def _make_pick_away_candidate(
                 "risk_score": round(risk, 6),
                 "target_yaw_gain": yaw_gain,
                 "reason": "frontier_obstacle_graspable_pick_away_first",
+                "grasp_policy": grasp.get("grasp_policy", "full_scene_grasp"),
+                "relaxed_pick_away_grasp": bool(grasp.get("relaxed_pick_away_grasp")),
+                "ignored_grasp_blockers": grasp.get("ignored_grasp_blockers", []),
                 "requires_moveit_preflight": True,
             },
             geometry_feasible=True,
@@ -445,6 +387,28 @@ def _make_pick_away_candidate(
         )
     )
     return candidate
+
+
+def _pick_away_grasp(obj: ObjectDict, objects: List[ObjectDict], args: Any) -> dict:
+    grasp_args = {
+        "gripper_outer_width_m": getattr(args, "grasp_gripper_outer_width_m", 0.112),
+        "gripper_inner_width_m": getattr(args, "grasp_gripper_inner_width_m", 0.048),
+        "approach_length_m": getattr(args, "grasp_approach_length_m", 0.02),
+    }
+    full_scene_grasp = select_best_grasp(obj, objects, **grasp_args)
+    if full_scene_grasp.get("grasp_feasible"):
+        full_scene_grasp["grasp_policy"] = "full_scene_grasp"
+        return full_scene_grasp
+    object_only_grasp = select_best_grasp(obj, [obj], **grasp_args)
+    if not object_only_grasp.get("grasp_feasible"):
+        return full_scene_grasp
+    object_only_grasp["grasp_policy"] = "relaxed_top_pick_away_grasp"
+    object_only_grasp["relaxed_pick_away_grasp"] = True
+    object_only_grasp["ignored_grasp_blockers"] = [
+        {"id": item.get("id"), "label": item.get("label")}
+        for item in full_scene_grasp.get("blocking_objects", [])
+    ]
+    return object_only_grasp
 
 
 def build_frontier_clearance_plan(
@@ -503,6 +467,7 @@ def build_frontier_clearance_plan(
             args,
             candidate_index,
             current_state.get("table_bounds"),
+            future_place_regions=future_place_regions or [],
         )
         if pick_candidate is not None:
             pick_candidate["clearance_preflight_allowed"] = True

@@ -11,6 +11,7 @@ entry point. This package separates the workflow by responsibility:
 | `pick.py` | Pick plans, motion command construction, dry-run scene simulation |
 | `placement.py` | Place-on-stack geometry and safety validation |
 | `obstruction_frontier.py` | Obstruction graph, frontier candidates, utility/easiness/risk scoring |
+| `clearance_placement.py` | Temporary safe-place selection for pick-away clearance |
 | `clearance_policy.py` | Clearance candidate preflight/executable safety gates |
 | `push_clearing.py` | Push-plan construction and locked-structure annotations |
 | `push_flow.py` | Multi-step push execution, dry-run reporting, re-observation |
@@ -162,7 +163,12 @@ camera-frame XY compensation.
 
 Frontier clearing 的候选动作统一评分：
 
-- `pick_away`: 障碍物自身有可抓 yaw 时优先生成，安全放置点必须在桌面边界内且避开目标/受保护结构。
+- `pick_away`: 障碍物自身有可抓 yaw 时优先生成。若有 `table_bounds`，
+  安全放置点必须在桌面边界内且避开目标/受保护结构；若没有
+  `table_bounds`，则从已观察到的场景范围中选一个避开所有可见物体的保守
+  放置点。安全放置点还必须避开 `future_place_regions`，避免清障后挡住
+  后续堆叠区域。完整场景抓取被邻近散块过保守阻挡时，允许生成
+  `relaxed_top_pick_away_grasp` 候选，但真实执行仍由 MoveIt pick/place 路径验证。
 - `nudge`: 障碍物不可抓或 pick_away 不安全时，才生成小距离拨动候选，默认距离 `0.025 m`。
 - `direct_target_gain`: 清除后目标可抓 yaw 数量增加，或目标变得可抓。
 - `enabling_gain`: 清除后关键 blocker 变得可抓、可推，或释放其接近/扫掠通道。

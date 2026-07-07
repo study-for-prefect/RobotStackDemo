@@ -376,6 +376,34 @@ def test_nudge_preflight_failure_does_not_execute_push():
         clearance_execution.push_clear_command = originals["push"]
 
 
+def test_pick_away_candidate_survives_push_preflight_filter():
+    candidate = {
+        "candidate_id": "pick_away_1",
+        "action": "pick_away",
+        "action_type": "pick_away",
+        "obstacle_id": "obstacle",
+        "target_object_id": "target",
+        "selected_grasp_yaw_deg": 0.0,
+        "safe_place_center_m": [0.55, 0.20, 0.015],
+        "geometry_feasible": True,
+        "protected_structure_safe": True,
+        "task_effective": True,
+        "clearance_preflight_allowed": True,
+    }
+    with tempfile.TemporaryDirectory() as cycle_dir:
+        args = SimpleNamespace(execute=True, execute_push_clearing=True)
+        report = push_flow._preflight_safe_candidates(
+            args,
+            cycle_dir,
+            {"objects": []},
+            {"id": "target"},
+            {"preflight_clearance_candidates": [candidate]},
+            step_index=1,
+        )
+    assert report["safe_candidates"] == [candidate]
+    assert report["failures"] == []
+
+
 def test_push_clear_command_uses_single_process_gripper_push():
     args = SimpleNamespace(
         ros_python="/usr/bin/python3",
@@ -401,5 +429,6 @@ if __name__ == "__main__":
     test_automatic_clearance_reobserves_and_exits_to_pick()
     test_no_feasible_clearance_stops_before_pick()
     test_nudge_preflight_failure_does_not_execute_push()
+    test_pick_away_candidate_survives_push_preflight_filter()
     test_push_clear_command_uses_single_process_gripper_push()
     print("manual push clearance tests passed")
