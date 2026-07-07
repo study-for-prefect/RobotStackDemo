@@ -20,7 +20,8 @@ from .clearance_execution import (
     execute_pick_away_and_reobserve,
     preflight_nudge_candidate,
 )
-from .obstruction_frontier import build_frontier_clearance_plan, refresh_executable_safe
+from .clearance_policy import refresh_executable_safe
+from .obstruction_frontier import build_frontier_clearance_plan
 from .push_clearing import (
     current_protected_structure_ids,
     evaluate_push_candidates,
@@ -113,7 +114,10 @@ def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
             "future_task_feasible", "protected_structure_safe", "moveit_feasible",
             "task_effective", "direct_clearance_candidate", "direct_progress_candidate",
             "enabling_clearance_candidate", "exploratory",
-            "automatic_execution_allowed", "executable_safe", "direct_target_gain",
+            "automatic_execution_allowed", "automatic_execution_reason",
+            "clearance_preflight_allowed", "verified_clearance_progress",
+            "soft_clearance_geometry_allowed", "future_task_clearance_override",
+            "executable_safe", "direct_target_gain",
             "direct_progress_gain", "direct_progress_reason", "enabling_gain", "free_space_gain", "current_grasp_gain",
             "current_blocker_count", "predicted_blocker_count", "blocker_count_reduction",
             "target_distance_before_m", "target_distance_after_m", "target_distance_delta_m",
@@ -175,6 +179,9 @@ def _candidate_summary(candidate: dict) -> dict:
         "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
         "protected_structure_safe", "task_effective", "direct_clearance_candidate", "direct_progress_candidate",
         "enabling_clearance_candidate", "exploratory", "automatic_execution_allowed",
+        "automatic_execution_reason", "clearance_preflight_allowed",
+        "verified_clearance_progress", "soft_clearance_geometry_allowed",
+        "future_task_clearance_override",
         "target_yaw_gain", "direct_target_gain", "direct_progress_gain", "direct_progress_reason",
         "enabling_gain", "free_space_gain",
         "blocker_count_reduction", "current_grasp_gain", "post_push_grasp_feasible",
@@ -186,17 +193,29 @@ def _candidate_summary(candidate: dict) -> dict:
 
 def _failed_clearance_hard_safety_fields(candidate: dict) -> list:
     required_true_fields = (
-        "feasible",
-        "geometry_feasible",
-        "approach_path_safe",
-        "push_swept_safe",
         "push_end_safe",
-        "future_task_feasible",
         "protected_structure_safe",
         "task_effective",
-        "automatic_execution_allowed",
+        "clearance_preflight_allowed",
     )
     return [field for field in required_true_fields if not candidate.get(field)]
+
+
+def _ensure_clearance_preflight_policy(candidate: dict) -> dict:
+    if "clearance_preflight_allowed" in candidate:
+        return candidate
+    candidate["clearance_preflight_allowed"] = bool(
+        candidate.get("feasible")
+        and candidate.get("geometry_feasible")
+        and candidate.get("approach_path_safe")
+        and candidate.get("push_swept_safe")
+        and candidate.get("push_end_safe")
+        and candidate.get("future_task_feasible", True)
+        and candidate.get("protected_structure_safe")
+        and candidate.get("task_effective")
+        and candidate.get("automatic_execution_allowed")
+    )
+    return candidate
 
 
 def _preflight_safe_candidates(
@@ -216,7 +235,8 @@ def _preflight_safe_candidates(
     for candidate in candidates:
         if candidate.get("action_type") != "nudge":
             continue
-        if candidate.get("exploratory"):
+        candidate = _ensure_clearance_preflight_policy(candidate)
+        if candidate.get("exploratory") and not candidate.get("verified_clearance_progress"):
             failures.append(
                 {
                     "candidate_id": candidate.get("candidate_id"),

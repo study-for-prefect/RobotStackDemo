@@ -10,26 +10,11 @@ from robot_scene_pipeline.detection_merge import merge_duplicate_objects_3d
 from robot_scene_pipeline.geometry_relations import get_center, get_size, object_xy_aabb, xy_aabb_overlap
 from robot_scene_pipeline.grasp_yaw_search import select_best_grasp
 
+from .clearance_policy import annotate_nudge_preflight_policy, refresh_executable_safe
 from .push_clearing import evaluate_push_candidates
 
 
 ObjectDict = Dict[str, Any]
-
-
-def refresh_executable_safe(candidate: dict) -> dict:
-    candidate["executable_safe"] = bool(
-        candidate.get("feasible")
-        and candidate.get("geometry_feasible")
-        and candidate.get("approach_path_safe")
-        and candidate.get("push_swept_safe")
-        and candidate.get("push_end_safe")
-        and candidate.get("future_task_feasible", True)
-        and candidate.get("moveit_feasible")
-        and candidate.get("task_effective")
-        and candidate.get("protected_structure_safe")
-        and candidate.get("automatic_execution_allowed", False)
-    )
-    return candidate
 
 
 def _object_id(obj: ObjectDict) -> str:
@@ -520,6 +505,8 @@ def build_frontier_clearance_plan(
             current_state.get("table_bounds"),
         )
         if pick_candidate is not None:
+            pick_candidate["clearance_preflight_allowed"] = True
+            refresh_executable_safe(pick_candidate)
             all_candidates.append(pick_candidate)
             safe_candidates.append(pick_candidate)
             candidate_index += 1
@@ -632,19 +619,9 @@ def build_frontier_clearance_plan(
                         protected_structure_safe=not _is_protected(obstacle, protected_ids),
                     )
                 )
+                candidate = annotate_nudge_preflight_policy(candidate, nudge_max)
                 all_candidates.append(candidate)
-                preflight_ready = bool(
-                    candidate.get("feasible")
-                    and candidate.get("geometry_feasible")
-                    and candidate.get("approach_path_safe")
-                    and candidate.get("push_swept_safe")
-                    and candidate.get("push_end_safe")
-                    and candidate.get("future_task_feasible", True)
-                    and candidate.get("protected_structure_safe")
-                    and candidate.get("task_effective")
-                    and candidate.get("automatic_execution_allowed")
-                )
-                if preflight_ready:
+                if candidate.get("clearance_preflight_allowed"):
                     safe_candidates.append(candidate)
                 candidate_index += 1
 

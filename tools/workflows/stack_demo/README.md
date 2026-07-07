@@ -11,6 +11,7 @@ entry point. This package separates the workflow by responsibility:
 | `pick.py` | Pick plans, motion command construction, dry-run scene simulation |
 | `placement.py` | Place-on-stack geometry and safety validation |
 | `obstruction_frontier.py` | Obstruction graph, frontier candidates, utility/easiness/risk scoring |
+| `clearance_policy.py` | Clearance candidate preflight/executable safety gates |
 | `push_clearing.py` | Push-plan construction and locked-structure annotations |
 | `push_flow.py` | Multi-step push execution, dry-run reporting, re-observation |
 | `push_selection.py` | LLM/geometry selection among already-safe push candidates |
@@ -171,8 +172,12 @@ Frontier clearing 的候选动作统一评分：
 
 最终按 `utility + easiness - risk` 排序。`utility` 由上面三类收益合成。
 清障目标不是清空桌面，而是制造当前目标的抓取空间；`target_yaw_gain=0`
-的动作只有在 `enabling_gain` 或 `free_space_gain` 可验证时才会作为多步清障候选。
-否则它只能留在全集里作为低优先级 exploratory candidate，不能进入可执行安全候选。
+的动作只有在 `direct_progress_gain`、`enabling_gain`、`blocker_count_reduction`
+或 `current_grasp_gain` 可验证时才会作为多步清障候选。短距离 nudge
+如果只是保守几何模型标出软接触，或只因未来放置区预测被挡，但它能减少当前
+阻挡并且不碰受保护结构，仍会写入 `clearance_preflight_allowed=true`
+进入 MoveIt 预检。否则它只能留在全集里作为低优先级 exploratory
+candidate，不能进入可执行安全候选。
 
 Hardware execution remains separately opt-in:
 
@@ -190,6 +195,11 @@ that satisfy all hard code-side gates enter `safe_clearance_candidates.json`:
 `feasible=true`, `geometry_feasible=true`, `approach_path_safe=true`,
 `push_swept_safe=true`, `push_end_safe=true`, `protected_structure_safe=true`,
 `task_effective=true`, and `moveit_feasible=true`.
+For staged nudge clearing, `clearance_preflight_allowed=true` records the
+equivalent code-side gate. It may be true through
+`soft_clearance_geometry_allowed` or `future_task_clearance_override`, but the
+candidate still becomes `safe` only after MoveIt preflight sets
+`moveit_feasible=true`.
 
 The selected real nudge then runs in one MoveIt process with
 `--close-gripper-for-push`: close gripper as a rigid paddle, refresh joint

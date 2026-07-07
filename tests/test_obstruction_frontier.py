@@ -308,6 +308,108 @@ def test_failed_swept_path_is_not_preflight_candidate():
     assert plan["preflight_clearance_candidates"] == []
 
 
+def test_verified_progress_soft_geometry_can_enter_preflight():
+    target = obj("target", [0.40, 0.00, 0.015])
+    obstacle = obj("obstacle", [0.435, 0.00, 0.015])
+    state = {
+        "objects": [target, obstacle],
+        "table_bounds": {"xmin": 0.10, "xmax": 0.90, "ymin": -0.50, "ymax": 0.50},
+    }
+
+    def fake_push(*_args, **_kwargs):
+        return {
+            "candidate_results": [
+                {
+                    "relation": {},
+                    "evaluations": [
+                        {
+                            "candidate_id": "soft_progress",
+                            "source": "test",
+                            "direction_base": [1.0, 0.0, 0.0],
+                            "distance_m": 0.025,
+                            "feasible": True,
+                            "approach_path_safe": False,
+                            "push_swept_safe": False,
+                            "push_end_safe": True,
+                            "future_task_impact": {"feasible": True},
+                            "score": 0.5,
+                            "target_distance_after_m": 0.06,
+                            "current_blocker_count": 2,
+                            "predicted_blocker_count": 1,
+                            "blocker_count_reduction": 1,
+                            "reason": "push_reduces_current_blockers_and_preserves_future_tasks",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    plan = build_frontier_clearance_plan(
+        state,
+        target,
+        protected_ids=[],
+        args=args(),
+        evaluate_push_fn=fake_push,
+    )
+    candidate = plan["preflight_clearance_candidates"][0]
+    assert candidate["candidate_id"] == "soft_progress"
+    assert candidate["verified_clearance_progress"] is True
+    assert candidate["soft_clearance_geometry_allowed"] is True
+    assert candidate["clearance_preflight_allowed"] is True
+
+
+def test_future_place_soft_block_with_progress_can_enter_preflight():
+    target = obj("target", [0.40, 0.00, 0.015])
+    obstacle = obj("obstacle", [0.435, 0.00, 0.015])
+    state = {
+        "objects": [target, obstacle],
+        "table_bounds": {"xmin": 0.10, "xmax": 0.90, "ymin": -0.50, "ymax": 0.50},
+    }
+
+    def fake_push(*_args, **_kwargs):
+        return {
+            "candidate_results": [
+                {
+                    "relation": {},
+                    "evaluations": [
+                        {
+                            "candidate_id": "future_place_progress",
+                            "source": "test",
+                            "direction_base": [1.0, 0.0, 0.0],
+                            "distance_m": 0.025,
+                            "feasible": False,
+                            "approach_path_safe": True,
+                            "push_swept_safe": True,
+                            "push_end_safe": True,
+                            "future_task_impact": {"feasible": False},
+                            "score": 0.5,
+                            "target_distance_after_m": 0.06,
+                            "target_distance_delta_m": 0.02,
+                            "current_blocker_count": 2,
+                            "predicted_blocker_count": 2,
+                            "blocker_count_reduction": 0,
+                            "reason": "blocks_future_place_region",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    plan = build_frontier_clearance_plan(
+        state,
+        target,
+        protected_ids=[],
+        args=args(),
+        future_place_regions=[{"center_base_m": [0.50, 0.00, 0.0], "radius_m": 0.04}],
+        evaluate_push_fn=fake_push,
+    )
+    candidate = plan["preflight_clearance_candidates"][0]
+    assert candidate["candidate_id"] == "future_place_progress"
+    assert candidate["future_task_feasible"] is False
+    assert candidate["future_task_clearance_override"] is True
+    assert candidate["clearance_preflight_allowed"] is True
+
+
 if __name__ == "__main__":
     test_frontier_generates_preflight_nudge_for_direct_obstacle()
     test_protected_obstacle_is_not_frontier_candidate()
@@ -316,4 +418,6 @@ if __name__ == "__main__":
     test_blocker_count_reduction_is_enabling_candidate()
     test_free_space_gain_alone_stays_exploratory()
     test_failed_swept_path_is_not_preflight_candidate()
+    test_verified_progress_soft_geometry_can_enter_preflight()
+    test_future_place_soft_block_with_progress_can_enter_preflight()
     print("obstruction frontier tests passed")
