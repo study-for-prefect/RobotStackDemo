@@ -231,6 +231,11 @@ def _prepare_push_context(
     predicted_objects = _objects(predicted_scene)
     predicted_target = _find_object(predicted_objects, target.get("id")) or target
     predicted_obstacle = _find_object(predicted_objects, obstacle.get("id")) or obstacle
+    current_distance = xy_distance(obstacle, target)
+    predicted_distance = xy_distance(predicted_obstacle, predicted_target)
+    output["target_distance_before_m"] = round(current_distance, 6)
+    output["target_distance_after_m"] = round(predicted_distance, 6)
+    output["target_distance_delta_m"] = round(predicted_distance - current_distance, 6)
     table_ok, table_reason = table_bounds_ok(predicted_obstacle, table_bounds, edge_margin_m=0.02)
     if not table_ok:
         output["push_end_safe"] = False
@@ -333,7 +338,6 @@ def _mark_feasible_candidate(
             "enables_blocker_object_id": predicted_target.get("id"),
             "enabling_reason": "post_push_grasp_feasible",
             "history_reason": history_reason,
-            "target_distance_after_m": round(xy_distance(predicted_obstacle, predicted_target), 6),
         }
     )
 
@@ -368,7 +372,37 @@ def _mark_progress_candidate(
             "blocker_count_reduction": progress,
             "enables_blocker_object_id": predicted_target.get("id"),
             "enabling_reason": "blocker_count_reduction",
-            "target_distance_after_m": round(xy_distance(predicted_obstacle, predicted_target), 6),
+        }
+    )
+
+
+def _mark_distance_progress_candidate(
+    output: Dict[str, Any],
+    current_grasp: Dict[str, Any],
+    predicted_grasp: Dict[str, Any],
+    future: Dict[str, Any],
+    candidate: CandidateDict,
+    predicted_target: ObjectDict,
+) -> None:
+    distance_delta = max(0.0, float(output.get("target_distance_delta_m") or 0.0))
+    score = (
+        0.35
+        + min(0.25, distance_delta * 5.0)
+        - 0.05 * output["future_blocking_cost"]
+        - 0.05 * output["place_blocking_cost"]
+        - 0.02 * float(future.get("congestion_cost", 0.0))
+        - 0.5 * float(candidate["distance_m"])
+    )
+    output.update(
+        {
+            "feasible": True,
+            "score": round(score, 6),
+            "reason": "push_increases_target_distance_and_preserves_future_tasks",
+            "current_blocker_count": _blocker_count(current_grasp),
+            "predicted_blocker_count": _blocker_count(predicted_grasp),
+            "blocker_count_reduction": 0,
+            "enables_blocker_object_id": predicted_target.get("id"),
+            "enabling_reason": "target_distance_increase",
         }
     )
 
@@ -539,6 +573,16 @@ def evaluate_one_push_grasp_candidate(
                 candidate,
                 context["predicted_target"],
                 context["predicted_obstacle"],
+            )
+            return output
+        if float(output.get("target_distance_delta_m") or 0.0) >= DEFAULT_PROGRESS_PUSH_DISTANCE_M * 0.2:
+            _mark_distance_progress_candidate(
+                output,
+                context["current_grasp"],
+                predicted_grasp,
+                future,
+                candidate,
+                context["predicted_target"],
             )
             return output
         output["reason"] = "push_after_current_target_still_blocked"

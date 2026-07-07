@@ -326,10 +326,13 @@ def _evaluation_direct_progress_gain(
         return 0.0, None
     blocker_count_reduction = max(0, int(evaluation.get("blocker_count_reduction") or 0))
     grasp_gain = max(0.0, float(evaluation.get("current_grasp_gain") or 0.0))
+    distance_delta = max(0.0, float(evaluation.get("target_distance_delta_m") or 0.0))
     if blocker_count_reduction > 0:
-        return 0.5 + 0.25 * blocker_count_reduction + grasp_gain, "target_blocker_count_reduction"
+        return 0.5 + 0.25 * blocker_count_reduction + grasp_gain + distance_delta, "target_blocker_count_reduction"
     if grasp_gain > 0.0:
         return grasp_gain, "target_grasp_clearance_gain"
+    if distance_delta >= 0.005:
+        return 0.35 + min(0.25, distance_delta * 5.0), "direct_blocker_moved_away_from_target"
     return 0.0, None
 
 
@@ -604,6 +607,9 @@ def build_frontier_clearance_plan(
                             "current_blocker_count": evaluation.get("current_blocker_count"),
                             "predicted_blocker_count": evaluation.get("predicted_blocker_count"),
                             "blocker_count_reduction": evaluation.get("blocker_count_reduction", 0),
+                            "target_distance_before_m": evaluation.get("target_distance_before_m"),
+                            "target_distance_after_m": evaluation.get("target_distance_after_m"),
+                            "target_distance_delta_m": evaluation.get("target_distance_delta_m"),
                             "post_push_grasp_feasible": bool(evaluation.get("post_push_grasp_feasible")),
                             "enables_blocker_object_id": evaluation.get("enables_blocker_object_id")
                             or relation_target.get("id"),

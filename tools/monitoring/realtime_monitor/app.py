@@ -294,30 +294,39 @@ def main() -> None:
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.circle(annotated, (cx, cy), 4, (0, 255, 0), -1)
 
-                if top_z is not None and height_m is not None:
-                    lines = [f"{label} {conf:.2f} topZ:{top_z:.3f}m h:{height_m * 100:.1f}cm"]
+                if getattr(args, "monitor_detail", "compact") == "verbose":
+                    if top_z is not None and height_m is not None:
+                        lines = [f"{label} {conf:.2f} topZ:{top_z:.3f}m h:{height_m * 100:.1f}cm"]
+                    else:
+                        lines = [f"{label} {conf:.2f} depth:{depth_m:.3f}m"]
+
+                    if geometry_center is not None:
+                        lines.append(
+                            f"center[{geometry_center[0]:+.3f},{geometry_center[1]:+.3f},{geometry_center[2]:+.3f}] {top_z_source}"
+                        )
+                    elif p_base is not None:
+                        lines.append(f"sample[{p_base[0]:+.3f},{p_base[1]:+.3f},{p_base[2]:+.3f}]")
+                    elif depth_m > 0:
+                        lines.append("baselink[no tf]")
+                    else:
+                        lines.append("baselink[no depth]")
+
+                    if det.get("pointcloud_geometry_valid") and det.get("dimensions_m"):
+                        dims = det["dimensions_m"]
+                        lines.append(f"dims[{dims[0] * 100:.1f},{dims[1] * 100:.1f},{dims[2] * 100:.1f}]cm")
+
+                    # RealSense optical z is forward depth, not object height.
+                    if (not args.hide_camera_coord) and p_optical is not None:
+                        lines.append(f"camera[{p_optical[0]:+.3f},{p_optical[1]:+.3f},{p_optical[2]:+.3f}]")
                 else:
-                    lines = [f"{label} {conf:.2f} depth:{depth_m:.3f}m"]
-
-                if geometry_center is not None:
-                    lines.append(
-                        f"center[{geometry_center[0]:+.3f},{geometry_center[1]:+.3f},{geometry_center[2]:+.3f}] {top_z_source}"
-                    )
-                elif p_base is not None:
-                    lines.append(f"sample[{p_base[0]:+.3f},{p_base[1]:+.3f},{p_base[2]:+.3f}]")
-                elif depth_m > 0:
-                    lines.append("baselink[no tf]")
-                else:
-                    lines.append("baselink[no depth]")
-
-                if det.get("pointcloud_geometry_valid") and det.get("dimensions_m"):
-                    dims = det["dimensions_m"]
-                    lines.append(f"dims[{dims[0] * 100:.1f},{dims[1] * 100:.1f},{dims[2] * 100:.1f}]cm")
-
-                # Display RealSense optical camera coordinates in x,y,z order.
-                # Here z is depth/forward distance, so it appears as the third value.
-                if (not args.hide_camera_coord) and p_optical is not None:
-                    lines.append(f"camera[{p_optical[0]:+.3f},{p_optical[1]:+.3f},{p_optical[2]:+.3f}]")
+                    if geometry_center is not None:
+                        lines = [f"{label} {conf:.2f} base[{geometry_center[0]:+.3f},{geometry_center[1]:+.3f},{geometry_center[2]:+.3f}]"]
+                    elif p_base is not None:
+                        lines = [f"{label} {conf:.2f} base[{p_base[0]:+.3f},{p_base[1]:+.3f},{p_base[2]:+.3f}]"]
+                    elif depth_m > 0:
+                        lines = [f"{label} {conf:.2f} depth:{depth_m:.3f}m"]
+                    else:
+                        lines = [f"{label} {conf:.2f}"]
 
                 draw_lines(
                     annotated,

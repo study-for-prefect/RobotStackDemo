@@ -116,6 +116,7 @@ def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
             "automatic_execution_allowed", "executable_safe", "direct_target_gain",
             "direct_progress_gain", "direct_progress_reason", "enabling_gain", "free_space_gain", "current_grasp_gain",
             "current_blocker_count", "predicted_blocker_count", "blocker_count_reduction",
+            "target_distance_before_m", "target_distance_after_m", "target_distance_delta_m",
             "post_push_grasp_feasible", "enables_blocker_object_id", "enabling_reason",
             "utility_score", "easiness_score",
             "risk_score", "score", "target_yaw_gain", "reason",
@@ -177,6 +178,7 @@ def _candidate_summary(candidate: dict) -> dict:
         "target_yaw_gain", "direct_target_gain", "direct_progress_gain", "direct_progress_reason",
         "enabling_gain", "free_space_gain",
         "blocker_count_reduction", "current_grasp_gain", "post_push_grasp_feasible",
+        "target_distance_before_m", "target_distance_after_m", "target_distance_delta_m",
         "enables_blocker_object_id", "enabling_reason", "score", "reason",
     )
     return {key: candidate.get(key) for key in keys if key in candidate}

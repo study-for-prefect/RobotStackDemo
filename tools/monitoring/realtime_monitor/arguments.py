@@ -66,6 +66,7 @@ def parse_args():
     parser.add_argument("--depth-sample-radius", type=int, default=3)
     parser.add_argument("--min-depth-m", type=float, default=0.05)
     parser.add_argument("--max-depth-m", type=float, default=1.50)
+    parser.add_argument("--monitor-detail", choices=("compact", "verbose"), default="compact")
     parser.add_argument("--hide-camera-coord", action="store_true")
     parser.add_argument("--estimate-tabletop", dest="estimate_tabletop", action="store_true", default=True)
     parser.add_argument("--no-estimate-tabletop", dest="estimate_tabletop", action="store_false")

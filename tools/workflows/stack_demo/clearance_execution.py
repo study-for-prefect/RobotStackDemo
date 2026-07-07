@@ -32,6 +32,7 @@ def _candidate_summary(candidate: dict) -> dict:
         "target_yaw_gain", "direct_target_gain", "direct_progress_gain", "direct_progress_reason",
         "enabling_gain", "free_space_gain",
         "blocker_count_reduction", "current_grasp_gain", "post_push_grasp_feasible",
+        "target_distance_before_m", "target_distance_after_m", "target_distance_delta_m",
         "enables_blocker_object_id", "enabling_reason", "score", "reason",
     )
     return {key: candidate.get(key) for key in keys if key in candidate}

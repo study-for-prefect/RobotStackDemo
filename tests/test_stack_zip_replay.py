@@ -17,6 +17,14 @@ ZIP_213757 = (
     "/Users/wujl/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/"
     "wxid_at6wr1ixd8dv22_7973/temp/drag/stack_push_execute_20260706_213757.zip"
 )
+ZIP_77_1 = (
+    "/Users/wujl/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/"
+    "wxid_at6wr1ixd8dv22_7973/temp/drag/stack_push_execute77-1.zip"
+)
+ZIP_77_2 = (
+    "/Users/wujl/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/"
+    "wxid_at6wr1ixd8dv22_7973/temp/drag/stack_push_execute77-2.zip"
+)
 
 
 def args():
@@ -74,7 +82,28 @@ def test_213559_replay_generates_enabling_preflight_candidates():
     )
 
 
+def _replay_preflight_candidates(zip_path):
+    cycle = _cycle_name(zip_path)
+    state = _load_zip_json(zip_path, "{}/scene_state_before_action.json".format(cycle))
+    failure = _load_zip_json(zip_path, "{}/failure_state.json".format(cycle))
+    target = next(obj for obj in state["objects"] if str(obj.get("id")) == str(failure["target_object_id"]))
+    return build_frontier_clearance_plan(state, target, protected_ids=[], args=args())["preflight_clearance_candidates"]
+
+
+def test_77_replays_generate_preflight_candidates_for_simple_clearance():
+    for zip_path in (ZIP_77_1, ZIP_77_2):
+        if not os.path.exists(zip_path):
+            print("skip: zip fixture not present {}".format(zip_path))
+            return
+        candidates = _replay_preflight_candidates(zip_path)
+        assert candidates
+        assert all(candidate.get("approach_path_safe") for candidate in candidates)
+        assert all(candidate.get("push_swept_safe") for candidate in candidates)
+        assert all(candidate.get("push_end_safe") for candidate in candidates)
+
+
 if __name__ == "__main__":
     test_213757_color_rule_avoids_low_confidence_green_8()
     test_213559_replay_generates_enabling_preflight_candidates()
+    test_77_replays_generate_preflight_candidates_for_simple_clearance()
     print("stack zip replay tests passed")
