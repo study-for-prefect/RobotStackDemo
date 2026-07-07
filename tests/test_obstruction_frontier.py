@@ -323,6 +323,13 @@ def test_pick_away_uses_observed_scene_safe_place_without_table_bounds():
 
     def fake_select_best_grasp(target_obj, objects, **_kwargs):
         if target_obj["id"] == "target":
+            if not any(item.get("id") == "obstacle" for item in objects):
+                return {
+                    "grasp_feasible": True,
+                    "selected_grasp_yaw_deg": 0.0,
+                    "candidate_results": [{"feasible": True}],
+                    "blocking_objects": [],
+                }
             return {"grasp_feasible": False, "candidate_results": [], "blocking_objects": [{"id": "obstacle"}]}
         return {
             "grasp_feasible": True,
@@ -387,12 +394,19 @@ def test_pick_away_allows_relaxed_top_grasp_for_blocking_loose_object():
         frontier_module.select_best_grasp = original_select
 
     candidate = next(
-        item for item in plan["preflight_clearance_candidates"]
+        item for item in plan["all_clearance_action_candidates"]
         if item["action_type"] == "pick_away"
     )
     assert candidate["action_type"] == "pick_away"
     assert candidate["relaxed_pick_away_grasp"] is True
     assert candidate["ignored_grasp_blockers"] == [{"id": "target", "label": "target"}]
+    assert candidate["automatic_execution_allowed"] is False
+    assert candidate["automatic_execution_reason"] == "relaxed_pick_away_requires_more_clearance"
+    assert candidate["clearance_preflight_allowed"] is False
+    assert not any(
+        item["candidate_id"] == candidate["candidate_id"]
+        for item in plan["preflight_clearance_candidates"]
+    )
 
 
 def test_verified_progress_soft_geometry_can_enter_preflight():

@@ -386,6 +386,11 @@ def _make_pick_away_candidate(
             protected_structure_safe=not _is_protected(obj, protected_ids),
         )
     )
+    if candidate.get("relaxed_pick_away_grasp"):
+        candidate["automatic_execution_allowed"] = False
+        candidate["automatic_execution_reason"] = "relaxed_pick_away_requires_more_clearance"
+        candidate["clearance_preflight_allowed"] = False
+        refresh_executable_safe(candidate)
     return candidate
 
 
@@ -470,10 +475,15 @@ def build_frontier_clearance_plan(
             future_place_regions=future_place_regions or [],
         )
         if pick_candidate is not None:
-            pick_candidate["clearance_preflight_allowed"] = True
+            if (
+                not pick_candidate.get("relaxed_pick_away_grasp")
+                and pick_candidate.get("automatic_execution_allowed")
+            ):
+                pick_candidate["clearance_preflight_allowed"] = True
             refresh_executable_safe(pick_candidate)
             all_candidates.append(pick_candidate)
-            safe_candidates.append(pick_candidate)
+            if pick_candidate.get("clearance_preflight_allowed"):
+                safe_candidates.append(pick_candidate)
             candidate_index += 1
 
         relation_target_id = frontier_item.get("blocks", [target.get("id")])[0]

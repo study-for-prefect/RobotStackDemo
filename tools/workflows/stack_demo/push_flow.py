@@ -200,6 +200,7 @@ def _failed_clearance_hard_safety_fields(candidate: dict) -> list:
         "protected_structure_safe",
         "task_effective",
         "clearance_preflight_allowed",
+        "automatic_execution_allowed",
     )
     return [field for field in required_true_fields if not candidate.get(field)]
 
@@ -237,6 +238,27 @@ def _preflight_safe_candidates(
         return {"safe_candidates": safe_candidates, "failures": failures}
     for candidate in candidates:
         if candidate.get("action_type") == "pick_away":
+            if candidate.get("relaxed_pick_away_grasp"):
+                failures.append(
+                    {
+                        "candidate_id": candidate.get("candidate_id"),
+                        "reason": "relaxed_pick_away_requires_more_clearance",
+                        "ignored_grasp_blockers": candidate.get("ignored_grasp_blockers", []),
+                    }
+                )
+                continue
+            failed_fields = _failed_clearance_hard_safety_fields(candidate)
+            if failed_fields:
+                failures.append(
+                    {
+                        "candidate_id": candidate.get("candidate_id"),
+                        "reason": "hard_safety_fields_failed",
+                        "failed_fields": failed_fields,
+                        "moveit_feasible": candidate.get("moveit_feasible"),
+                        "executable_safe": candidate.get("executable_safe"),
+                    }
+                )
+                continue
             safe_candidates.append(candidate)
             continue
         if candidate.get("action_type") != "nudge":

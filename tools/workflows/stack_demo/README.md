@@ -167,8 +167,11 @@ Frontier clearing 的候选动作统一评分：
   安全放置点必须在桌面边界内且避开目标/受保护结构；若没有
   `table_bounds`，则从已观察到的场景范围中选一个避开所有可见物体的保守
   放置点。安全放置点还必须避开 `future_place_regions`，避免清障后挡住
-  后续堆叠区域。完整场景抓取被邻近散块过保守阻挡时，允许生成
-  `relaxed_top_pick_away_grasp` 候选，但真实执行仍由 MoveIt pick/place 路径验证。
+  后续堆叠区域。只有 `full_scene_grasp` 的 pick-away 可以进入自动执行
+  安全候选。完整场景抓取被邻近散块阻挡时，`relaxed_top_pick_away_grasp`
+  只写入全集诊断，不进入 `preflight_clearance_candidates` 或
+  `safe_clearance_candidates`；系统应继续清障或等待人工确认，不能忽略
+  真实 blocker 硬抓。
 - `nudge`: 障碍物不可抓或 pick_away 不安全时，才生成小距离拨动候选，默认距离 `0.025 m`。
 - `direct_target_gain`: 清除后目标可抓 yaw 数量增加，或目标变得可抓。
 - `enabling_gain`: 清除后关键 blocker 变得可抓、可推，或释放其接近/扫掠通道。
@@ -215,6 +218,8 @@ the workflow writes `clearance_step_XX_result.json`, requests gripper-open
 recovery, and stops instead of continuing from a stale scene.
 Real `pick_away` actions build an obstacle pick plan plus a safe-place plan, and
 both are sent through the existing MoveIt pick/place preview before motion.
+`relaxed_top_pick_away_grasp` actions are not automatic hardware actions because
+they deliberately ignore current grasp blockers.
 
 Each evaluated action receives a stable `candidate_id`.
 `all_clearance_action_candidates.json` contains a compact scored summary.

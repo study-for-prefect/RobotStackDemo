@@ -386,9 +386,13 @@ def test_pick_away_candidate_survives_push_preflight_filter():
         "selected_grasp_yaw_deg": 0.0,
         "safe_place_center_m": [0.55, 0.20, 0.015],
         "geometry_feasible": True,
+        "approach_path_safe": True,
+        "push_swept_safe": True,
+        "push_end_safe": True,
         "protected_structure_safe": True,
         "task_effective": True,
         "clearance_preflight_allowed": True,
+        "automatic_execution_allowed": True,
     }
     with tempfile.TemporaryDirectory() as cycle_dir:
         args = SimpleNamespace(execute=True, execute_push_clearing=True)
@@ -402,6 +406,38 @@ def test_pick_away_candidate_survives_push_preflight_filter():
         )
     assert report["safe_candidates"] == [candidate]
     assert report["failures"] == []
+
+
+def test_relaxed_pick_away_candidate_stays_out_of_safe_preflight_filter():
+    candidate = {
+        "candidate_id": "pick_away_relaxed",
+        "action": "pick_away",
+        "action_type": "pick_away",
+        "obstacle_id": "obstacle",
+        "target_object_id": "target",
+        "selected_grasp_yaw_deg": 0.0,
+        "safe_place_center_m": [0.55, 0.20, 0.015],
+        "geometry_feasible": True,
+        "protected_structure_safe": True,
+        "task_effective": True,
+        "clearance_preflight_allowed": False,
+        "automatic_execution_allowed": False,
+        "relaxed_pick_away_grasp": True,
+        "ignored_grasp_blockers": [{"id": "target", "label": "target"}],
+    }
+    with tempfile.TemporaryDirectory() as cycle_dir:
+        args = SimpleNamespace(execute=True, execute_push_clearing=True)
+        report = push_flow._preflight_safe_candidates(
+            args,
+            cycle_dir,
+            {"objects": []},
+            {"id": "target"},
+            {"preflight_clearance_candidates": [candidate]},
+            step_index=1,
+        )
+    assert report["safe_candidates"] == []
+    assert report["failures"][0]["candidate_id"] == "pick_away_relaxed"
+    assert report["failures"][0]["reason"] == "relaxed_pick_away_requires_more_clearance"
 
 
 def test_push_clear_command_uses_single_process_gripper_push():
@@ -430,5 +466,6 @@ if __name__ == "__main__":
     test_no_feasible_clearance_stops_before_pick()
     test_nudge_preflight_failure_does_not_execute_push()
     test_pick_away_candidate_survives_push_preflight_filter()
+    test_relaxed_pick_away_candidate_stays_out_of_safe_preflight_filter()
     test_push_clear_command_uses_single_process_gripper_push()
     print("manual push clearance tests passed")
