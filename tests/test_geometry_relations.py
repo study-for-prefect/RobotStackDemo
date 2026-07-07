@@ -195,6 +195,30 @@ def test_close_square_row_uses_top_grasp_equivalent_yaw_without_push():
     assert not push_candidates(objects, relations, 0)
 
 
+def test_adjacent_center_gap_blocker_allows_perpendicular_green_grasp():
+    target = make_object(
+        0,
+        (0.3289, 0.0888, -0.002),
+        size=(0.0226, 0.0222, 0.025),
+        label="square green",
+        table_yaw_deg=-0.8,
+    )
+    blue = make_object(
+        1,
+        (0.3304, 0.1223, 0.0),
+        size=(0.0225, 0.0216, 0.0257),
+        label="square blue",
+        table_yaw_deg=0.12,
+        pushable=True,
+    )
+    relations = build_geometry_relations([target, blue], target_id=0)
+    analysis = target_analysis(relations)
+    assert analysis["action"] == "pick"
+    assert analysis["grasp_feasible"] is True
+    assert abs(normalize_yaw_signed_180(float(analysis["selected_grasp_yaw_deg"]) - 89.2)) <= 2.0
+    assert not push_candidates([target, blue], relations, 0)
+
+
 def test_signed_yaw_normalization_keeps_small_negative_equivalent():
     assert normalize_yaw_signed_180(176.0) == -4.0
     assert normalize_yaw_signed_180(-184.0) == -4.0
@@ -474,6 +498,7 @@ if __name__ == "__main__":
     test_side_block_in_row_uses_continuous_pick_yaw_without_push()
     test_grasp_yaw_prefers_target_axis_over_extra_clearance()
     test_close_square_row_uses_top_grasp_equivalent_yaw_without_push()
+    test_adjacent_center_gap_blocker_allows_perpendicular_green_grasp()
     test_signed_yaw_normalization_keeps_small_negative_equivalent()
     test_target_under_other_object_returns_remove_top_action()
     test_loose_objects_block_all_yaws_returns_push_clearing()

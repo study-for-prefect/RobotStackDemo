@@ -154,6 +154,32 @@ def _aabb_gap(first: dict, second: dict) -> float:
     return math.hypot(du, dv)
 
 
+def _gripper_finger_boxes(half_u: float, inner_half_v: float, outer_half_v: float) -> List[dict]:
+    if outer_half_v <= inner_half_v:
+        return [
+            {
+                "umin": -half_u,
+                "umax": half_u,
+                "vmin": -outer_half_v,
+                "vmax": outer_half_v,
+            }
+        ]
+    return [
+        {
+            "umin": -half_u,
+            "umax": half_u,
+            "vmin": inner_half_v,
+            "vmax": outer_half_v,
+        },
+        {
+            "umin": -half_u,
+            "umax": half_u,
+            "vmin": -outer_half_v,
+            "vmax": -inner_half_v,
+        },
+    ]
+
+
 def blocker_category(obj: ObjectDict) -> str:
     role = str(obj.get("role") or "").lower()
     state = str(obj.get("state") or "").lower()
@@ -251,12 +277,6 @@ def _evaluate_yaw(
     target_half_u = max(abs(target_projection["umin"]), abs(target_projection["umax"]))
     target_half_v = max(abs(target_projection["vmin"]), abs(target_projection["vmax"]))
     target_width_v = target_projection["vmax"] - target_projection["vmin"]
-    envelope = {
-        "umin": -target_half_u - max(0.0, float(approach_length_m)),
-        "umax": target_half_u + max(0.0, float(approach_length_m)),
-        "vmin": -max(0.5 * float(gripper_outer_width_m), target_half_v),
-        "vmax": max(0.5 * float(gripper_outer_width_m), target_half_v),
-    }
     if target_width_v > float(gripper_inner_width_m) + 0.004:
         return {
             "yaw_deg": float(yaw_deg),
@@ -265,6 +285,12 @@ def _evaluate_yaw(
             "reason": "target_exceeds_gripper_inner_width",
             "clearance_m": 0.0,
         }
+    half_u = target_half_u + max(0.0, float(approach_length_m))
+    outer_half_v = max(0.5 * float(gripper_outer_width_m), target_half_v)
+    inner_half_v = 0.5 * float(gripper_inner_width_m)
+    if float(gripper_outer_width_m) <= float(gripper_inner_width_m):
+        inner_half_v = outer_half_v
+    finger_boxes = _gripper_finger_boxes(half_u, inner_half_v, outer_half_v)
 
     blockers = []
     clearances = []
@@ -276,12 +302,12 @@ def _evaluate_yaw(
         projection = _project_object(obstacle, target_center[:2], yaw_deg)
         if projection is None:
             continue
-        if _aabb_overlap(projection, envelope):
+        if any(_aabb_overlap(projection, box) for box in finger_boxes):
             summary = object_summary(obstacle)
             summary["blocker_category"] = blocker_category(obstacle)
             blockers.append(summary)
         else:
-            clearances.append(_aabb_gap(projection, envelope))
+            clearances.append(min(_aabb_gap(projection, box) for box in finger_boxes))
 
     feasible = not blockers
     clearance = min(clearances) if clearances else 1.0

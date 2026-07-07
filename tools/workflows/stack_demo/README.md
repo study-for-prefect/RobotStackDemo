@@ -141,6 +141,9 @@ camera-frame XY compensation.
 - 可行候选优先贴近目标主轴；只有主轴附近不可行时才偏离主轴去换取避障空间。
 - 先用粗粒度 `yaw_step_deg` 找候选，再用 `local_refine_step_deg` 细化可行区间。
 - 默认夹爪外宽 `0.112 m`，内宽 `0.048 m`。
+- 抓取阻挡按平行夹爪两侧手指占用带评估；夹爪中间开口不再被当成
+  实心外框。若相邻物体落在开口中线附近，系统可以选择 90 度等价抓取，
+  而不是继续清障。
 
 `geometry_relations_before_pick.json` 里会写入 `target_grasp_analysis`，包括
 `selected_grasp_yaw_deg`、`feasible_yaw_intervals_deg`、
@@ -211,11 +214,12 @@ candidate still becomes `safe` only after MoveIt preflight sets
 `moveit_feasible=true`.
 
 The selected real nudge then runs in one MoveIt process with
-`--close-gripper-for-push`: close gripper as a rigid paddle, refresh joint
-state, preflight `pre_push`, `contact`, `push_end`, and `retreat`, execute those
-same preflight trajectories, retreat, then open the gripper. If any stage fails,
-the workflow writes `clearance_step_XX_result.json`, requests gripper-open
-recovery, and stops instead of continuing from a stale scene.
+`--close-gripper-for-push`: preflight `pre_push`, `contact`, `push_end`, and
+`retreat`, execute the open-gripper `pre_push` move first, close the gripper as
+a rigid paddle at that pre-push pose, execute `contact`, `push_end`, and
+`retreat`, then open the gripper. If any stage fails, the workflow writes
+`clearance_step_XX_result.json`, requests gripper-open recovery, and stops
+instead of continuing from a stale scene.
 Real `pick_away` actions build an obstacle pick plan plus a safe-place plan, and
 both are sent through the existing MoveIt pick/place preview before motion.
 `relaxed_top_pick_away_grasp` actions are not automatic hardware actions because

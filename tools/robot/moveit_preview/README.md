@@ -21,3 +21,7 @@ For `--close-gripper-for-push`, a DH gripper close command may return status
 path accepts that as a rigid-paddle close only when the reported position is
 near the configured close position; open commands still require a successful
 status.
+
+Push clearing executes the open-gripper `pre_push` move before closing the
+gripper as a rigid paddle. The closed gripper is then used only for `contact`,
+`push_end`, and `retreat`.

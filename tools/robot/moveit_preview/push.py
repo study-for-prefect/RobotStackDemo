@@ -76,15 +76,7 @@ def run_push_plan(node: Any, args: Any, planning_start_state: Any, gripper: Any 
     """Preflight all four MoveIt trajectories, then execute them once in order."""
     push_plan = load_push_plan(args.push_plan_json)
     gripper_closed_for_push = False
-    if args.execute and getattr(args, "close_gripper_for_push", False):
-        if not _set_gripper(node, args, gripper, "close"):
-            node.get_logger().error("failed_before_motion: could not close gripper for rigid-paddle push.")
-            return False
-        gripper_closed_for_push = True
-        if not node.wait_for_joint_state(timeout=2.0):
-            _recover_open_gripper(node, args, gripper, "failed_before_motion_no_joint_state_after_gripper_close")
-            return False
-        planning_start_state = node.latest_joint_state
+    close_at_pre_push = bool(args.execute and getattr(args, "close_gripper_for_push", False))
 
     try:
         stage_goals = _push_stage_goals(push_plan, args)
@@ -169,6 +161,15 @@ def run_push_plan(node: Any, args: Any, planning_start_state: Any, gripper: Any 
             return False
         if isinstance(result, JointState):
             planning_start_state = result
+        if stage_name == "pre_push" and close_at_pre_push and not gripper_closed_for_push:
+            if not _set_gripper(node, args, gripper, "close"):
+                _recover_open_gripper(node, args, gripper, "failed_before_contact_gripper_close")
+                node.get_logger().error("failed_before_contact: could not close gripper for rigid-paddle push.")
+                return False
+            gripper_closed_for_push = True
+            if not node.wait_for_joint_state(timeout=2.0):
+                _recover_open_gripper(node, args, gripper, "failed_before_contact_no_joint_state_after_gripper_close")
+                return False
     if gripper_closed_for_push:
         if not _set_gripper(node, args, gripper, "open"):
             node.get_logger().error("failed_after_motion: gripper open recovery failed after push success.")
