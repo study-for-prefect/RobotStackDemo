@@ -150,6 +150,7 @@ def recover_or_lock_missing_target(
             noncritical_templates=protected_templates or [],
             scope_name="target_recovery_before_clearance",
             description="Target recovery observation",
+            allow_critical_label_fallback=True,
         )
         if observed_state is not None:
             target = copy.deepcopy(reacquire_target(observed_state, held_template))

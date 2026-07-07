@@ -167,10 +167,14 @@ camera-frame XY compensation.
 Frontier clearing 的候选动作统一评分：
 
 - `pick_away`: 障碍物自身有可抓 yaw 时优先生成。若有 `table_bounds`，
-  安全放置点必须在桌面边界内且避开目标/受保护结构；若没有
-  `table_bounds`，则从已观察到的场景范围中选一个避开所有可见物体的保守
-  放置点。安全放置点还必须避开 `future_place_regions`，避免清障后挡住
-  后续堆叠区域。只有 `full_scene_grasp` 的 pick-away 可以进入自动执行
+  安全放置点必须在桌面边界内，并默认避开所有当前可见物体，而不是只避开
+  目标/受保护结构；若没有 `table_bounds`，则从已观察到的场景范围中选一个
+  保守放置点。临时清障放置优先选择距离当前目标约 `0.11 m` 的近处空位，
+  并通过 `clearance_safe_place_max_distance_m`（默认 `0.14 m`）限制放太远
+  导致后续目标离开视野。安全放置点还必须避开 `future_place_regions`，
+  避免清障后挡住后续堆叠区域。place plan 会写入 `clearance_place_height`，
+  若目标 XY 下方已有物体，会按局部最高支撑面抬高释放高度，避免同色/邻近
+  清障放置时低空碰撞。只有 `full_scene_grasp` 的 pick-away 可以进入自动执行
   安全候选。完整场景抓取被邻近散块阻挡时，`relaxed_top_pick_away_grasp`
   只写入全集诊断，不进入 `preflight_clearance_candidates` 或
   `safe_clearance_candidates`；系统应继续清障或等待人工确认，不能忽略
@@ -288,7 +292,11 @@ multi-view recovery. If recovery still fails, it keeps the locked first
 observation template as the target region and only considers visible nearby
 loose objects that are high enough to plausibly hide or block that target. These
 missing-target clearing candidates still go through the same safety evaluator
-before any dry-run or real push is selected.
+before any dry-run or real push is selected. During target recovery only, if a
+scoped observation sees exactly one object with the required label but it has
+moved outside the normal XY match gate, the report records
+`match_policy=unique_label_outside_distance_gate` and uses that live detection
+instead of continuing with a stale locked template.
 
 Useful missing-target tuning parameters:
 

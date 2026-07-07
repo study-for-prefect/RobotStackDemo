@@ -20,6 +20,8 @@ def safe_place_for_object(
     table_bounds: Optional[dict],
     future_place_regions: Iterable[dict] = (),
     margin_m: float = 0.02,
+    max_distance_from_target_m: Optional[float] = 0.14,
+    avoid_all_visible_objects: bool = True,
 ) -> Optional[List[float]]:
     center = get_center(obj)
     size = get_size(obj)
@@ -30,9 +32,19 @@ def safe_place_for_object(
     if not samples:
         return None
     protected = {str(value) for value in protected_ids or []}
-    avoid_all_visible_objects = not bool(table_bounds)
-    samples.sort(key=lambda xy: -math.hypot(xy[0] - target_center[0], xy[1] - target_center[1]))
+    avoid_scene_objects = bool(avoid_all_visible_objects or not table_bounds)
+    max_distance = None
+    if max_distance_from_target_m is not None:
+        try:
+            max_distance = float(max_distance_from_target_m)
+        except (TypeError, ValueError):
+            max_distance = None
+    samples.sort(key=lambda xy: _place_sample_priority(xy, target_center))
     for xy in samples:
+        if max_distance is not None:
+            distance_m = math.hypot(float(xy[0]) - float(target_center[0]), float(xy[1]) - float(target_center[1]))
+            if distance_m > max_distance:
+                continue
         placed = _translated_object(obj, xy)
         placed_aabb = object_xy_aabb(placed, margin_m=0.005)
         if not placed_aabb:
@@ -45,7 +57,7 @@ def safe_place_for_object(
             target,
             objects,
             protected,
-            avoid_all_visible_objects,
+            avoid_scene_objects,
         ):
             continue
         return [round(float(xy[0]), 5), round(float(xy[1]), 5), round(float(center[2]), 5)]
@@ -119,10 +131,19 @@ def _safe_place_samples(
     table_bounds: Optional[dict],
     margin_m: float,
 ) -> List[List[float]]:
+    observed = _observed_scene_place_samples(target_center, objects)
     bounded = _table_bound_samples(size, target_center, table_bounds, margin_m)
-    if bounded:
-        return bounded
-    return _observed_scene_place_samples(target_center, objects)
+    samples = []
+    for sample in observed + bounded:
+        if sample not in samples:
+            samples.append(sample)
+    return samples
+
+
+def _place_sample_priority(sample_xy: List[float], target_center: List[float]) -> tuple:
+    distance = math.hypot(float(sample_xy[0]) - float(target_center[0]), float(sample_xy[1]) - float(target_center[1]))
+    preferred_m = 0.11
+    return (abs(distance - preferred_m), distance)
 
 
 def _table_bound_samples(

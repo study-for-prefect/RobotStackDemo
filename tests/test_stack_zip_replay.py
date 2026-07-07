@@ -25,6 +25,10 @@ ZIP_77_2 = (
     "/Users/wujl/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/"
     "wxid_at6wr1ixd8dv22_7973/temp/drag/stack_push_execute77-2.zip"
 )
+ZIP_77_6_LATEST = (
+    "/Users/wujl/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/"
+    "wxid_at6wr1ixd8dv22_7973/temp/drag/stack_push_execute77-6(1).zip"
+)
 
 
 def args():
@@ -45,7 +49,7 @@ def args():
 
 def _load_zip_json(zip_path, relative_path):
     with zipfile.ZipFile(zip_path) as archive:
-        prefix = os.path.splitext(os.path.basename(zip_path))[0]
+        prefix = archive.namelist()[0].split("/")[0]
         return json.loads(archive.read("{}/{}".format(prefix, relative_path)))
 
 
@@ -91,7 +95,7 @@ def _replay_preflight_candidates(zip_path):
 
 
 def test_77_replays_generate_preflight_candidates_for_simple_clearance():
-    for zip_path in (ZIP_77_1, ZIP_77_2):
+    for zip_path in (ZIP_77_1, ZIP_77_2, ZIP_77_6_LATEST):
         if not os.path.exists(zip_path):
             print("skip: zip fixture not present {}".format(zip_path))
             return

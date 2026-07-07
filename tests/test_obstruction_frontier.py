@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 
 import tools.workflows.stack_demo.obstruction_frontier as frontier_module
+from robot_scene_pipeline.geometry_relations import object_xy_aabb, xy_aabb_overlap
+from tools.workflows.stack_demo.clearance_placement import safe_place_for_object
 from tools.workflows.stack_demo.obstruction_frontier import _score_candidate, build_frontier_clearance_plan
 
 
@@ -263,6 +265,28 @@ def test_free_space_gain_alone_stays_exploratory():
     assert candidate["exploratory"] is True
     assert candidate["automatic_execution_allowed"] is False
     assert candidate["executable_safe"] is False
+
+
+def test_safe_place_avoids_visible_objects_and_stays_near_target():
+    target = obj("target", [0.40, 0.00, 0.015])
+    obstacle = obj("obstacle", [0.43, 0.00, 0.015])
+    occupied = obj("occupied", [0.51, 0.00, 0.015])
+    state_objects = [target, obstacle, occupied]
+    safe_place = safe_place_for_object(
+        obstacle,
+        target,
+        state_objects,
+        protected_ids=[],
+        table_bounds={"xmin": 0.10, "xmax": 0.90, "ymin": -0.50, "ymax": 0.50},
+        max_distance_from_target_m=0.14,
+        avoid_all_visible_objects=True,
+    )
+    assert safe_place is not None
+    distance_m = ((safe_place[0] - target["geometry_center_m"][0]) ** 2 + (safe_place[1] - target["geometry_center_m"][1]) ** 2) ** 0.5
+    assert distance_m <= 0.14
+    placed = dict(obstacle)
+    placed["geometry_center_m"] = [safe_place[0], safe_place[1], safe_place[2]]
+    assert xy_aabb_overlap(object_xy_aabb(placed, margin_m=0.005), object_xy_aabb(occupied, margin_m=0.005))[2] == 0.0
 
 
 def test_failed_swept_path_is_not_preflight_candidate():
@@ -528,6 +552,7 @@ if __name__ == "__main__":
     test_second_level_nudge_with_blocker_progress_is_enabling()
     test_blocker_count_reduction_is_enabling_candidate()
     test_free_space_gain_alone_stays_exploratory()
+    test_safe_place_avoids_visible_objects_and_stays_near_target()
     test_failed_swept_path_is_not_preflight_candidate()
     test_pick_away_uses_observed_scene_safe_place_without_table_bounds()
     test_pick_away_allows_relaxed_top_grasp_for_blocking_loose_object()

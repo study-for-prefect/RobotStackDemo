@@ -119,12 +119,17 @@ def _scope_report(
     fused_state: dict,
     critical_templates: Iterable[ObjectDict],
     max_dist_m: float,
+    allow_label_fallback: bool = False,
 ) -> Tuple[List[dict], List[dict]]:
     observed = []
     missing = []
     objects = fused_state.get("objects", [])
     for template in critical_templates:
         match = _matching_object(objects, template, max_dist_m)
+        match_policy = "nearest_label_within_distance_gate"
+        if match is None and allow_label_fallback:
+            match = _unique_label_fallback_match(objects, template)
+            match_policy = "unique_label_outside_distance_gate"
         item = {
             "template_id": template.get("id"),
             "template_label": _label(template),
@@ -137,9 +142,23 @@ def _scope_report(
                 "observed_id": match.get("id"),
                 "observed_center_m": _finite_xyz(match),
                 "distance_m": round(_xy_distance(match, template), 6),
+                "match_policy": match_policy,
             })
             observed.append(item)
     return observed, missing
+
+
+def _unique_label_fallback_match(objects: Iterable[ObjectDict], template: ObjectDict) -> Optional[ObjectDict]:
+    label = _label(template)
+    if label is None:
+        return None
+    candidates = [
+        obj for obj in objects
+        if isinstance(obj, dict) and _label(obj) == label and _finite_xyz(obj) is not None
+    ]
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
 
 
 def expected_placed_template(held_object: ObjectDict, place_step: dict) -> ObjectDict:
@@ -176,6 +195,7 @@ def observe_empty_with_scope(
     noncritical_templates: Optional[Iterable[ObjectDict]] = None,
     scope_name: str = "post_action",
     description: str = "Post-action observation",
+    allow_critical_label_fallback: bool = False,
 ) -> Tuple[Optional[dict], dict, dict]:
     critical = [copy.deepcopy(obj) for obj in critical_templates if isinstance(obj, dict)]
     noncritical = [copy.deepcopy(obj) for obj in (noncritical_templates or []) if isinstance(obj, dict)]
@@ -213,7 +233,12 @@ def observe_empty_with_scope(
         states.append(state)
         fused_state = copy.deepcopy(state)
         fused_state["objects"] = _merge_objects(states)
-        observed, missing = _scope_report(fused_state, critical, max_dist_m)
+        observed, missing = _scope_report(
+            fused_state,
+            critical,
+            max_dist_m,
+            allow_label_fallback=allow_critical_label_fallback,
+        )
         attempts.append({
             "attempt": attempt_index,
             "offset_base_m": offset,

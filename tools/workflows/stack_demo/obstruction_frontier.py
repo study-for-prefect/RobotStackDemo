@@ -348,6 +348,8 @@ def _make_pick_away_candidate(
         protected_ids,
         table_bounds,
         future_place_regions=future_place_regions,
+        max_distance_from_target_m=getattr(args, "clearance_safe_place_max_distance_m", 0.14),
+        avoid_all_visible_objects=getattr(args, "clearance_safe_place_avoid_all_visible_objects", True),
     )
     if safe_place is None:
         return None

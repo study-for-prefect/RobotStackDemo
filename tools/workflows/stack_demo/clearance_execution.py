@@ -6,6 +6,8 @@ import copy
 import os
 from typing import Any, Dict, Optional, Tuple
 
+from robot_scene_pipeline.geometry_relations import get_center, get_size, object_xy_aabb, xy_aabb_overlap
+from robot_scene_pipeline.scene_memory import mark_pushed, save_memory
 from tools.planning.decision_to_execution import write_json
 
 from .commands import open_gripper_command, push_clear_command, push_preflight_command, run
@@ -15,7 +17,6 @@ from .push_context import observed_push_delta_m, protected_stack_templates
 from .push_clearing import build_push_execution_plan, object_by_string_id
 from .scene import memory_id_for_scene_object, reacquire_target
 from .target_recovery import state_with_missing_target
-from robot_scene_pipeline.scene_memory import mark_pushed, save_memory
 
 
 class ClearancePreflightFailed(RuntimeError):
@@ -133,7 +134,12 @@ def _build_pick_away_place_plan(current_state: dict, obstacle: dict, selected_ac
     safe_place = selected_action.get("safe_place_center_m")
     if not isinstance(safe_place, list) or len(safe_place) < 3:
         raise RuntimeError("pick_away selected action is missing safe_place_center_m.")
-    release_z = float(safe_place[2]) + float(getattr(args, "release_gap_m", 0.010))
+    release_z, height_report = _pick_away_release_height(
+        current_state,
+        obstacle,
+        safe_place,
+        release_gap_m=float(getattr(args, "release_gap_m", 0.010)),
+    )
     step = {
         "step": 1,
         "action": "place_relative",
@@ -158,8 +164,57 @@ def _build_pick_away_place_plan(current_state: dict, obstacle: dict, selected_ac
         "exact_tool_yaw_required": True,
         "yaw_frame": "base_link",
         "yaw_source": "obstruction_frontier_pick_away",
+        "clearance_place_height": height_report,
     }
     return plan_envelope(current_state, step)
+
+
+def _pick_away_release_height(
+    current_state: dict,
+    obstacle: dict,
+    safe_place: list,
+    release_gap_m: float,
+) -> Tuple[float, dict]:
+    center_z = float(safe_place[2])
+    obstacle_size = get_size(obstacle)
+    if obstacle_size is None:
+        return center_z + float(release_gap_m), {
+            "source": "safe_place_center_z",
+            "support_top_z_m": None,
+            "object_center_z_m": round(center_z, 6),
+            "release_gap_m": round(float(release_gap_m), 6),
+        }
+    placed = copy.deepcopy(obstacle)
+    placed["geometry_center_m"] = [float(safe_place[0]), float(safe_place[1]), center_z]
+    placed_aabb = object_xy_aabb(placed, margin_m=0.002)
+    support_top_z = None
+    support_object_id = None
+    for other in current_state.get("objects", []):
+        if not isinstance(other, dict) or str(other.get("id")) == str(obstacle.get("id")):
+            continue
+        other_aabb = object_xy_aabb(other, margin_m=0.0)
+        if placed_aabb is None or other_aabb is None:
+            continue
+        if xy_aabb_overlap(placed_aabb, other_aabb)[2] <= 0.0:
+            continue
+        other_center = get_center(other)
+        other_size = get_size(other)
+        if other_center is None or other_size is None:
+            continue
+        other_top_z = float(other_center[2]) + 0.5 * float(other_size[2])
+        if support_top_z is None or other_top_z > support_top_z:
+            support_top_z = other_top_z
+            support_object_id = other.get("id")
+    if support_top_z is not None:
+        center_z = max(center_z, float(support_top_z) + 0.5 * float(obstacle_size[2]))
+    release_z = center_z + float(release_gap_m)
+    return release_z, {
+        "source": "local_support_top" if support_top_z is not None else "safe_place_center_z",
+        "support_object_id": support_object_id,
+        "support_top_z_m": None if support_top_z is None else round(float(support_top_z), 6),
+        "object_center_z_m": round(float(center_z), 6),
+        "release_gap_m": round(float(release_gap_m), 6),
+    }
 
 
 def execute_pick_away_and_reobserve(

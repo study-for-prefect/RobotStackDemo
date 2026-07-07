@@ -440,6 +440,32 @@ def test_relaxed_pick_away_candidate_stays_out_of_safe_preflight_filter():
     assert report["failures"][0]["reason"] == "relaxed_pick_away_requires_more_clearance"
 
 
+def test_pick_away_place_plan_uses_local_support_height():
+    obstacle = {
+        "id": "blue",
+        "label": "square blue",
+        "geometry_center_m": [0.30, 0.00, 0.015],
+        "dimensions_m": [0.04, 0.04, 0.03],
+    }
+    support = {
+        "id": "support",
+        "label": "square red",
+        "geometry_center_m": [0.50, 0.00, 0.015],
+        "dimensions_m": [0.04, 0.04, 0.03],
+    }
+    state = {"objects": [obstacle, support]}
+    selected = {
+        "safe_place_center_m": [0.50, 0.00, 0.015],
+        "selected_grasp_yaw_deg": 0.0,
+    }
+    args = SimpleNamespace(release_gap_m=0.010, approach_height_m=0.05)
+    plan = clearance_execution._build_pick_away_place_plan(state, obstacle, selected, args)
+    step = plan["steps"][0]
+    assert step["target_position_m"][2] == 0.055
+    assert step["clearance_place_height"]["source"] == "local_support_top"
+    assert step["clearance_place_height"]["support_object_id"] == "support"
+
+
 def test_push_clear_command_uses_single_process_gripper_push():
     args = SimpleNamespace(
         ros_python="/usr/bin/python3",
@@ -467,5 +493,6 @@ if __name__ == "__main__":
     test_nudge_preflight_failure_does_not_execute_push()
     test_pick_away_candidate_survives_push_preflight_filter()
     test_relaxed_pick_away_candidate_stays_out_of_safe_preflight_filter()
+    test_pick_away_place_plan_uses_local_support_height()
     test_push_clear_command_uses_single_process_gripper_push()
     print("manual push clearance tests passed")

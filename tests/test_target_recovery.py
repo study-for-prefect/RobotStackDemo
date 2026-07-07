@@ -4,6 +4,7 @@ from tools.workflows.stack_demo.target_recovery import (
     missing_target_clearance_relations,
     state_with_missing_target,
 )
+from tools.workflows.stack_demo.observation_scope import _scope_report
 
 
 def obj(object_id, center, size=(0.04, 0.04, 0.03), role="loose_movable", state="free"):
@@ -45,7 +46,24 @@ def test_missing_target_clearance_prefers_nearby_high_loose_objects():
     assert relations[0]["reason"] == "target_missing_nearby_high_loose_object"
 
 
+def test_target_recovery_scope_accepts_unique_same_label_after_clearance_move():
+    template = obj("blue_initial", [0.30, 0.05, 0.015])
+    moved_blue = obj("blue_seen", [0.45, 0.17, 0.015])
+    template["label"] = "square blue"
+    moved_blue["label"] = "square blue"
+    observed, missing = _scope_report(
+        {"objects": [moved_blue]},
+        [template],
+        max_dist_m=0.07,
+        allow_label_fallback=True,
+    )
+    assert missing == []
+    assert observed[0]["observed_id"] == "blue_seen"
+    assert observed[0]["match_policy"] == "unique_label_outside_distance_gate"
+
+
 if __name__ == "__main__":
     test_missing_target_state_injects_locked_template_first()
     test_missing_target_clearance_prefers_nearby_high_loose_objects()
+    test_target_recovery_scope_accepts_unique_same_label_after_clearance_move()
     print("target recovery tests passed")

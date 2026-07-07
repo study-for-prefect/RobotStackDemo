@@ -188,6 +188,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--scoped-observation-max-attempts", type=int, default=5)
     parser.add_argument("--scoped-observation-match-distance-m", type=float, default=0.07)
+    parser.add_argument(
+        "--clearance-safe-place-max-distance-m",
+        type=float,
+        default=0.14,
+        help="Maximum XY distance from the current target for temporary pick-away placement.",
+    )
     parser.add_argument("--place-yaw-strategy", choices=("stack", "base", "held"), default="base")
     parser.add_argument("--place-center-strategy", choices=("top", "base"), default="top")
     parser.add_argument("--max-stack-top-center-offset-m", type=float, default=0.015)
