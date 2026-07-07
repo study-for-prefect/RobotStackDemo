@@ -110,9 +110,9 @@ def build_obstruction_graph(
     while queue:
         blocked_obj, depth, parent_id = queue.pop(0)
         blocked_id = _object_id(blocked_obj)
-        if (blocked_id, depth) in expanded or depth > int(max_depth):
+        if blocked_id in expanded or depth > int(max_depth):
             continue
-        expanded.add((blocked_id, depth))
+        expanded.add(blocked_id)
         grasp = select_best_grasp(
             blocked_obj,
             objects,
@@ -246,23 +246,28 @@ def _safe_place_for_object(
 
 def _score_candidate(candidate: dict) -> dict:
     direct_gain = float(candidate.get("direct_target_gain", 0.0))
+    direct_progress_gain = float(candidate.get("direct_progress_gain", 0.0))
     enabling_gain = float(candidate.get("enabling_gain", 0.0))
     free_space_gain = float(candidate.get("free_space_gain", 0.0))
-    candidate["task_effective"] = bool(direct_gain > 0.0 or enabling_gain > 0.0 or free_space_gain > 0.0)
+    candidate["task_effective"] = bool(
+        direct_gain > 0.0 or direct_progress_gain > 0.0 or enabling_gain > 0.0 or free_space_gain > 0.0
+    )
     yaw_gain = candidate.get("target_yaw_gain", {})
     has_direct_target_gain = bool(
         float(yaw_gain.get("gain", 0.0)) > 0.0
         or yaw_gain.get("after_grasp_feasible")
         or direct_gain > 0.0
     )
+    has_direct_progress = bool(direct_progress_gain > 0.0)
     has_enabling_gain = bool(enabling_gain > 0.0)
     candidate["direct_clearance_candidate"] = has_direct_target_gain
+    candidate["direct_progress_candidate"] = has_direct_progress
     candidate["enabling_clearance_candidate"] = has_enabling_gain
-    candidate["exploratory"] = not (has_direct_target_gain or has_enabling_gain)
+    candidate["exploratory"] = not (has_direct_target_gain or has_direct_progress or has_enabling_gain)
     candidate["automatic_execution_allowed"] = bool(
-        candidate["task_effective"] and (has_direct_target_gain or has_enabling_gain)
+        candidate["task_effective"] and (has_direct_target_gain or has_direct_progress or has_enabling_gain)
     )
-    utility = (3.0 * direct_gain) + (1.8 * enabling_gain) + (0.9 * free_space_gain)
+    utility = (3.0 * direct_gain) + (2.2 * direct_progress_gain) + (1.8 * enabling_gain) + (0.9 * free_space_gain)
     if candidate["exploratory"]:
         utility *= 0.35
     easiness = float(candidate.get("easiness_score", 0.0))
@@ -309,11 +314,23 @@ def _evaluation_direct_target_gain(
 ) -> float:
     if _object_id(relation_target) != _object_id(target):
         return 0.0
-    gain = 0.0
-    if evaluation.get("post_push_grasp_feasible"):
-        gain += 1.0
-    gain += max(0.0, float(evaluation.get("current_grasp_gain") or 0.0))
-    return gain
+    return 1.0 if evaluation.get("post_push_grasp_feasible") else 0.0
+
+
+def _evaluation_direct_progress_gain(
+    evaluation: dict,
+    relation_target: ObjectDict,
+    target: ObjectDict,
+) -> Tuple[float, Optional[str]]:
+    if _object_id(relation_target) != _object_id(target):
+        return 0.0, None
+    blocker_count_reduction = max(0, int(evaluation.get("blocker_count_reduction") or 0))
+    grasp_gain = max(0.0, float(evaluation.get("current_grasp_gain") or 0.0))
+    if blocker_count_reduction > 0:
+        return 0.5 + 0.25 * blocker_count_reduction + grasp_gain, "target_blocker_count_reduction"
+    if grasp_gain > 0.0:
+        return grasp_gain, "target_grasp_clearance_gain"
+    return 0.0, None
 
 
 def _evaluation_enabling_gain(
@@ -350,6 +367,39 @@ def _candidate_safety_fields(
     candidate.setdefault("push_swept_safe", bool(geometry_feasible))
     candidate.setdefault("push_end_safe", bool(geometry_feasible))
     return refresh_executable_safe(candidate)
+
+
+def _frontier_item_priority(item: dict, target: ObjectDict, objects: List[ObjectDict]) -> Tuple[float, int, str]:
+    obstacle = _find_object(objects, item.get("object_id")) or {}
+    target_center = get_center(target)
+    obstacle_center = get_center(obstacle)
+    distance = 1.0
+    if target_center is not None and obstacle_center is not None:
+        distance = math.hypot(float(target_center[0]) - float(obstacle_center[0]), float(target_center[1]) - float(obstacle_center[1]))
+    depth = max(1, int(item.get("min_depth", 99)))
+    blocks_count = len(item.get("blocks", []) or [])
+    return (
+        float(depth) - 0.25 * float(blocks_count) + 0.5 * distance,
+        depth,
+        str(item.get("object_id")),
+    )
+
+
+def _rank_frontier_items(items: Iterable[dict], target: ObjectDict, objects: List[ObjectDict], limit: int) -> List[dict]:
+    ranked = sorted(list(items or []), key=lambda item: _frontier_item_priority(item, target, objects))
+    if int(limit) <= 0:
+        return ranked
+    return ranked[: int(limit)]
+
+
+def _evaluation_priority(evaluation: dict) -> Tuple[int, int, int, float, str]:
+    return (
+        0 if evaluation.get("feasible") else 1,
+        0 if evaluation.get("approach_path_safe") else 1,
+        0 if evaluation.get("push_swept_safe") else 1,
+        -float(evaluation.get("score", 0.0) or 0.0),
+        str(evaluation.get("candidate_id")),
+    )
 
 
 def _make_pick_away_candidate(
@@ -435,8 +485,24 @@ def build_frontier_clearance_plan(
     safe_candidates: List[dict] = []
     candidate_index = 1
     nudge_max = float(getattr(args, "clearance_nudge_distance_m", 0.025))
+    frontier_top_k = int(getattr(args, "clearance_frontier_top_k", 6))
+    candidate_top_n = int(getattr(args, "clearance_candidate_top_n_per_obstacle", 8))
+    target_yaw_gain_cache: Dict[str, dict] = {}
 
-    for frontier_item in graph.get("frontier", []):
+    def target_yaw_gain_for(obstacle_id: Any) -> dict:
+        key = str(obstacle_id)
+        if key not in target_yaw_gain_cache:
+            target_yaw_gain_cache[key] = _target_yaw_gain(target, objects, obstacle_id, args)
+        return target_yaw_gain_cache[key]
+
+    evaluated_frontier = _rank_frontier_items(
+        graph.get("frontier", []),
+        target,
+        objects,
+        frontier_top_k,
+    )
+
+    for frontier_item in evaluated_frontier:
         obstacle = _find_object(objects, frontier_item.get("object_id"))
         if obstacle is None or _object_id(obstacle) == _object_id(target) or _is_protected(obstacle, protected_ids):
             continue
@@ -485,29 +551,37 @@ def build_frontier_clearance_plan(
             push_tool_width_m=getattr(args, "push_tool_width_m", 0.035),
             push_tool_safety_margin_m=getattr(args, "push_tool_safety_margin_m", 0.005),
         )
+        evaluation_items = []
         for result in push_report.get("candidate_results", []):
-            for evaluation in result.get("evaluations", []):
+            for evaluation in result.get("evaluations", []) or []:
+                evaluation_items.append((result, evaluation))
+        evaluation_items.sort(key=lambda item: _evaluation_priority(item[1]))
+        if candidate_top_n > 0:
+            evaluation_items = evaluation_items[:candidate_top_n]
+        for result, evaluation in evaluation_items:
                 if float(evaluation.get("distance_m") or 0.0) > nudge_max + 1e-9:
                     continue
-                yaw_gain = _target_yaw_gain(target, objects, obstacle.get("id"), args)
+                yaw_gain = target_yaw_gain_for(obstacle.get("id"))
                 direct_gain = _direct_target_gain(yaw_gain) + _evaluation_direct_target_gain(
                     evaluation,
                     relation_target,
                     target,
                 )
-                graph_enabling_gain = _enabling_gain(obstacle, target, objects, frontier_item, args)
+                direct_progress_gain, direct_progress_reason = _evaluation_direct_progress_gain(
+                    evaluation,
+                    relation_target,
+                    target,
+                )
                 eval_enabling_gain, eval_enabling_reason = _evaluation_enabling_gain(
                     evaluation,
                     relation_target,
                     target,
                 )
-                enabling_gain = max(graph_enabling_gain, eval_enabling_gain)
+                enabling_gain = eval_enabling_gain
                 free_space_gain = 0.2 if float(evaluation.get("target_distance_after_m") or 0.0) > 0.0 else 0.0
                 easiness = 0.4 + max(0.0, float(evaluation.get("score", 0.0)))
                 risk = 0.4 + 0.2 * max(0, int(frontier_item.get("min_depth", 1)) - 1)
                 enabling_reason = eval_enabling_reason
-                if enabling_reason is None and graph_enabling_gain > 0.0:
-                    enabling_reason = "graph_removed_obstacle_improves_blocked_object_grasp"
                 candidate = _score_candidate(
                     _candidate_safety_fields(
                         {
@@ -522,6 +596,8 @@ def build_frontier_clearance_plan(
                             "distance_m": evaluation.get("distance_m"),
                             "direction_source": evaluation.get("source"),
                             "direct_target_gain": round(direct_gain, 6),
+                            "direct_progress_gain": round(direct_progress_gain, 6),
+                            "direct_progress_reason": direct_progress_reason,
                             "enabling_gain": round(enabling_gain, 6),
                             "free_space_gain": round(free_space_gain, 6),
                             "current_grasp_gain": evaluation.get("current_grasp_gain", 0.0),
@@ -551,7 +627,18 @@ def build_frontier_clearance_plan(
                     )
                 )
                 all_candidates.append(candidate)
-                if candidate.get("geometry_feasible") and candidate.get("task_effective") and candidate.get("protected_structure_safe"):
+                preflight_ready = bool(
+                    candidate.get("feasible")
+                    and candidate.get("geometry_feasible")
+                    and candidate.get("approach_path_safe")
+                    and candidate.get("push_swept_safe")
+                    and candidate.get("push_end_safe")
+                    and candidate.get("future_task_feasible", True)
+                    and candidate.get("protected_structure_safe")
+                    and candidate.get("task_effective")
+                    and candidate.get("automatic_execution_allowed")
+                )
+                if preflight_ready:
                     safe_candidates.append(candidate)
                 candidate_index += 1
 
@@ -562,6 +649,13 @@ def build_frontier_clearance_plan(
         "schema_version": "obstruction_frontier_clearance_v1",
         "obstruction_graph": graph,
         "obstacle_frontier_candidates": graph.get("frontier", []),
+        "evaluated_frontier_candidates": evaluated_frontier,
+        "candidate_pruning": {
+            "frontier_top_k": frontier_top_k,
+            "candidate_top_n_per_obstacle": candidate_top_n,
+            "frontier_count": len(graph.get("frontier", [])),
+            "evaluated_frontier_count": len(evaluated_frontier),
+        },
         "all_clearance_action_candidates": all_candidates,
         "preflight_clearance_candidates": safe_candidates,
         "safe_clearance_candidates": executable_safe_candidates,

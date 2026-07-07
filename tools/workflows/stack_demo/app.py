@@ -57,6 +57,7 @@ from .scene import (
     reacquire_target,
     target_exclusion_for_pre_pick,
     validate_decision,
+    write_stack_object_selection_debug,
 )
 from .target_recovery import recover_or_lock_missing_target
 
@@ -183,6 +184,7 @@ def main() -> int:
         )
         print_decision_summary(initial_state, decision)
         write_json(os.path.join(args.output_dir, "stack_blocks_decision.json"), decision)
+        write_stack_object_selection_debug(args.output_dir, decision)
         write_json(os.path.join(args.output_dir, "initial_scene_state.json"), initial_state)
 
         memory = update_from_detections(memory, initial_state.get("objects", []))

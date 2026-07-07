@@ -234,14 +234,19 @@ python3 tools/workflows/stack_demo_pipeline.py \
   ... \
   --max-automatic-push-clearing-attempts 4 \
   --obstruction-graph-max-depth 3 \
-  --clearance-nudge-distance-m 0.025
+  --clearance-nudge-distance-m 0.025 \
+  --clearance-frontier-top-k 6 \
+  --clearance-candidate-top-n-per-obstacle 8
 ```
 
 Each step writes its own reports:
 
 ```text
+stack_object_selection_debug.json
 cycle_*/obstruction_graph.json
 cycle_*/obstacle_frontier_candidates.json
+cycle_*/evaluated_frontier_candidates.json
+cycle_*/clearance_candidate_pruning.json
 cycle_*/all_clearance_action_candidates.json
 cycle_*/preflight_clearance_candidates.json
 cycle_*/safe_clearance_candidates.json

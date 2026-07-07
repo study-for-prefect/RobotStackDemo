@@ -132,6 +132,77 @@ def test_missing_required_color_is_reported_without_inventing_ids():
         assert exc.reason == "missing_required_color"
 
 
+def test_color_rule_prefers_usable_stack_object_over_crowded_low_confidence_match():
+    objects = [
+        {
+            "id": 4,
+            "label": "square red",
+            "confidence": 0.98,
+            "geometry_frame": "base_link",
+            "pointcloud_geometry_valid": True,
+            "geometry_center_m": [0.31, 0.21, -0.002],
+            "dimensions_m": [0.025, 0.021, 0.024],
+        },
+        {
+            "id": 1,
+            "label": "square green",
+            "confidence": 0.995,
+            "geometry_frame": "base_link",
+            "pointcloud_geometry_valid": True,
+            "geometry_center_m": [0.398, 0.106, 0.005],
+            "dimensions_m": [0.025, 0.025, 0.022],
+            "pointcloud_point_count": 600,
+        },
+        {
+            "id": 8,
+            "label": "square green",
+            "confidence": 0.759,
+            "geometry_frame": "base_link",
+            "pointcloud_geometry_valid": True,
+            "geometry_center_m": [0.362, 0.095, -0.001],
+            "dimensions_m": [0.024, 0.023, 0.022],
+            "pointcloud_point_count": 200,
+        },
+        {
+            "id": 6,
+            "label": "square red",
+            "confidence": 0.89,
+            "geometry_frame": "base_link",
+            "pointcloud_geometry_valid": True,
+            "geometry_center_m": [0.386, 0.068, 0.003],
+            "dimensions_m": [0.025, 0.024, 0.014],
+        },
+        {
+            "id": 0,
+            "label": "square blue",
+            "confidence": 0.998,
+            "geometry_frame": "base_link",
+            "pointcloud_geometry_valid": True,
+            "geometry_center_m": [0.346, 0.137, -0.001],
+            "dimensions_m": [0.023, 0.022, 0.023],
+        },
+        {
+            "id": 5,
+            "label": "square yellow",
+            "confidence": 0.944,
+            "geometry_frame": "base_link",
+            "pointcloud_geometry_valid": True,
+            "geometry_center_m": [0.308, 0.092, -0.003],
+            "dimensions_m": [0.023, 0.023, 0.024],
+        },
+    ]
+    decision = validate_stack_blocks_decision(
+        {"task_type": "stack_blocks", "base_object_id": 4, "stack_order": [8, 0, 5], "reason": ""},
+        objects,
+        "以红色积木为底，把绿色积木放到红色上面，再把蓝色积木放到绿色上面，再把黄色积木放到蓝色上面",
+    )
+    assert decision["base_object_id"] == 4
+    assert decision["stack_order"][0] == 1
+    green_selection = next(item for item in decision["explicit_rule_repair"]["color_candidate_selections"] if item["color"] == "green")
+    assert green_selection["selected_id"] == 1
+    assert green_selection["strategy"] == "usable_geometry_confidence_operability_score"
+
+
 if __name__ == "__main__":
     test_structure_plan_is_preserved_with_executable_stack_order()
     test_normalize_stack_blocks_decision_returns_dict_for_scene_flow()
@@ -139,4 +210,5 @@ if __name__ == "__main__":
     test_explicit_color_rule_repairs_ids_but_keeps_structure_plan()
     test_structure_plan_rejects_unknown_object_ids()
     test_missing_required_color_is_reported_without_inventing_ids()
+    test_color_rule_prefers_usable_stack_object_over_crowded_low_confidence_match()
     print("llm structure planner tests passed")

@@ -111,9 +111,10 @@ def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
             "selected_grasp_yaw_deg", "safe_place_center_m", "feasible",
             "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
             "future_task_feasible", "protected_structure_safe", "moveit_feasible",
-            "task_effective", "direct_clearance_candidate", "enabling_clearance_candidate", "exploratory",
+            "task_effective", "direct_clearance_candidate", "direct_progress_candidate",
+            "enabling_clearance_candidate", "exploratory",
             "automatic_execution_allowed", "executable_safe", "direct_target_gain",
-            "enabling_gain", "free_space_gain", "current_grasp_gain",
+            "direct_progress_gain", "direct_progress_reason", "enabling_gain", "free_space_gain", "current_grasp_gain",
             "current_blocker_count", "predicted_blocker_count", "blocker_count_reduction",
             "post_push_grasp_feasible", "enables_blocker_object_id", "enabling_reason",
             "utility_score", "easiness_score",
@@ -129,6 +130,14 @@ def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
     write_json(
         os.path.join(cycle_dir, "obstacle_frontier_candidates.json"),
         frontier_plan.get("obstacle_frontier_candidates", []),
+    )
+    write_json(
+        os.path.join(cycle_dir, "evaluated_frontier_candidates.json"),
+        frontier_plan.get("evaluated_frontier_candidates", []),
+    )
+    write_json(
+        os.path.join(cycle_dir, "clearance_candidate_pruning.json"),
+        frontier_plan.get("candidate_pruning", {}),
     )
     write_json(
         os.path.join(cycle_dir, "all_clearance_action_candidates.json"),
@@ -163,9 +172,10 @@ def _candidate_summary(candidate: dict) -> dict:
         "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
         "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
-        "protected_structure_safe", "task_effective", "direct_clearance_candidate",
+        "protected_structure_safe", "task_effective", "direct_clearance_candidate", "direct_progress_candidate",
         "enabling_clearance_candidate", "exploratory", "automatic_execution_allowed",
-        "target_yaw_gain", "direct_target_gain", "enabling_gain", "free_space_gain",
+        "target_yaw_gain", "direct_target_gain", "direct_progress_gain", "direct_progress_reason",
+        "enabling_gain", "free_space_gain",
         "blocker_count_reduction", "current_grasp_gain", "post_push_grasp_feasible",
         "enables_blocker_object_id", "enabling_reason", "score", "reason",
     )

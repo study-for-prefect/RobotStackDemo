@@ -26,6 +26,14 @@ fi
 
 tmux new-session -d -s "$SESSION" -n ur_driver "
 source /opt/ros/humble/setup.bash
+if [ -f /home/wxm/realsense_ws/install/setup.bash ]; then
+  source /home/wxm/realsense_ws/install/setup.bash
+fi
+
+if [ -f /home/wxm/ros2_ws/install/setup.bash ]; then
+  source /home/wxm/ros2_ws/install/setup.bash
+fi
+
 ros2 launch ur_robot_driver ur_control.launch.py \
   ur_type:=ur5 \
   robot_ip:=$UR_IP \
@@ -35,6 +43,14 @@ exec bash
 
 tmux new-window -t "$SESSION" -n handeye "
 source /opt/ros/humble/setup.bash
+if [ -f /home/wxm/realsense_ws/install/setup.bash ]; then
+  source /home/wxm/realsense_ws/install/setup.bash
+fi
+
+if [ -f /home/wxm/ros2_ws/install/setup.bash ]; then
+  source /home/wxm/ros2_ws/install/setup.bash
+fi
+
 if [ \"$HAND_EYE_MODE\" = \"easy\" ]; then
   ros2 launch easy_handeye2 publish.launch.py \
     name:=my_eih_calib_camera_link
@@ -50,6 +66,14 @@ exec bash
 tmux new-window -t "$SESSION" -n moveit "
 sleep 5
 source /opt/ros/humble/setup.bash
+if [ -f /home/wxm/realsense_ws/install/setup.bash ]; then
+  source /home/wxm/realsense_ws/install/setup.bash
+fi
+
+if [ -f /home/wxm/ros2_ws/install/setup.bash ]; then
+  source /home/wxm/ros2_ws/install/setup.bash
+fi
+
 ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur5
 exec bash
 "
@@ -57,6 +81,14 @@ exec bash
 tmux new-window -t "$SESSION" -n camera "
 sleep 3
 source /opt/ros/humble/setup.bash
+if [ -f /home/wxm/realsense_ws/install/setup.bash ]; then
+  source /home/wxm/realsense_ws/install/setup.bash
+fi
+
+if [ -f /home/wxm/ros2_ws/install/setup.bash ]; then
+  source /home/wxm/ros2_ws/install/setup.bash
+fi
+
 ros2 launch realsense2_camera rs_launch.py \
   align_depth.enable:=true \
   enable_color:=true \
@@ -67,6 +99,14 @@ exec bash
 tmux new-window -t "$SESSION" -n tf_bridge "
 sleep 8
 source /opt/ros/humble/setup.bash
+if [ -f /home/wxm/realsense_ws/install/setup.bash ]; then
+  source /home/wxm/realsense_ws/install/setup.bash
+fi
+
+if [ -f /home/wxm/ros2_ws/install/setup.bash ]; then
+  source /home/wxm/ros2_ws/install/setup.bash
+fi
+
 cd $PROJECT
 
 while true; do
@@ -83,6 +123,14 @@ done
 tmux new-window -t "$SESSION" -n perception "
 sleep 12
 source /opt/ros/humble/setup.bash
+if [ -f /home/wxm/realsense_ws/install/setup.bash ]; then
+  source /home/wxm/realsense_ws/install/setup.bash
+fi
+
+if [ -f /home/wxm/ros2_ws/install/setup.bash ]; then
+  source /home/wxm/ros2_ws/install/setup.bash
+fi
+
 source $HOME/miniconda3/etc/profile.d/conda.sh
 conda activate yolo
 cd $PROJECT

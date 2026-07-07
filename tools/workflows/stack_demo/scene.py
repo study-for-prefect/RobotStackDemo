@@ -73,6 +73,22 @@ def _write_initial_required_objects_report(args, output_dir, state, decision_err
     return report
 
 
+def write_stack_object_selection_debug(output_dir: str, decision: dict) -> None:
+    selections = decision.get("color_candidate_selections") if isinstance(decision, dict) else None
+    if not selections:
+        return
+    write_json(
+        os.path.join(output_dir, "stack_object_selection_debug.json"),
+        {
+            "schema_version": "stack_object_selection_debug_v1",
+            "base_object_id": decision.get("base_object_id"),
+            "stack_order": decision.get("stack_order"),
+            "full_stack_order": decision.get("full_stack_order"),
+            "selections": selections,
+        },
+    )
+
+
 def _raise_initial_required_objects_missing(args, state, decision_error):
     report = _write_initial_required_objects_report(
         args,
@@ -120,6 +136,7 @@ def load_or_capture_initial(args):
             }
         else:
             raise RuntimeError("Offline mode requires --stack-decision-json or --base-object-id with --stack-order.")
+        write_stack_object_selection_debug(args.output_dir, decision)
         return state, decision
 
     state = None
@@ -173,6 +190,7 @@ def load_or_capture_initial(args):
             )
             write_json(os.path.join(reasoning_dir, "llm_scene_graph_decision_raw.json"), {"raw": raw_result})
             write_json(os.path.join(reasoning_dir, "llm_scene_graph_decision.json"), decision)
+    write_stack_object_selection_debug(args.output_dir, decision)
     return state, decision
 
 

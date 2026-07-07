@@ -1,6 +1,6 @@
 import json
 import math
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 def build_stack_blocks_prompt(llm_input):
@@ -96,6 +96,14 @@ def _parse_json_or_embedded(text: str) -> Dict[str, Any]:
         raise
 
 
+def _finite_float(value: Any, default: float = 0.0) -> float:
+    try:
+        output = float(value)
+    except (TypeError, ValueError):
+        return default
+    return output if math.isfinite(output) else default
+
+
 def _stack_candidate_xy(obj):
     center = obj.get("geometry_center_m")
     if (
@@ -112,11 +120,114 @@ def _stack_candidate_xy(obj):
     return xy if all(math.isfinite(value) for value in xy) else None
 
 
+def _object_dimensions(obj: Dict[str, Any]) -> Optional[Tuple[float, float, float]]:
+    dims = obj.get("dimensions_m")
+    if not isinstance(dims, (list, tuple)) or len(dims) < 3:
+        return None
+    output = tuple(_finite_float(value, float("nan")) for value in dims[:3])
+    return output if all(math.isfinite(value) and value > 0.0 for value in output) else None
+
+
+def _xy_distance(a: Dict[str, Any], b: Dict[str, Any]) -> Optional[float]:
+    a_xy = _stack_candidate_xy(a)
+    b_xy = _stack_candidate_xy(b)
+    if a_xy is None or b_xy is None:
+        return None
+    return math.hypot(a_xy[0] - b_xy[0], a_xy[1] - b_xy[1])
+
+
+def _object_bbox_area(obj: Dict[str, Any]) -> float:
+    bbox = obj.get("bbox_xyxy_px")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return 0.0
+    width = max(0.0, _finite_float(bbox[2]) - _finite_float(bbox[0]))
+    height = max(0.0, _finite_float(bbox[3]) - _finite_float(bbox[1]))
+    return width * height
+
+
+def _stack_candidate_report(obj: Dict[str, Any], scene_objects: List[Dict[str, Any]]) -> Dict[str, Any]:
+    dims = _object_dimensions(obj)
+    xy = _stack_candidate_xy(obj)
+    confidence = _finite_float(obj.get("confidence", obj.get("score")), 0.0)
+    point_count = _finite_float(obj.get("pointcloud_point_count"), 300.0)
+    footprint_aspect = _finite_float(obj.get("footprint_aspect_ratio"), 1.0)
+    height = dims[2] if dims else _finite_float(obj.get("object_height_m"), 0.0)
+    area = _object_bbox_area(obj)
+    label = str(obj.get("label", "")).lower()
+    is_square = "square" in label
+
+    flags: List[str] = []
+    if xy is None:
+        flags.append("missing_base_link_xy")
+    if not obj.get("pointcloud_geometry_valid", True):
+        flags.append("invalid_pointcloud_geometry")
+    if dims is None:
+        flags.append("missing_dimensions")
+    if is_square and dims:
+        xy_ratio = max(dims[0], dims[1]) / max(1e-6, min(dims[0], dims[1]))
+        if xy_ratio > 1.45:
+            flags.append("square_footprint_not_square")
+        if height < 0.012:
+            flags.append("too_flat_for_stack_block")
+        if height > 0.04:
+            flags.append("too_tall_for_square_block")
+    if confidence < 0.80:
+        flags.append("low_confidence")
+    if point_count < 120:
+        flags.append("sparse_pointcloud")
+    if footprint_aspect > 1.8 and is_square:
+        flags.append("high_aspect_square_detection")
+    if area > 0.0 and area < 1200.0:
+        flags.append("small_bbox")
+
+    crowding = 0.0
+    nearest = None
+    for other in scene_objects:
+        if str(other.get("id")) == str(obj.get("id")):
+            continue
+        if other.get("is_workspace") or str(other.get("label", "")).lower() == "workspace":
+            continue
+        distance = _xy_distance(obj, other)
+        if distance is None:
+            continue
+        nearest = distance if nearest is None else min(nearest, distance)
+        if distance < 0.055:
+            crowding += (0.055 - distance) / 0.055
+
+    geometry_score = 0.0 if xy is None else 1.0
+    if dims is not None:
+        geometry_score += 0.5
+        if is_square and 0.018 <= dims[0] <= 0.035 and 0.018 <= dims[1] <= 0.035 and 0.016 <= height <= 0.035:
+            geometry_score += 0.6
+    confidence_score = max(0.0, min(1.0, confidence))
+    grasp_proxy_score = max(0.0, 1.0 - min(1.0, crowding))
+    low_confidence_penalty = 1.0 if "low_confidence" in flags else 0.0
+    risk = 0.55 * len(flags) + low_confidence_penalty + 0.9 * crowding
+    score = geometry_score + (1.5 * confidence_score) + grasp_proxy_score - risk
+    return {
+        "object_id": obj.get("id"),
+        "label": obj.get("label"),
+        "confidence": round(confidence, 4),
+        "geometry_center_m": obj.get("geometry_center_m"),
+        "dimensions_m": obj.get("dimensions_m"),
+        "nearest_neighbor_distance_m": None if nearest is None else round(nearest, 6),
+        "local_crowding": round(crowding, 6),
+        "geometry_score": round(geometry_score, 6),
+        "confidence_score": round(confidence_score, 6),
+        "grasp_proxy_score": round(grasp_proxy_score, 6),
+        "risk_score": round(risk, 6),
+        "stack_candidate_score": round(score, 6),
+        "usable": bool(xy is not None and dims is not None),
+        "flags": flags,
+    }
+
+
 def select_stack_object_for_color(objects: Iterable[Dict[str, Any]], color: str):
-    """Select one color match deterministically, using only stack-safe geometry for ambiguity."""
+    """Select one color match deterministically, preferring usable and operable block geometry."""
+    scene_objects = list(objects or [])
     matches = [
         obj
-        for obj in objects
+        for obj in scene_objects
         if not obj.get("is_workspace")
         and str(obj.get("label", "")).lower() != "workspace"
         and object_label_contains(obj, color)
@@ -126,37 +237,59 @@ def select_stack_object_for_color(objects: Iterable[Dict[str, Any]], color: str)
             color,
             "missing_required_color",
             "Color-rule stack instruction requires a {} block, but none was detected.".format(color),
-        )
+    )
     if len(matches) == 1:
-        eligible_ids = [int(matches[0]["id"])] if _stack_candidate_xy(matches[0]) is not None else []
+        report = _stack_candidate_report(matches[0], scene_objects)
+        eligible_ids = [int(matches[0]["id"])] if report["usable"] else []
         return matches[0], {
             "color": color,
             "candidate_ids": [int(matches[0]["id"])],
             "eligible_ids": eligible_ids,
             "selected_id": int(matches[0]["id"]),
             "strategy": "only_color_match",
+            "candidate_reports": [report],
         }
 
-    eligible = [(obj, _stack_candidate_xy(obj)) for obj in matches]
-    eligible = [(obj, xy) for obj, xy in eligible if xy is not None]
+    reports = [_stack_candidate_report(obj, scene_objects) for obj in matches]
+    report_by_id = {str(report["object_id"]): report for report in reports}
+    eligible = [
+        obj for obj in matches
+        if report_by_id[str(obj.get("id"))]["usable"]
+        and "low_confidence" not in report_by_id[str(obj.get("id"))]["flags"]
+    ]
+    if not eligible:
+        eligible = [
+            obj for obj in matches
+            if report_by_id[str(obj.get("id"))]["usable"]
+        ]
     if not eligible:
         raise StackColorSelectionError(
             color,
-            "ambiguous_color_without_geometry",
-            "Color-rule stack instruction found {} {} blocks, but none has valid base_link "
-            "geometry_center_m for deterministic x/y selection.".format(len(matches), color),
+            "ambiguous_color_without_usable_geometry",
+            "Color-rule stack instruction found {} {} blocks, but none has usable stack block geometry. "
+            "See stack_object_selection_debug.json when available.".format(len(matches), color),
         )
-    selected, selected_xy = min(
+    selected = max(
         eligible,
-        key=lambda item: (item[1][0], item[1][1], int(item[0]["id"])),
+        key=lambda item: (
+            float(report_by_id[str(item.get("id"))]["stack_candidate_score"]),
+            float(report_by_id[str(item.get("id"))]["confidence"]),
+            -int(item["id"]),
+        ),
     )
+    selected_report = report_by_id[str(selected.get("id"))]
     return selected, {
         "color": color,
         "candidate_ids": sorted(int(obj["id"]) for obj in matches),
-        "eligible_ids": sorted(int(obj["id"]) for obj, _ in eligible),
+        "eligible_ids": sorted(int(obj["id"]) for obj in eligible),
         "selected_id": int(selected["id"]),
-        "selected_xy_base_m": [selected_xy[0], selected_xy[1]],
-        "strategy": "min_base_link_geometry_x_then_y_then_id",
+        "selected_xy_base_m": selected_report.get("geometry_center_m", [None, None])[:2],
+        "selected_score": selected_report["stack_candidate_score"],
+        "strategy": "usable_geometry_confidence_operability_score",
+        "candidate_reports": sorted(
+            reports,
+            key=lambda item: (-float(item["stack_candidate_score"]), int(item["object_id"])),
+        ),
     }
 
 

@@ -51,8 +51,15 @@ def test_frontier_generates_preflight_nudge_for_direct_obstacle():
                             "direction_base": [1.0, 0.0, 0.0],
                             "distance_m": 0.025,
                             "feasible": True,
+                            "approach_path_safe": True,
+                            "push_swept_safe": True,
+                            "push_end_safe": True,
+                            "future_task_impact": {"feasible": True},
                             "score": 0.5,
                             "target_distance_after_m": 0.06,
+                            "current_blocker_count": 2,
+                            "predicted_blocker_count": 1,
+                            "blocker_count_reduction": 1,
                         }
                     ],
                 }
@@ -74,6 +81,8 @@ def test_frontier_generates_preflight_nudge_for_direct_obstacle():
     assert selected["geometry_feasible"] is True
     assert selected["moveit_feasible"] is False
     assert selected["task_effective"] is True
+    assert selected["direct_progress_candidate"] is True
+    assert selected["exploratory"] is False
 
 
 def test_protected_obstacle_is_not_frontier_candidate():
@@ -253,6 +262,52 @@ def test_free_space_gain_alone_stays_exploratory():
     assert candidate["executable_safe"] is False
 
 
+def test_failed_swept_path_is_not_preflight_candidate():
+    target = obj("target", [0.40, 0.00, 0.015])
+    obstacle = obj("obstacle", [0.435, 0.00, 0.015])
+    state = {
+        "objects": [target, obstacle],
+        "table_bounds": {"xmin": 0.10, "xmax": 0.90, "ymin": -0.50, "ymax": 0.50},
+    }
+
+    def fake_push(*_args, **_kwargs):
+        return {
+            "candidate_results": [
+                {
+                    "relation": {},
+                    "evaluations": [
+                        {
+                            "candidate_id": "unsafe_swept",
+                            "source": "test",
+                            "direction_base": [1.0, 0.0, 0.0],
+                            "distance_m": 0.025,
+                            "feasible": True,
+                            "approach_path_safe": True,
+                            "push_swept_safe": False,
+                            "push_end_safe": True,
+                            "future_task_impact": {"feasible": True},
+                            "score": 0.5,
+                            "target_distance_after_m": 0.06,
+                            "current_blocker_count": 2,
+                            "predicted_blocker_count": 1,
+                            "blocker_count_reduction": 1,
+                        }
+                    ],
+                }
+            ]
+        }
+
+    plan = build_frontier_clearance_plan(
+        state,
+        target,
+        protected_ids=[],
+        args=args(),
+        evaluate_push_fn=fake_push,
+    )
+    assert any(item["candidate_id"] == "unsafe_swept" for item in plan["all_clearance_action_candidates"])
+    assert plan["preflight_clearance_candidates"] == []
+
+
 if __name__ == "__main__":
     test_frontier_generates_preflight_nudge_for_direct_obstacle()
     test_protected_obstacle_is_not_frontier_candidate()
@@ -260,4 +315,5 @@ if __name__ == "__main__":
     test_second_level_nudge_with_blocker_progress_is_enabling()
     test_blocker_count_reduction_is_enabling_candidate()
     test_free_space_gain_alone_stays_exploratory()
+    test_failed_swept_path_is_not_preflight_candidate()
     print("obstruction frontier tests passed")

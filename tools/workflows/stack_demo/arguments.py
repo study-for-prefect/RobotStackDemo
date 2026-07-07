@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--high-block-min-top-z-delta-m", type=float, default=0.01)
     parser.add_argument("--obstruction-graph-max-depth", type=int, default=3)
     parser.add_argument("--clearance-nudge-distance-m", type=float, default=0.025)
+    parser.add_argument("--clearance-frontier-top-k", type=int, default=6)
+    parser.add_argument("--clearance-candidate-top-n-per-obstacle", type=int, default=8)
     parser.add_argument(
         "--debug-dump-full-candidates",
         action="store_true",
