@@ -24,4 +24,6 @@ status.
 
 Push clearing executes the open-gripper `pre_push` move before closing the
 gripper as a rigid paddle. The closed gripper is then used only for `contact`,
-`push_end`, and `retreat`.
+`push_end`, and `retreat`. Before closing and descending to contact, the runtime
+checks the actual tool orientation against the requested push orientation and
+refuses the push if the tool is tilted beyond `--max-grasp-orientation-error-deg`.

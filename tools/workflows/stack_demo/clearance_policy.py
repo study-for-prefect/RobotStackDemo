@@ -51,7 +51,6 @@ def annotate_nudge_preflight_policy(candidate: dict, nudge_max_m: float) -> dict
 
     verified_progress = verified_clearance_progress(candidate)
     soft_geometry = _soft_clearance_geometry_allowed(candidate, nudge_max_m)
-    future_override = _future_place_clearance_override_allowed(candidate, nudge_max_m)
     strict_geometry = bool(
         candidate.get("feasible")
         and candidate.get("geometry_feasible")
@@ -59,12 +58,12 @@ def annotate_nudge_preflight_policy(candidate: dict, nudge_max_m: float) -> dict
         and candidate.get("push_swept_safe")
         and candidate.get("push_end_safe")
     )
-    geometry_ok = strict_geometry or soft_geometry or future_override
-    future_ok = bool(candidate.get("future_task_feasible", True) or future_override)
+    geometry_ok = strict_geometry or soft_geometry
+    future_ok = bool(candidate.get("future_task_feasible", True))
     decision_ok = bool(candidate.get("automatic_execution_allowed") or verified_progress)
     candidate["verified_clearance_progress"] = verified_progress
     candidate["soft_clearance_geometry_allowed"] = soft_geometry
-    candidate["future_task_clearance_override"] = future_override
+    candidate["future_task_clearance_override"] = False
     candidate["clearance_preflight_allowed"] = bool(
         _short_nudge(candidate, nudge_max_m)
         and geometry_ok
@@ -108,19 +107,3 @@ def _soft_clearance_geometry_allowed(candidate: dict, nudge_max_m: float) -> boo
     if not verified_clearance_progress(candidate):
         return False
     return bool(not candidate.get("approach_path_safe") or not candidate.get("push_swept_safe"))
-
-
-def _future_place_clearance_override_allowed(candidate: dict, nudge_max_m: float) -> bool:
-    if not _short_nudge(candidate, nudge_max_m):
-        return False
-    if candidate.get("reason") != "blocks_future_place_region":
-        return False
-    if not (
-        candidate.get("approach_path_safe")
-        and candidate.get("push_swept_safe")
-        and candidate.get("push_end_safe")
-    ):
-        return False
-    if not candidate.get("protected_structure_safe"):
-        return False
-    return verified_clearance_progress(candidate)

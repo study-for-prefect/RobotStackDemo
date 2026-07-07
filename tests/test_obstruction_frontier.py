@@ -462,7 +462,7 @@ def test_verified_progress_soft_geometry_can_enter_preflight():
     assert candidate["clearance_preflight_allowed"] is True
 
 
-def test_future_place_soft_block_with_progress_can_enter_preflight():
+def test_future_place_block_cannot_enter_preflight_without_geometry_safety():
     target = obj("target", [0.40, 0.00, 0.015])
     obstacle = obj("obstacle", [0.435, 0.00, 0.015])
     state = {
@@ -508,13 +508,17 @@ def test_future_place_soft_block_with_progress_can_enter_preflight():
         evaluate_push_fn=fake_push,
     )
     candidate = next(
-        item for item in plan["preflight_clearance_candidates"]
+        item for item in plan["all_clearance_action_candidates"]
         if item["candidate_id"] == "future_place_progress"
     )
     assert candidate["candidate_id"] == "future_place_progress"
     assert candidate["future_task_feasible"] is False
-    assert candidate["future_task_clearance_override"] is True
-    assert candidate["clearance_preflight_allowed"] is True
+    assert candidate["future_task_clearance_override"] is False
+    assert candidate["clearance_preflight_allowed"] is False
+    assert not any(
+        item["candidate_id"] == "future_place_progress"
+        for item in plan["preflight_clearance_candidates"]
+    )
 
 
 if __name__ == "__main__":
@@ -528,5 +532,5 @@ if __name__ == "__main__":
     test_pick_away_uses_observed_scene_safe_place_without_table_bounds()
     test_pick_away_allows_relaxed_top_grasp_for_blocking_loose_object()
     test_verified_progress_soft_geometry_can_enter_preflight()
-    test_future_place_soft_block_with_progress_can_enter_preflight()
+    test_future_place_block_cannot_enter_preflight_without_geometry_safety()
     print("obstruction frontier tests passed")

@@ -1,11 +1,12 @@
 """MoveIt-backed execution of a validated four-stage push-clearing plan."""
 
 import json
+import math
 from typing import Any, Dict, List, Tuple
 
 from sensor_msgs.msg import JointState
 
-from robot_scene_pipeline.grasp_orientation import normalize_quaternion_xyzw
+from robot_scene_pipeline.grasp_orientation import normalize_quaternion_xyzw, quaternion_distance_rad
 from tools.robot.push_primitives import build_push_targets
 
 from .execution import plan_and_maybe_execute_motion, plan_motion_trajectory
@@ -70,6 +71,20 @@ def _recover_open_gripper(node: Any, args: Any, gripper: Any, reason: str) -> No
         return
     node.get_logger().warning("Opening gripper after push failure: {}".format(reason))
     _set_gripper(node, args, gripper, "open")
+
+
+def _push_orientation_ok(node: Any, args: Any, target_quat_xyzw: List[float]) -> bool:
+    current_tool = node.current_tool_transform(timeout=args.tf_timeout)
+    _current_pos, current_quat = transform_position_quat(current_tool)
+    error_deg = math.degrees(quaternion_distance_rad(current_quat, target_quat_xyzw))
+    limit_deg = float(getattr(args, "max_grasp_orientation_error_deg", 0.5))
+    node.get_logger().info(
+        "Push pre-contact orientation gate: error_deg={:.3f} limit_deg={:.3f}".format(
+            error_deg,
+            limit_deg,
+        )
+    )
+    return error_deg <= limit_deg
 
 
 def run_push_plan(node: Any, args: Any, planning_start_state: Any, gripper: Any = None) -> bool:
@@ -162,6 +177,11 @@ def run_push_plan(node: Any, args: Any, planning_start_state: Any, gripper: Any 
         if isinstance(result, JointState):
             planning_start_state = result
         if stage_name == "pre_push" and close_at_pre_push and not gripper_closed_for_push:
+            if not _push_orientation_ok(node, args, push_quat):
+                node.get_logger().error(
+                    "failed_before_contact: push tool orientation is not level enough for descent."
+                )
+                return False
             if not _set_gripper(node, args, gripper, "close"):
                 _recover_open_gripper(node, args, gripper, "failed_before_contact_gripper_close")
                 node.get_logger().error("failed_before_contact: could not close gripper for rigid-paddle push.")

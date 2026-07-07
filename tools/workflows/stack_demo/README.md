@@ -186,10 +186,10 @@ Frontier clearing 的候选动作统一评分：
 清障目标不是清空桌面，而是制造当前目标的抓取空间；`target_yaw_gain=0`
 的动作只有在 `direct_progress_gain`、`enabling_gain`、`blocker_count_reduction`
 或 `current_grasp_gain` 可验证时才会作为多步清障候选。短距离 nudge
-如果只是保守几何模型标出软接触，或只因未来放置区预测被挡，但它能减少当前
-阻挡并且不碰受保护结构，仍会写入 `clearance_preflight_allowed=true`
-进入 MoveIt 预检。否则它只能留在全集里作为低优先级 exploratory
-candidate，不能进入可执行安全候选。
+如果只是保守几何模型标出软接触，但它能减少当前阻挡并且不碰受保护结构，
+仍会写入 `clearance_preflight_allowed=true` 进入 MoveIt 预检。若候选本身
+`geometry_feasible=false` 或 `future_task_feasible=false`，即使它看起来能清理
+未来放置区，也只能留在全集里作为诊断候选，不能进入可执行安全候选。
 
 Hardware execution remains separately opt-in:
 
@@ -209,9 +209,9 @@ that satisfy all hard code-side gates enter `safe_clearance_candidates.json`:
 `task_effective=true`, and `moveit_feasible=true`.
 For staged nudge clearing, `clearance_preflight_allowed=true` records the
 equivalent code-side gate. It may be true through
-`soft_clearance_geometry_allowed` or `future_task_clearance_override`, but the
-candidate still becomes `safe` only after MoveIt preflight sets
-`moveit_feasible=true`.
+`soft_clearance_geometry_allowed`, but MoveIt reachability never overrides
+`geometry_feasible=false` or `future_task_feasible=false`. The candidate still
+becomes `safe` only after MoveIt preflight sets `moveit_feasible=true`.
 
 The selected real nudge then runs in one MoveIt process with
 `--close-gripper-for-push`: preflight `pre_push`, `contact`, `push_end`, and
