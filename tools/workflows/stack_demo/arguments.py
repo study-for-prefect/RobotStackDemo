@@ -143,6 +143,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grasp-bias-base", nargs=2, type=float, default=[0.0, 0.0])
     parser.add_argument("--grasp-bias-camera", nargs=2, type=float, default=[0.0, 0.0])
     parser.add_argument("--pick-target-lift-m", type=float, default=0.010)
+    parser.add_argument("--pick-target-z-margin-m", type=float, default=0.002)
     parser.add_argument("--release-gap-m", type=float, default=0.010)
     parser.add_argument("--place-top-z-bias-m", type=float, default=0.0)
     parser.add_argument("--fixed-square-yaw-deg", type=float, default=0.0)

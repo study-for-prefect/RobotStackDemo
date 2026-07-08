@@ -132,6 +132,14 @@ point, base bias, XY norm, Z magnitude, and limits. `tcp_offset_tool_m` is used
 only by robot motion to convert TCP goals to `tool0`; it is not mixed into
 camera-frame XY compensation.
 
+Pick target height is also bounded by the detected object thickness. The
+configured `--pick-target-lift-m` first proposes a grasp Z from the geometry
+center, then the workflow clamps that Z into `[object_bottom + margin,
+object_top - margin]`; the margin is `--pick-target-z-margin-m` (default
+`0.002 m`, capped at one quarter of object height). Pick plans write
+`pick_grasp_height` and `grasp_final_xyz_m`, so a thin or low-confidence block
+cannot accidentally generate a grasp point above its top surface.
+
 ## 抓取遮挡与 Frontier 清障
 
 抓取遮挡不再是单一 boolean。每次 pick 前会先对目标运行连续 yaw 搜索：

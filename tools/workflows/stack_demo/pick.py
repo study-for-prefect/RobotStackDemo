@@ -1,6 +1,7 @@
 """Pick-plan construction, dry-run scene simulation, and pick motion commands."""
 
 import copy
+import math
 from types import SimpleNamespace
 
 from robot_scene_pipeline.xy_correction import apply_step_xyz_correction, load_xy_correction
@@ -70,6 +71,53 @@ def apply_selected_grasp_yaw(step, obj):
     step["blocked_yaw_intervals_deg"] = obj.get("blocked_yaw_intervals_deg", [])
 
 
+def _finite_float(value, default=None):
+    try:
+        output = float(value)
+    except (TypeError, ValueError):
+        return default
+    return output if math.isfinite(output) else default
+
+
+def _clamp_pick_target_height(step, obj, args):
+    center = require_geometry_object(obj)["geometry_center_m"]
+    size = obj.get("dimensions_m")
+    target = step.get("target_position_m")
+    if not isinstance(size, list) or len(size) < 3 or not isinstance(target, list) or len(target) < 3:
+        return
+    height = abs(float(size[2]))
+    if height <= 0.0:
+        return
+    top_z = _finite_float(obj.get("top_z_base_m"), None)
+    if top_z is None:
+        top_z = float(center[2]) + 0.5 * height
+    bottom_z = top_z - height
+    margin = min(
+        max(0.0, _finite_float(getattr(args, "pick_target_z_margin_m", 0.002), 0.002)),
+        0.25 * height,
+    )
+    min_z = bottom_z + margin
+    max_z = top_z - margin
+    raw_z = float(target[2])
+    clamped_z = min(max(raw_z, min_z), max_z)
+    if abs(clamped_z - raw_z) > 1e-9:
+        step["target_position_m"][2] = round(clamped_z, 5)
+        step["approach_position_m"][2] = round(clamped_z + float(args.approach_height_m), 5)
+    step["grasp_final_xyz_m"] = [round(float(value), 5) for value in step["target_position_m"][:3]]
+    step["pick_grasp_height"] = {
+        "object_bottom_z_base_m": round(bottom_z, 6),
+        "object_top_z_base_m": round(top_z, 6),
+        "safe_min_z_base_m": round(min_z, 6),
+        "safe_max_z_base_m": round(max_z, 6),
+        "raw_target_z_base_m": round(raw_z, 6),
+        "final_target_z_base_m": round(float(step["target_position_m"][2]), 6),
+        "margin_m": round(margin, 6),
+        "clamped": bool(abs(clamped_z - raw_z) > 1e-9),
+    }
+    if step["pick_grasp_height"]["clamped"]:
+        step["grasp_height_adjustment_reason"] = "target_z_outside_object_safe_band"
+
+
 def build_offline_pick_plan(state, obj, output_path, args):
     decision = {"action_plan": [{"step": 1, "action": "pick", "object_id": int(obj["id"])}]}
     plan_args = SimpleNamespace(
@@ -126,6 +174,7 @@ def build_offline_pick_plan(state, obj, output_path, args):
         float(configured_bias[2]),
     ]
     apply_step_xyz_correction(step, step["target_position_m"], correction, kind="grasp")
+    _clamp_pick_target_height(step, obj, args)
     step["grasp_offset_from_geometry_center_m"] = step["grasp_correction_delta_m"]
     step["grasp_bias_camera_xy_m"] = [float(value) for value in grasp_bias_camera]
     step["grasp_bias_camera_base_xy_m"] = [float(value) for value in grasp_bias_camera_base[:2]]

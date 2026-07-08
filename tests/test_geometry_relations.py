@@ -359,6 +359,80 @@ def test_selected_grasp_yaw_is_written_to_pick_plan():
     assert step["yaw_source"] == "adaptive_grasp_yaw_search"
 
 
+def test_thin_object_pick_target_z_is_clamped_inside_object_height():
+    target = make_object(
+        1,
+        (0.4492, 0.1443, -0.0019),
+        size=(0.0268, 0.0255, 0.0089),
+        label="square yellow",
+        pointcloud_geometry_valid=True,
+        geometry_frame="base_link",
+    )
+    state = {"objects": [target], "base_frame": "base_link"}
+    args = SimpleNamespace(
+        approach_height_m=0.05,
+        pick_target_lift_m=0.010,
+        pick_target_z_margin_m=0.002,
+        xy_correction_json="",
+        grasp_bias_base=[0.0, 0.0],
+        grasp_bias_camera=[0.0, 0.0],
+        tf_json="",
+        fixed_square_yaw_deg=0.0,
+        stack_square_yaw_mode="detected",
+        grasp_axis="long",
+        gripper_yaw_offset_deg=0.0,
+        square_yaw_snap_tolerance_deg=5.0,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_path = os.path.join(tmpdir, "pick_plan.json")
+        build_offline_pick_plan(state, target, output_path, args)
+        with open(output_path, "r", encoding="utf-8") as f:
+            step = json.load(f)["steps"][0]
+
+    assert step["pick_grasp_height"]["raw_target_z_base_m"] == 0.0081
+    assert step["pick_grasp_height"]["safe_max_z_base_m"] == 0.00055
+    assert step["target_position_m"] == [0.4492, 0.1443, 0.00055]
+    assert step["approach_position_m"] == [0.4492, 0.1443, 0.05055]
+    assert step["grasp_final_xyz_m"] == step["target_position_m"]
+    assert step["pick_grasp_height"]["clamped"] is True
+    assert step["grasp_height_adjustment_reason"] == "target_z_outside_object_safe_band"
+
+
+def test_normal_cube_pick_target_z_keeps_configured_lift():
+    target = make_object(
+        1,
+        (0.40, 0.00, 0.0),
+        size=(0.024, 0.024, 0.024),
+        label="square green",
+        pointcloud_geometry_valid=True,
+        geometry_frame="base_link",
+    )
+    state = {"objects": [target], "base_frame": "base_link"}
+    args = SimpleNamespace(
+        approach_height_m=0.05,
+        pick_target_lift_m=0.010,
+        pick_target_z_margin_m=0.002,
+        xy_correction_json="",
+        grasp_bias_base=[0.0, 0.0],
+        grasp_bias_camera=[0.0, 0.0],
+        tf_json="",
+        fixed_square_yaw_deg=0.0,
+        stack_square_yaw_mode="detected",
+        grasp_axis="long",
+        gripper_yaw_offset_deg=0.0,
+        square_yaw_snap_tolerance_deg=5.0,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_path = os.path.join(tmpdir, "pick_plan.json")
+        build_offline_pick_plan(state, target, output_path, args)
+        with open(output_path, "r", encoding="utf-8") as f:
+            step = json.load(f)["steps"][0]
+
+    assert step["target_position_m"] == [0.4, 0.0, 0.01]
+    assert step["approach_position_m"] == [0.4, 0.0, 0.06]
+    assert step["pick_grasp_height"]["clamped"] is False
+
+
 def test_final_held_place_snapshot_rejects_mismatched_base_id_and_yaw():
     locked = {
         "placement_base_object_id": 1,
@@ -506,6 +580,8 @@ if __name__ == "__main__":
     test_placed_or_locked_structure_blocks_all_yaws_returns_replan_without_push()
     test_protected_structure_rebinds_by_template_when_detector_id_changes()
     test_selected_grasp_yaw_is_written_to_pick_plan()
+    test_thin_object_pick_target_z_is_clamped_inside_object_height()
+    test_normal_cube_pick_target_z_keeps_configured_lift()
     test_final_held_place_snapshot_rejects_mismatched_base_id_and_yaw()
     test_calibration_json_applies_grasp_and_place_xyz_biases()
     test_calibration_correction_limit_rejects_large_bias()
