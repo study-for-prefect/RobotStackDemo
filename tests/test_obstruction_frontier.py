@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
+import unittest
 from types import SimpleNamespace
 
 import tools.workflows.stack_demo.obstruction_frontier as frontier_module
 from robot_scene_pipeline.geometry_relations import object_xy_aabb, xy_aabb_overlap
+from tools.workflows.stack_demo.clearance_policy import clearance_priority_key
 from tools.workflows.stack_demo.clearance_placement import safe_place_for_object
 from tools.workflows.stack_demo.obstruction_frontier import _score_candidate, build_frontier_clearance_plan
 
@@ -433,7 +435,7 @@ def test_pick_away_allows_relaxed_top_grasp_for_blocking_loose_object():
     )
 
 
-def test_verified_progress_soft_geometry_stays_diagnostic_only():
+def test_verified_progress_soft_geometry_enters_moveit_preflight():
     target = obj("target", [0.40, 0.00, 0.015])
     obstacle = obj("obstacle", [0.435, 0.00, 0.015])
     state = {
@@ -480,11 +482,52 @@ def test_verified_progress_soft_geometry_stays_diagnostic_only():
     assert candidate["candidate_id"] == "soft_progress"
     assert candidate["verified_clearance_progress"] is True
     assert candidate["soft_clearance_geometry_allowed"] is True
-    assert candidate["clearance_preflight_allowed"] is False
-    assert not any(
+    assert candidate["clearance_preflight_allowed"] is True
+    assert any(
         item["candidate_id"] == "soft_progress"
         for item in plan["preflight_clearance_candidates"]
     )
+
+
+class ObstructionFrontierRegressionTests(unittest.TestCase):
+    def test_clearance_priority_prefers_geometry_safety_before_score(self):
+        strict = {
+            "candidate_id": "strict_rectangle",
+            "action_type": "nudge",
+            "approach_path_safe": True,
+            "push_swept_safe": True,
+            "soft_clearance_geometry_allowed": False,
+            "direct_progress_gain": 0.20,
+            "score": 1.0,
+        }
+        soft_approach_safe = {
+            "candidate_id": "soft_blue",
+            "action_type": "nudge",
+            "approach_path_safe": True,
+            "push_swept_safe": False,
+            "soft_clearance_geometry_allowed": True,
+            "direct_progress_gain": 0.30,
+            "score": 1.5,
+        }
+        soft_approach_blocked = {
+            "candidate_id": "soft_yellow",
+            "action_type": "nudge",
+            "approach_path_safe": False,
+            "push_swept_safe": False,
+            "soft_clearance_geometry_allowed": True,
+            "direct_progress_gain": 0.50,
+            "score": 2.0,
+        }
+
+        ordered = sorted(
+            [soft_approach_blocked, soft_approach_safe, strict],
+            key=clearance_priority_key,
+        )
+
+        self.assertEqual(
+            [item["candidate_id"] for item in ordered],
+            ["strict_rectangle", "soft_blue", "soft_yellow"],
+        )
 
 
 def test_future_place_block_cannot_enter_preflight_without_geometry_safety():

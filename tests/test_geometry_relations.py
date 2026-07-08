@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import unittest
 from types import SimpleNamespace
 
 from robot_scene_pipeline.geometry_relations import (
@@ -193,6 +194,86 @@ def test_close_square_row_uses_top_grasp_equivalent_yaw_without_push():
     assert analysis["grasp_feasible"] is True
     assert analysis["selected_grasp_yaw_deg"] is not None
     assert not push_candidates(objects, relations, 0)
+
+
+def test_duplicate_id_target_uses_label_and_position_before_direct_pick():
+    red_base = make_object(
+        0,
+        (0.4250, 0.1734, -0.0008),
+        size=(0.0237, 0.0229, 0.0226),
+        label="square red",
+        table_yaw_deg=-0.64,
+        role="base",
+        state="locked",
+        pushable=False,
+    )
+    rectangle = make_object(
+        1,
+        (0.3513, 0.0629, -0.0069),
+        size=(0.0574, 0.0282, 0.0166),
+        label="rectangle",
+        table_yaw_deg=-89.79,
+        pushable=True,
+    )
+    blue_near = make_object(
+        2,
+        (0.3539, 0.1676, -0.0055),
+        size=(0.0226, 0.0217, 0.0320),
+        label="square blue",
+        table_yaw_deg=1.72,
+        pushable=True,
+    )
+    yellow_near = make_object(
+        3,
+        (0.3513, 0.1428, -0.0026),
+        size=(0.0230, 0.0208, 0.0257),
+        label="square yellow",
+        table_yaw_deg=-88.55,
+        pushable=True,
+    )
+    stale_blue_same_id = make_object(
+        5,
+        (0.2499, 0.1144, -0.0019),
+        size=(0.0278, 0.0220, 0.0238),
+        label="square blue",
+        table_yaw_deg=-89.5,
+        pushable=True,
+    )
+    target_green = make_object(
+        5,
+        (0.3520, 0.1202, -0.0014),
+        size=(0.0238, 0.0215, 0.0246),
+        label="square green",
+        table_yaw_deg=90.0,
+        pushable=True,
+    )
+    objects = [red_base, rectangle, blue_near, yellow_near, stale_blue_same_id, target_green]
+
+    relations = build_geometry_relations(
+        objects,
+        target_id=target_green["id"],
+        target_object=target_green,
+        gripper_outer_width_m=0.112,
+        gripper_inner_width_m=0.048,
+        gripper_side_clearance_m=0.006,
+        grasp_approach_length_m=0.02,
+    )
+    analysis = target_analysis(relations)
+    blocker_ids = {str(item["id"]) for item in analysis["blocking_objects"]}
+
+    assert analysis["action"] == "push_clearing"
+    assert analysis["grasp_feasible"] is False
+    assert analysis["all_grasps_blocked"] is True
+    assert {"1", "2", "3"}.issubset(blocker_ids)
+    assert not any(
+        item["label"] == "square blue" and str(item["id"]) == "5"
+        for item in analysis["blocking_objects"]
+    )
+
+
+class GeometryRelationRegressionTests(unittest.TestCase):
+    def test_duplicate_id_target_uses_label_and_position_before_direct_pick(self):
+        test_duplicate_id_target_uses_label_and_position_before_direct_pick()
 
 
 def test_adjacent_center_gap_blocker_allows_perpendicular_green_grasp():

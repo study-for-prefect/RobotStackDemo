@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
+import unittest
 from types import SimpleNamespace
 
 from tools.robot.push_primitives import build_push_targets
 from robot_scene_pipeline.grasp_yaw_search import select_best_grasp
 from robot_scene_pipeline.push_grasp_joint_evaluator import (
     _is_soft_swept_collision,
+    effective_push_contact_z_offset_m,
     evaluate_one_push_grasp_candidate,
     evaluate_push_grasp_joint_candidates,
 )
@@ -82,6 +84,30 @@ def test_push_targets_reject_contact_above_thin_obstacle():
         raise AssertionError("expected thin obstacle contact height rejection")
     except ValueError as exc:
         assert "too high for obstacle height" in str(exc)
+
+
+class PushPrimitiveRegressionTests(unittest.TestCase):
+    def test_thin_obstacle_push_contact_height_is_clamped(self):
+        obstacle = {
+            "geometry_center_m": [0.36, 0.06, -0.006],
+            "dimensions_m": [0.057, 0.028, 0.0143],
+        }
+
+        contact_z = effective_push_contact_z_offset_m(obstacle, 0.015)
+
+        self.assertLess(contact_z, 0.015)
+        self.assertAlmostEqual(contact_z, 0.00858)
+        build_push_targets(
+            {
+                "schema_version": "push_execution_plan_v1",
+                "frame_id": "base_link",
+                "direction_base": [1.0, 0.0, 0.0],
+                "distance_m": 0.025,
+                "lift_m": 0.05,
+                "contact_z_offset_m": contact_z,
+                "obstacle": obstacle,
+            }
+        )
 
 
 def make_object(object_id, center, size=(0.04, 0.04, 0.03)):

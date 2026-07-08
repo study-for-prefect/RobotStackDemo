@@ -24,6 +24,32 @@ def refresh_executable_safe(candidate: dict) -> dict:
     return candidate
 
 
+def clearance_geometry_rank(candidate: dict) -> int:
+    if candidate.get("action_type") == "pick_away":
+        return 0
+    if candidate.get("approach_path_safe") and candidate.get("push_swept_safe"):
+        return 0
+    if not candidate.get("soft_clearance_geometry_allowed"):
+        return 4
+    if candidate.get("approach_path_safe"):
+        return 1
+    if candidate.get("push_swept_safe"):
+        return 2
+    return 3
+
+
+def clearance_priority_key(candidate: dict) -> tuple:
+    return (
+        clearance_geometry_rank(candidate),
+        int(candidate.get("frontier_depth", 99)),
+        -float(candidate.get("direct_target_gain", 0.0) or 0.0),
+        -float(candidate.get("direct_progress_gain", 0.0) or 0.0),
+        -float(candidate.get("enabling_gain", 0.0) or 0.0),
+        -float(candidate.get("score", 0.0) or 0.0),
+        str(candidate.get("candidate_id")),
+    )
+
+
 def verified_clearance_progress(candidate: dict) -> bool:
     if bool(candidate.get("direct_clearance_candidate")):
         return True
@@ -58,7 +84,7 @@ def annotate_nudge_preflight_policy(candidate: dict, nudge_max_m: float) -> dict
         and candidate.get("push_swept_safe")
         and candidate.get("push_end_safe")
     )
-    geometry_ok = strict_geometry
+    geometry_ok = bool(strict_geometry or soft_geometry)
     future_ok = bool(candidate.get("future_task_feasible", True))
     decision_ok = bool(candidate.get("automatic_execution_allowed") or verified_progress)
     candidate["verified_clearance_progress"] = verified_progress

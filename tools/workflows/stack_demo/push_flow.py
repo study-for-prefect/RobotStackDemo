@@ -20,7 +20,7 @@ from .clearance_execution import (
     execute_pick_away_and_reobserve,
     preflight_nudge_candidate,
 )
-from .clearance_policy import refresh_executable_safe
+from .clearance_policy import clearance_priority_key, refresh_executable_safe
 from .obstruction_frontier import build_frontier_clearance_plan, _make_pick_away_candidate
 from .push_clearing import (
     current_protected_structure_ids,
@@ -343,13 +343,7 @@ def _preflight_safe_candidates(
                     "executable_safe": checked.get("executable_safe"),
                 }
             )
-    safe_candidates.sort(
-        key=lambda item: (
-            -float(item.get("score", 0.0)),
-            int(item.get("frontier_depth", 99)),
-            str(item.get("candidate_id")),
-        )
-    )
+    safe_candidates.sort(key=clearance_priority_key)
     frontier_plan["safe_clearance_candidates"] = safe_candidates
     write_json(
         os.path.join(cycle_dir, "clearance_step_{:02d}_moveit_preflight.json".format(step_index)),

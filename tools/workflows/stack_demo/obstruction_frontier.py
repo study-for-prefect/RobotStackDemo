@@ -8,10 +8,10 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from robot_scene_pipeline.detection_merge import merge_duplicate_objects_3d
 from robot_scene_pipeline.geometry_relations import get_center
-from robot_scene_pipeline.grasp_yaw_search import select_best_grasp
+from robot_scene_pipeline.grasp_yaw_search import is_same_object, select_best_grasp
 
 from .clearance_placement import safe_place_for_object
-from .clearance_policy import annotate_nudge_preflight_policy, refresh_executable_safe
+from .clearance_policy import annotate_nudge_preflight_policy, clearance_priority_key, refresh_executable_safe
 from .push_clearing import evaluate_push_candidates
 
 
@@ -22,7 +22,22 @@ def _object_id(obj: ObjectDict) -> str:
     return str(obj.get("id"))
 
 
-def _find_object(objects: Iterable[ObjectDict], object_id: Any) -> Optional[ObjectDict]:
+def _object_key(obj: ObjectDict) -> str:
+    center = get_center(obj)
+    if center is None:
+        return "{}:{}".format(obj.get("id"), obj.get("label"))
+    return "{}:{}:{:.4f}:{:.4f}".format(obj.get("id"), obj.get("label"), center[0], center[1])
+
+
+def _find_object(
+    objects: Iterable[ObjectDict],
+    object_id: Any,
+    reference: Optional[ObjectDict] = None,
+) -> Optional[ObjectDict]:
+    if reference is not None:
+        for obj in objects:
+            if is_same_object(obj, reference):
+                return obj
     for obj in objects:
         if _object_id(obj) == str(object_id):
             return obj
@@ -88,7 +103,7 @@ def build_obstruction_graph(
     max_depth: int = 3,
 ) -> dict:
     objects = [obj for obj in current_state.get("objects", []) if isinstance(obj, dict)]
-    target_id = str(target.get("id"))
+    target_key = _object_key(target)
     queue: List[Tuple[ObjectDict, int, Optional[str]]] = [(target, 0, None)]
     expanded = set()
     nodes: Dict[str, dict] = {}
@@ -97,7 +112,7 @@ def build_obstruction_graph(
 
     while queue:
         blocked_obj, depth, parent_id = queue.pop(0)
-        blocked_id = _object_id(blocked_obj)
+        blocked_id = _object_key(blocked_obj)
         if blocked_id in expanded or depth > int(max_depth):
             continue
         expanded.add(blocked_id)
@@ -127,10 +142,10 @@ def build_obstruction_graph(
             continue
         for blocker in grasp.get("blocking_objects", []):
             blocker_id = blocker.get("id")
-            blocker_obj = _find_object(objects, blocker_id)
+            blocker_obj = _find_object(objects, blocker_id, blocker)
             if blocker_obj is None:
                 continue
-            blocker_key = str(blocker_id)
+            blocker_key = _object_key(blocker_obj)
             edges.append(
                 {
                     "subject": blocker_id,
@@ -140,7 +155,7 @@ def build_obstruction_graph(
                     "blocker_category": blocker.get("blocker_category"),
                 }
             )
-            if blocker_key == target_id:
+            if blocker_key == target_key or is_same_object(blocker_obj, target):
                 continue
             if _is_protected(blocker_obj, protected_ids):
                 continue
@@ -434,7 +449,7 @@ def build_frontier_clearance_plan(
         [obj for obj in current_state.get("objects", []) if isinstance(obj, dict)],
         preferred_id=target.get("id"),
     )
-    target = _find_object(objects, target.get("id")) or target
+    target = _find_object(objects, target.get("id"), target) or target
     graph_state = copy.deepcopy(current_state)
     graph_state["objects"] = objects
     graph = build_obstruction_graph(
@@ -493,7 +508,10 @@ def build_frontier_clearance_plan(
             candidate_index += 1
 
         relation_target_id = frontier_item.get("blocks", [target.get("id")])[0]
-        relation_target = _find_object(objects, relation_target_id) or target
+        if str(relation_target_id) == str(target.get("id")):
+            relation_target = target
+        else:
+            relation_target = _find_object(objects, relation_target_id) or target
         relation = {
             "type": "should_push_away",
             "subject": obstacle.get("id"),
@@ -566,6 +584,8 @@ def build_frontier_clearance_plan(
                             "blocks": frontier_item.get("blocks", []),
                             "direction_base": evaluation.get("direction_base"),
                             "distance_m": evaluation.get("distance_m"),
+                            "contact_z_offset_m": evaluation.get("contact_z_offset_m"),
+                            "requested_contact_z_offset_m": evaluation.get("requested_contact_z_offset_m"),
                             "direction_source": evaluation.get("source"),
                             "direct_target_gain": round(direct_gain, 6),
                             "direct_progress_gain": round(direct_progress_gain, 6),
@@ -608,8 +628,8 @@ def build_frontier_clearance_plan(
                     safe_candidates.append(candidate)
                 candidate_index += 1
 
-    safe_candidates.sort(key=lambda item: (-float(item.get("score", 0.0)), int(item.get("frontier_depth", 99)), str(item.get("candidate_id"))))
-    all_candidates.sort(key=lambda item: (-float(item.get("score", 0.0)), int(item.get("frontier_depth", 99)), str(item.get("candidate_id"))))
+    safe_candidates.sort(key=clearance_priority_key)
+    all_candidates.sort(key=clearance_priority_key)
     executable_safe_candidates = [candidate for candidate in safe_candidates if candidate.get("executable_safe")]
     return {
         "schema_version": "obstruction_frontier_clearance_v1",

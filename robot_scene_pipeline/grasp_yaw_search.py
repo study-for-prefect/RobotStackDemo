@@ -64,6 +64,7 @@ def object_summary(obj: ObjectDict) -> dict:
     return {
         "id": obj.get("id"),
         "label": obj.get("label"),
+        "geometry_center_m": get_center(obj),
         "role": obj.get("role"),
         "state": obj.get("state"),
         "pushable": obj.get("pushable", True),

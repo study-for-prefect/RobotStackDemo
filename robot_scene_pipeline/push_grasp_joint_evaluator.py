@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .future_task_impact import evaluate_future_task_impact
 from .geometry_relations import is_locked, object_xy_aabb, xy_aabb_overlap, xy_distance
-from .grasp_yaw_search import select_best_grasp
+from .grasp_yaw_search import is_same_object, select_best_grasp
 from .push_candidate_generation import build_joint_push_candidates, normalize_xy
 from .push_direction_safety import direction_safety_defaults, push_end_collisions, table_bounds_ok
 from .tool_swept_volume import check_tool_swept_volume
@@ -40,7 +40,15 @@ def _objects(scene: Dict[str, Any]) -> List[ObjectDict]:
     return [obj for obj in scene.get("objects", []) if isinstance(obj, dict)]
 
 
-def _find_object(objects: Iterable[ObjectDict], object_id: Any) -> Optional[ObjectDict]:
+def _find_object(
+    objects: Iterable[ObjectDict],
+    object_id: Any,
+    reference: Optional[ObjectDict] = None,
+) -> Optional[ObjectDict]:
+    if reference is not None:
+        for obj in objects:
+            if is_same_object(obj, reference):
+                return obj
     for obj in objects:
         if _object_id(obj) == str(object_id):
             return obj
@@ -108,7 +116,7 @@ def estimate_required_push_distance_m(
 
 def predict_scene_after_push(
     scene: Dict[str, Any],
-    obstacle_id: Any,
+    obstacle: ObjectDict,
     direction_base: Iterable[float],
     distance_m: float,
 ) -> Dict[str, Any]:
@@ -117,7 +125,7 @@ def predict_scene_after_push(
     if direction is None:
         return predicted
     for obj in predicted.get("objects", []):
-        if str(obj.get("id")) != str(obstacle_id):
+        if not is_same_object(obj, obstacle):
             continue
         for key in ("geometry_center_m", "last_pose_base", "center_base_m", "center_3d_base_m"):
             center = obj.get(key)
@@ -129,7 +137,21 @@ def predict_scene_after_push(
     return predicted
 
 
+def effective_push_contact_z_offset_m(obstacle: ObjectDict, requested_offset_m: float) -> float:
+    size = obstacle.get("dimensions_m") or obstacle.get("size_m")
+    try:
+        requested = float(requested_offset_m)
+        height = abs(float(size[2]))
+    except (TypeError, ValueError, IndexError):
+        return float(requested_offset_m)
+    if height <= 0.0:
+        return requested
+    max_offset = max(0.004, 0.60 * height)
+    return min(requested, max_offset)
+
+
 def _push_plan(target: ObjectDict, obstacle: ObjectDict, candidate: CandidateDict, lift_m: float, contact_z_offset_m: float) -> Dict[str, Any]:
+    effective_contact_z_offset_m = effective_push_contact_z_offset_m(obstacle, contact_z_offset_m)
     return {
         "schema_version": "push_execution_plan_v1",
         "frame_id": "base_link",
@@ -138,7 +160,8 @@ def _push_plan(target: ObjectDict, obstacle: ObjectDict, candidate: CandidateDic
         "direction_base": candidate["direction_base"],
         "distance_m": candidate["distance_m"],
         "lift_m": lift_m,
-        "contact_z_offset_m": contact_z_offset_m,
+        "contact_z_offset_m": effective_contact_z_offset_m,
+        "requested_contact_z_offset_m": float(contact_z_offset_m),
         "obstacle": obstacle,
     }
 
@@ -230,10 +253,10 @@ def _prepare_push_context(
         side_clearance_m=gripper_side_clearance_m,
         approach_length_m=grasp_approach_length_m,
     )
-    predicted_scene = predict_scene_after_push(scene, obstacle.get("id"), candidate["direction_base"], distance_m)
+    predicted_scene = predict_scene_after_push(scene, obstacle, candidate["direction_base"], distance_m)
     predicted_objects = _objects(predicted_scene)
-    predicted_target = _find_object(predicted_objects, target.get("id")) or target
-    predicted_obstacle = _find_object(predicted_objects, obstacle.get("id")) or obstacle
+    predicted_target = _find_object(predicted_objects, target.get("id"), target) or target
+    predicted_obstacle = _find_object(predicted_objects, obstacle.get("id"), obstacle) or obstacle
     current_distance = xy_distance(obstacle, target)
     predicted_distance = xy_distance(predicted_obstacle, predicted_target)
     output["target_distance_before_m"] = round(current_distance, 6)
@@ -263,6 +286,8 @@ def _prepare_push_context(
             output["reason"] = "push_end_collision"
             return None
     push_plan = _push_plan(target, obstacle, candidate, lift_m=lift_m, contact_z_offset_m=contact_z_offset_m)
+    output["contact_z_offset_m"] = push_plan["contact_z_offset_m"]
+    output["requested_contact_z_offset_m"] = push_plan["requested_contact_z_offset_m"]
     swept = check_tool_swept_volume(
         push_plan,
         _objects(scene),

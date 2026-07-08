@@ -10,6 +10,7 @@ from robot_scene_pipeline.geometry_relations import (
     xy_aabb_overlap,
 )
 from robot_scene_pipeline.push_grasp_joint_evaluator import (
+    effective_push_contact_z_offset_m,
     evaluate_push_grasp_joint_candidates,
 )
 from robot_scene_pipeline.push_candidate_generation import build_joint_push_candidates
@@ -458,6 +459,10 @@ def build_push_execution_plan(
         reference_yaw_source = held_object.get("table_yaw_source") or "target_table_yaw"
     reference_yaw_valid = reference_yaw is not None
     orientation_policy = selected_push.get("push_orientation_policy") or "preserve_current_tool_orientation"
+    requested_contact_z_offset = float(args.push_clearing_contact_z_offset_m)
+    contact_z_offset = selected_push.get("contact_z_offset_m")
+    if contact_z_offset is None:
+        contact_z_offset = effective_push_contact_z_offset_m(obstacle, requested_contact_z_offset)
     return {
         "schema_version": "push_execution_plan_v1",
         "frame_id": "base_link",
@@ -468,7 +473,8 @@ def build_push_execution_plan(
         "direction_base": selected_push["direction_base"],
         "distance_m": selected_push.get("distance_m", args.push_clearing_distance_m),
         "lift_m": args.push_clearing_lift_m,
-        "contact_z_offset_m": args.push_clearing_contact_z_offset_m,
+        "contact_z_offset_m": float(contact_z_offset),
+        "requested_contact_z_offset_m": requested_contact_z_offset,
         "push_orientation_policy": orientation_policy,
         "target_yaw_deg": None,
         "target_yaw_valid": False,
