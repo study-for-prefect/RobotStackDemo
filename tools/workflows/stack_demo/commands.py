@@ -76,6 +76,7 @@ def pose_command(args, pose_json):
         "--ready-only", "--ready-joint-pose-json", pose_json,
         "--velocity", str(args.velocity), "--acceleration", str(args.acceleration),
         "--max-joint-delta", str(getattr(args, "ready_max_joint_delta", 1.30)),
+        "--ready-joint-tolerance", str(getattr(args, "ready_joint_tolerance", 0.15)),
         *moveit_frame_args(args),
         "--tf-timeout", str(getattr(args, "tf_timeout", 8.0)),
         "--execute",

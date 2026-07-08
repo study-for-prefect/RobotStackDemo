@@ -99,6 +99,7 @@ def _future_target_report(
     future_targets: Iterable[ObjectDict],
     gripper_outer_width_m: float,
     gripper_inner_width_m: float,
+    gripper_side_clearance_m: float,
 ) -> Dict[str, Any]:
     results = []
     for target in future_targets:
@@ -111,6 +112,7 @@ def _future_target_report(
             scene_objects,
             gripper_outer_width_m=gripper_outer_width_m,
             gripper_inner_width_m=gripper_inner_width_m,
+            side_clearance_m=gripper_side_clearance_m,
         )
         results.append(
             {
@@ -186,6 +188,7 @@ def evaluate_future_task_impact(
     table_bounds: Optional[dict] = None,
     gripper_outer_width_m: float = 0.112,
     gripper_inner_width_m: float = 0.048,
+    gripper_side_clearance_m: float = 0.006,
     edge_margin_m: float = 0.02,
     congestion_radius_m: float = 0.06,
 ) -> Dict[str, Any]:
@@ -203,6 +206,7 @@ def evaluate_future_task_impact(
         future_targets or [],
         gripper_outer_width_m,
         gripper_inner_width_m,
+        gripper_side_clearance_m,
     )
     details.update(future["details"])
     if not future["ok"]:

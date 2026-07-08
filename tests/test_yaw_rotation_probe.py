@@ -145,6 +145,7 @@ class YawRotationProbeTests(unittest.TestCase):
             "no selected detection with base_link point",
             ([0.2, 0.1, 0.35], vertical_down_quaternion_for_yaw(90.0)),
             ([0.21, 0.1, 0.35], [0.0, 0.0, 0.0, 1.0]),
+            ([0.21, 0.1, 0.35], [0.0, 0.0, 0.0, 1.0]),
             targets,
             attempts=5,
         )
@@ -182,6 +183,7 @@ class YawRotationProbeTests(unittest.TestCase):
             args,
             0.0,
             actual_tool_pose,
+            ([0.278, 0.162, 0.344], [0.0, 0.0, 0.0, 1.0]),
             ([0.278, 0.162, 0.344], [0.0, 0.0, 0.0, 1.0]),
             targets,
             check,

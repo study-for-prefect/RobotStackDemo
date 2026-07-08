@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
+chmod +x /home/wxm/code/RobotStackDemo/scripts/start_robot_stack_tmux.sh 2>/dev/null || true
+chmod +x /home/wxm/code/RobotStackDemo/scripts/run_stack_task.sh 2>/dev/null || true
+
 DESKTOP_DIR="/home/wxm/桌面"
 
 FILES=(

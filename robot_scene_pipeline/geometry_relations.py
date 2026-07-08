@@ -42,11 +42,27 @@ def _same_object(a, b):
         return True
     a_id = a.get("id") if isinstance(a, dict) else None
     b_id = b.get("id") if isinstance(b, dict) else None
-    return a_id is not None and b_id is not None and a_id == b_id
+    if a_id is None or b_id is None or a_id != b_id:
+        return False
+    a_label = a.get("label") if isinstance(a, dict) else None
+    b_label = b.get("label") if isinstance(b, dict) else None
+    if a_label is not None and b_label is not None and a_label != b_label:
+        return False
+    center_a = get_center(a)
+    center_b = get_center(b)
+    if center_a is not None and center_b is not None:
+        return math.hypot(center_a[0] - center_b[0], center_a[1] - center_b[1]) <= 0.025
+    return True
 
 
 def _same_object_id(obj, object_id):
     return str(obj.get("id")) == str(object_id)
+
+
+def _matches_target_object(obj, target_id, target_object=None):
+    if target_object is not None:
+        return _same_object(obj, target_object)
+    return _same_object_id(obj, target_id)
 
 
 def _object_name(obj):
@@ -382,11 +398,13 @@ def _target_top_objects(scene_objects, target):
 def build_geometry_relations(
     objects,
     target_id=None,
+    target_object=None,
     table_bounds=None,
     yaw_step_deg=15.0,
     local_refine_step_deg=1.0,
     gripper_outer_width_m=0.112,
     gripper_inner_width_m=0.048,
+    gripper_side_clearance_m=0.006,
     grasp_approach_length_m=0.02,
     current_wrist_yaw_deg=None,
 ):
@@ -415,7 +433,7 @@ def build_geometry_relations(
             relations.append({"type": "on", "subject": _object_name(top), "object": _object_name(bottom), "source": "geometry"})
             relations.append({"type": "supporting", "subject": _object_name(bottom), "object": _object_name(top), "source": "geometry"})
 
-    target = next((obj for obj in scene_objects if _same_object_id(obj, target_id)), None)
+    target = next((obj for obj in scene_objects if _matches_target_object(obj, target_id, target_object)), None)
     if target is None:
         return relations
 
@@ -431,6 +449,7 @@ def build_geometry_relations(
         local_refine_step_deg=local_refine_step_deg,
         gripper_outer_width_m=gripper_outer_width_m,
         gripper_inner_width_m=gripper_inner_width_m,
+        side_clearance_m=gripper_side_clearance_m,
         approach_length_m=grasp_approach_length_m,
         current_wrist_yaw_deg=current_wrist_yaw_deg,
     )

@@ -75,7 +75,18 @@ def is_same_object(first: ObjectDict, second: ObjectDict) -> bool:
         return True
     first_id = first.get("id")
     second_id = second.get("id")
-    return first_id is not None and second_id is not None and first_id == second_id
+    if first_id is None or second_id is None or first_id != second_id:
+        return False
+    first_label = first.get("label")
+    second_label = second.get("label")
+    if first_label is not None and second_label is not None and first_label != second_label:
+        return False
+    first_center = get_center(first)
+    second_center = get_center(second)
+    if first_center is not None and second_center is not None:
+        distance = math.hypot(first_center[0] - second_center[0], first_center[1] - second_center[1])
+        return distance <= 0.025
+    return True
 
 
 def _object_corners_xy(obj: ObjectDict) -> List[Tuple[float, float]]:
@@ -180,6 +191,32 @@ def _gripper_finger_boxes(half_u: float, inner_half_v: float, outer_half_v: floa
     ]
 
 
+def _gripper_side_clearance_boxes(
+    half_u: float,
+    target_half_v: float,
+    inner_half_v: float,
+    side_clearance_m: float,
+) -> List[dict]:
+    clearance = max(0.0, float(side_clearance_m))
+    side_limit = max(float(inner_half_v), float(target_half_v) + clearance)
+    if side_limit <= float(target_half_v) + 1e-9:
+        return []
+    return [
+        {
+            "umin": -half_u,
+            "umax": half_u,
+            "vmin": target_half_v,
+            "vmax": side_limit,
+        },
+        {
+            "umin": -half_u,
+            "umax": half_u,
+            "vmin": -side_limit,
+            "vmax": -target_half_v,
+        },
+    ]
+
+
 def blocker_category(obj: ObjectDict) -> str:
     role = str(obj.get("role") or "").lower()
     state = str(obj.get("state") or "").lower()
@@ -266,6 +303,7 @@ def _evaluate_yaw(
     gripper_inner_width_m: float,
     approach_length_m: float,
     z_tolerance_m: float,
+    side_clearance_m: float,
 ) -> dict:
     target_center = get_center(target)
     if target_center is None:
@@ -291,9 +329,16 @@ def _evaluate_yaw(
     if float(gripper_outer_width_m) <= float(gripper_inner_width_m):
         inner_half_v = outer_half_v
     finger_boxes = _gripper_finger_boxes(half_u, inner_half_v, outer_half_v)
+    side_clearance_boxes = _gripper_side_clearance_boxes(
+        half_u,
+        target_half_v,
+        inner_half_v,
+        side_clearance_m,
+    )
 
     blockers = []
     clearances = []
+    seen_blockers = set()
     for obstacle in obstacles:
         if obstacle.get("visible") is False or is_same_object(obstacle, target):
             continue
@@ -302,12 +347,21 @@ def _evaluate_yaw(
         projection = _project_object(obstacle, target_center[:2], yaw_deg)
         if projection is None:
             continue
-        if any(_aabb_overlap(projection, box) for box in finger_boxes):
+        overlaps_finger = any(_aabb_overlap(projection, box) for box in finger_boxes)
+        overlaps_side_clearance = any(_aabb_overlap(projection, box) for box in side_clearance_boxes)
+        if overlaps_finger or overlaps_side_clearance:
+            key = (str(obstacle.get("id")), str(obstacle.get("label")), tuple(round(value, 4) for value in (get_center(obstacle) or [])[:2]))
+            if key in seen_blockers:
+                continue
+            seen_blockers.add(key)
             summary = object_summary(obstacle)
             summary["blocker_category"] = blocker_category(obstacle)
+            if overlaps_side_clearance and not overlaps_finger:
+                summary["blocker_reason"] = "insufficient_gripper_side_clearance"
             blockers.append(summary)
         else:
-            clearances.append(min(_aabb_gap(projection, box) for box in finger_boxes))
+            boxes = finger_boxes + side_clearance_boxes
+            clearances.append(min(_aabb_gap(projection, box) for box in boxes))
 
     feasible = not blockers
     clearance = min(clearances) if clearances else 1.0
@@ -366,6 +420,7 @@ def select_best_grasp(
     current_wrist_yaw_deg: Optional[float] = None,
     approach_length_m: float = 0.02,
     z_tolerance_m: float = 0.04,
+    side_clearance_m: float = 0.006,
 ) -> dict:
     obstacles = [obj for obj in objects if isinstance(obj, dict) and not is_same_object(obj, target)]
     candidates = _candidate_yaws(target, obstacles, yaw_step_deg, local_refine_step_deg, current_wrist_yaw_deg)
@@ -379,6 +434,7 @@ def select_best_grasp(
             gripper_inner_width_m,
             approach_length_m,
             z_tolerance_m,
+            side_clearance_m,
         )
         result["source"] = candidate["source"]
         candidate_results.append(result)
@@ -394,6 +450,7 @@ def select_best_grasp(
             gripper_inner_width_m,
             approach_length_m,
             z_tolerance_m,
+            side_clearance_m,
         )
         for index in range(local_count)
     ]
@@ -412,6 +469,7 @@ def select_best_grasp(
                 gripper_inner_width_m,
                 approach_length_m,
                 z_tolerance_m,
+                side_clearance_m,
             )
             result["source"] = "feasible_interval_midpoint"
             if result["feasible"]:
@@ -463,5 +521,6 @@ def select_best_grasp(
             "gripper_outer_width_m": float(gripper_outer_width_m),
             "gripper_inner_width_m": float(gripper_inner_width_m),
             "approach_length_m": float(approach_length_m),
+            "side_clearance_m": float(side_clearance_m),
         },
     }

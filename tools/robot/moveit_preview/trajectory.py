@@ -92,6 +92,27 @@ def max_joint_delta(trajectory):
     return max_name, max_delta
 
 
+def max_joint_start_goal_delta(trajectory):
+    parsed = trajectory_points(trajectory)
+    if parsed is None:
+        return None
+    joint_names, points = parsed
+    if len(points) < 2:
+        return None
+    start_positions = points[0].positions
+    goal_positions = points[-1].positions
+    max_name = None
+    max_delta = None
+    for name, start_value, goal_value in zip(joint_names, start_positions, goal_positions):
+        delta = abs(float(goal_value) - float(start_value))
+        if max_delta is None or delta > max_delta:
+            max_name = name
+            max_delta = delta
+    if max_delta is None:
+        return None
+    return max_name, max_delta
+
+
 def setup_gripper(args):
     if not args.enable_gripper:
         return None

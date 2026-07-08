@@ -21,7 +21,7 @@ from .clearance_execution import (
     preflight_nudge_candidate,
 )
 from .clearance_policy import refresh_executable_safe
-from .obstruction_frontier import build_frontier_clearance_plan
+from .obstruction_frontier import build_frontier_clearance_plan, _make_pick_away_candidate
 from .push_clearing import (
     current_protected_structure_ids,
     evaluate_push_candidates,
@@ -50,8 +50,10 @@ def _relations_for_target(
     return build_geometry_relations(
         relation_objects,
         target_id=held_object["id"],
+        target_object=held_object,
         gripper_outer_width_m=getattr(args, "grasp_gripper_outer_width_m", 0.112),
         gripper_inner_width_m=getattr(args, "grasp_gripper_inner_width_m", 0.048),
+        gripper_side_clearance_m=getattr(args, "grasp_gripper_side_clearance_m", 0.006),
         grasp_approach_length_m=getattr(args, "grasp_approach_length_m", 0.02),
     )
 
@@ -102,6 +104,50 @@ def _raise_if_non_push_action(analysis: dict, has_push_candidates: bool = False)
                 analysis.get("blocked_by_placed_structure"),
             )
         )
+
+
+def _top_object_pick_away_candidate(
+    current_state: dict,
+    held_object: dict,
+    analysis: dict,
+    protected_ids: Iterable[Any],
+    args: Any,
+    step_index: int,
+    future_place_regions: Optional[Iterable[dict]] = None,
+) -> Optional[dict]:
+    if analysis.get("action") not in ("remove_top_object", "pick_away_top_object"):
+        return None
+    above = analysis.get("object_above_target")
+    if not isinstance(above, dict) or above.get("id") is None:
+        return None
+    try:
+        top_object = object_by_string_id(current_state.get("objects", []), above.get("id"))
+    except RuntimeError:
+        return None
+    graph_item = {
+        "object_id": top_object.get("id"),
+        "min_depth": 1,
+        "blocks": [held_object.get("id")],
+    }
+    candidate = _make_pick_away_candidate(
+        top_object,
+        held_object,
+        [obj for obj in current_state.get("objects", []) if isinstance(obj, dict)],
+        protected_ids,
+        graph_item,
+        args,
+        index=step_index,
+        table_bounds=current_state.get("table_bounds"),
+        future_place_regions=future_place_regions or [],
+    )
+    if candidate is None:
+        return None
+    candidate["candidate_id"] = "top_clear_{:02d}_pick_away_{}".format(step_index, top_object.get("id"))
+    candidate["reason"] = "target_under_top_object_pick_away"
+    candidate["target_under_other_object"] = True
+    candidate["object_above_target"] = above
+    refresh_executable_safe(candidate)
+    return candidate
 
 
 def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
@@ -574,6 +620,62 @@ def handle_push_clearing_before_pick(
         os.path.join(cycle_dir, "grasp_yaw_analysis_before_action.json"),
         analysis,
     )
+    top_pick_away = _top_object_pick_away_candidate(
+        current_state,
+        held_object,
+        analysis,
+        protected_ids,
+        args,
+        step_index,
+        future_place_regions=future_place_regions,
+    )
+    if top_pick_away is not None and top_pick_away.get("executable_safe"):
+        write_json(
+            os.path.join(cycle_dir, "selected_action.json"),
+            {
+                "action": "pick_away",
+                "reason": top_pick_away.get("reason"),
+                "selected_clearance_action": _candidate_summary(top_pick_away),
+                "clearance_step_index": step_index,
+                "selection_source": "target_under_top_object_geometry",
+                "selected_candidate_id": top_pick_away.get("candidate_id"),
+                "multi_step_status": "selected_top_object_pick_away",
+                "post_action_requirement": "reobserve_and_rebuild_obstruction_graph",
+            },
+        )
+        next_state, memory, next_held = execute_pick_away_and_reobserve(
+            args,
+            cycle_dir,
+            runtime,
+            memory,
+            current_state,
+            held_template,
+            top_pick_away,
+            base_id,
+            previous_locked_stack,
+            base_template,
+            step_index,
+        )
+        if not (args.execute and args.execute_push_clearing):
+            return next_state, memory, next_held
+        max_attempts = max(1, int(getattr(args, "max_automatic_push_clearing_attempts", 2)))
+        if automatic_push_attempt + 1 >= max_attempts:
+            return next_state, memory, next_held
+        return handle_push_clearing_before_pick(
+            args,
+            cycle_dir,
+            runtime,
+            memory,
+            next_state,
+            held_template,
+            next_held,
+            base_id,
+            previous_locked_stack,
+            base_template=base_template,
+            future_targets=future_targets,
+            future_place_regions=future_place_regions,
+            automatic_push_attempt=automatic_push_attempt + 1,
+        )
     _raise_if_non_push_action(analysis, has_push_candidates=True)
     if analysis.get("action") == "pick" and analysis.get("grasp_feasible"):
         held_object = _apply_selected_grasp_to_target(held_object, analysis)

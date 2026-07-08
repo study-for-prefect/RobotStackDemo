@@ -58,6 +58,7 @@ def _target_yaw_gain(target: ObjectDict, objects: List[ObjectDict], removed_id: 
         objects,
         gripper_outer_width_m=getattr(args, "grasp_gripper_outer_width_m", 0.112),
         gripper_inner_width_m=getattr(args, "grasp_gripper_inner_width_m", 0.048),
+        side_clearance_m=getattr(args, "grasp_gripper_side_clearance_m", 0.006),
         approach_length_m=getattr(args, "grasp_approach_length_m", 0.02),
     )
     after_objects = [obj for obj in objects if _object_id(obj) != str(removed_id)]
@@ -66,6 +67,7 @@ def _target_yaw_gain(target: ObjectDict, objects: List[ObjectDict], removed_id: 
         after_objects,
         gripper_outer_width_m=getattr(args, "grasp_gripper_outer_width_m", 0.112),
         gripper_inner_width_m=getattr(args, "grasp_gripper_inner_width_m", 0.048),
+        side_clearance_m=getattr(args, "grasp_gripper_side_clearance_m", 0.006),
         approach_length_m=getattr(args, "grasp_approach_length_m", 0.02),
     )
     before_count = _feasible_yaw_count(before)
@@ -104,6 +106,7 @@ def build_obstruction_graph(
             objects,
             gripper_outer_width_m=getattr(args, "grasp_gripper_outer_width_m", 0.112),
             gripper_inner_width_m=getattr(args, "grasp_gripper_inner_width_m", 0.048),
+            side_clearance_m=getattr(args, "grasp_gripper_side_clearance_m", 0.006),
             approach_length_m=getattr(args, "grasp_approach_length_m", 0.02),
         )
         nodes.setdefault(
@@ -400,6 +403,7 @@ def _pick_away_grasp(obj: ObjectDict, objects: List[ObjectDict], args: Any) -> d
     grasp_args = {
         "gripper_outer_width_m": getattr(args, "grasp_gripper_outer_width_m", 0.112),
         "gripper_inner_width_m": getattr(args, "grasp_gripper_inner_width_m", 0.048),
+        "side_clearance_m": getattr(args, "grasp_gripper_side_clearance_m", 0.006),
         "approach_length_m": getattr(args, "grasp_approach_length_m", 0.02),
     }
     full_scene_grasp = select_best_grasp(obj, objects, **grasp_args)
@@ -514,6 +518,7 @@ def build_frontier_clearance_plan(
             contact_z_offset_m=getattr(args, "push_clearing_contact_z_offset_m", 0.015),
             gripper_outer_width_m=getattr(args, "grasp_gripper_outer_width_m", 0.112),
             gripper_inner_width_m=getattr(args, "grasp_gripper_inner_width_m", 0.048),
+            gripper_side_clearance_m=getattr(args, "grasp_gripper_side_clearance_m", 0.006),
             grasp_approach_length_m=getattr(args, "grasp_approach_length_m", 0.02),
             push_tool_width_m=getattr(args, "push_tool_width_m", 0.035),
             push_tool_safety_margin_m=getattr(args, "push_tool_safety_margin_m", 0.005),

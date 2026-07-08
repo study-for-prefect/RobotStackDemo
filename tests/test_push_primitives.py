@@ -34,6 +34,36 @@ def test_push_targets():
     assert targets["retreat"] == [0.455, 0.1, 0.07]
 
 
+def test_nudge_execution_plan_preserves_current_tool_orientation():
+    args = SimpleNamespace(
+        push_clearing_distance_m=0.025,
+        push_clearing_lift_m=0.05,
+        push_clearing_contact_z_offset_m=0.015,
+    )
+    target = make_object("target", (0.40, 0.00, 0.015))
+    target["table_yaw_deg"] = -88.59
+    target["table_yaw_valid"] = True
+    obstacle = make_object("obstacle", (0.44, 0.00, 0.015))
+    state = make_scene([target, obstacle])
+
+    plan = build_push_execution_plan(
+        state,
+        target,
+        {
+            "subject": "obstacle",
+            "direction_base": [0.0, -1.0, 0.0],
+            "distance_m": 0.025,
+            "predicted_selected_grasp_yaw_deg": 91.41,
+        },
+        args,
+    )
+
+    assert plan["push_orientation_policy"] == "preserve_current_tool_orientation"
+    assert plan["target_yaw_deg"] is None
+    assert plan["target_yaw_valid"] is False
+    assert plan["reference_target_yaw_deg"] == 91.41
+
+
 def test_push_targets_reject_contact_above_thin_obstacle():
     plan = {
         "schema_version": "push_execution_plan_v1",
@@ -323,7 +353,7 @@ def test_tool_vertical_approach_collision_rejects_candidate():
     assert result["reason"] in ("vertical_approach_collision", "tool_swept_collision")
 
 
-def test_push_execution_plan_carries_target_yaw_for_motion_orientation():
+def test_push_execution_plan_records_reference_yaw_without_motion_orientation():
     target = make_object("target", (0.40, 0.00, 0.015))
     target.update(
         {
@@ -349,9 +379,13 @@ def test_push_execution_plan_carries_target_yaw_for_motion_orientation():
             push_clearing_contact_z_offset_m=0.015,
         ),
     )
-    assert plan["target_yaw_deg"] == -88.0
-    assert plan["target_yaw_valid"] is True
-    assert plan["target_yaw_source"] == "min_area_rect"
+    assert plan["push_orientation_policy"] == "preserve_current_tool_orientation"
+    assert plan["target_yaw_deg"] is None
+    assert plan["target_yaw_valid"] is False
+    assert plan["target_yaw_source"] == "not_used_for_push_orientation"
+    assert plan["reference_target_yaw_deg"] == -88.0
+    assert plan["reference_target_yaw_valid"] is True
+    assert plan["reference_target_yaw_source"] == "min_area_rect"
     assert plan["target"]["id"] == "target"
 
 
@@ -370,5 +404,6 @@ if __name__ == "__main__":
     test_future_grasp_target_is_not_a_hard_push_clearing_constraint()
     test_push_candidate_rejected_when_it_blocks_future_place_region()
     test_tool_vertical_approach_collision_rejects_candidate()
-    test_push_execution_plan_carries_target_yaw_for_motion_orientation()
+    test_nudge_execution_plan_preserves_current_tool_orientation()
+    test_push_execution_plan_records_reference_yaw_without_motion_orientation()
     print("push_primitives tests passed")

@@ -23,6 +23,7 @@ from .trajectory import (
     gripper_position_for_command,
     joint_state_from_trajectory,
     max_joint_delta,
+    max_joint_start_goal_delta,
 )
 
 
@@ -59,8 +60,27 @@ def _push_target_yaw(push_plan: dict) -> Tuple[float, str]:
     raise ValueError("Push plan does not contain target yaw.")
 
 
+def _preserve_current_push_orientation(push_plan: dict) -> bool:
+    policy = str(push_plan.get("push_orientation_policy") or "").strip().lower()
+    if policy in ("preserve_current_tool_orientation", "current_tool_orientation", "current"):
+        return True
+    if policy in ("align_to_target_yaw", "target_yaw", "target_grasp_yaw"):
+        return False
+    return str(push_plan.get("action_type") or "").strip().lower() == "nudge"
+
+
 def _resolve_push_orientation(push_plan: dict, args: Any, current_quat_xyzw: List[float]) -> Tuple[List[float], Dict[str, Any]]:
     current_quat = normalize_quaternion_xyzw(current_quat_xyzw)
+    if _preserve_current_push_orientation(push_plan):
+        current_yaw = estimate_downward_family_yaw_deg(current_quat, args.quat_xyzw)
+        return current_quat, {
+            "source": "current_tool_orientation_preserved_for_push",
+            "target_yaw_deg": push_plan.get("target_yaw_deg"),
+            "target_yaw_source": push_plan.get("target_yaw_source") or "not_used_for_push_orientation",
+            "selected_yaw_deg": current_yaw,
+            "current_yaw_deg": current_yaw,
+            "yaw_delta_deg": 0.0,
+        }
     try:
         target_yaw, yaw_source = _push_target_yaw(push_plan)
     except (TypeError, ValueError):
@@ -95,7 +115,7 @@ def _push_stage_goals(push_plan: dict, args: Any, push_quat: List[float]) -> Lis
     targets = build_push_targets(push_plan)
     tcp_offset_tool = [float(value) for value in args.tcp_offset_tool]
     stages = [
-        ("pre_push", targets["pre_push"], False),
+        ("pre_push", targets["pre_push"], True),
         ("contact", targets["contact"], True),
         ("push_end", targets["push_end"], True),
         ("retreat", targets["retreat"], True),
@@ -206,6 +226,20 @@ def run_push_plan(node: Any, args: Any, planning_start_state: Any, gripper: Any 
                         stage_name,
                         delta[0],
                         delta[1],
+                        float(args.max_joint_delta),
+                    )
+                )
+                return False
+            total_delta = max_joint_start_goal_delta(trajectory)
+            if total_delta and total_delta[1] > float(args.max_joint_delta):
+                if gripper_closed_for_push:
+                    _recover_open_gripper(node, args, gripper, "failed_before_motion_total_joint_delta_stage_{}".format(stage_name))
+                node.get_logger().error(
+                    "Push clearing preflight refused stage '{}': {} start_goal_delta {:.3f} rad "
+                    "exceeds {:.3f}; this is likely an IK branch jump.".format(
+                        stage_name,
+                        total_delta[0],
+                        total_delta[1],
                         float(args.max_joint_delta),
                     )
                 )

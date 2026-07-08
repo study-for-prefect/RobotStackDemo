@@ -279,6 +279,7 @@ def evaluate_push_candidates(
     contact_z_offset_m: float = 0.015,
     gripper_outer_width_m: float = 0.112,
     gripper_inner_width_m: float = 0.048,
+    gripper_side_clearance_m: float = 0.006,
     grasp_approach_length_m: float = 0.02,
     push_tool_width_m: float = 0.035,
     push_tool_safety_margin_m: float = 0.005,
@@ -308,6 +309,7 @@ def evaluate_push_candidates(
         contact_z_offset_m=contact_z_offset_m,
         gripper_outer_width_m=gripper_outer_width_m,
         gripper_inner_width_m=gripper_inner_width_m,
+        gripper_side_clearance_m=gripper_side_clearance_m,
         grasp_approach_length_m=grasp_approach_length_m,
         push_tool_width_m=push_tool_width_m,
         push_tool_safety_margin_m=push_tool_safety_margin_m,
@@ -443,18 +445,19 @@ def build_push_execution_plan(
     obstacle = copy.deepcopy(
         object_by_string_id(current_state.get("objects", []), selected_push.get("subject"))
     )
-    target_yaw = selected_push.get("selected_grasp_yaw_deg")
-    target_yaw_source = "selected_clearance_grasp_yaw"
-    if target_yaw is None:
-        target_yaw = selected_push.get("predicted_selected_grasp_yaw_deg")
-        target_yaw_source = "predicted_post_push_grasp_yaw"
-    if target_yaw is None:
-        target_yaw = held_object.get("selected_grasp_yaw_deg")
-        target_yaw_source = held_object.get("grasp_yaw_source") or "target_selected_grasp_yaw"
-    if target_yaw is None:
-        target_yaw = held_object.get("table_yaw_deg")
-        target_yaw_source = held_object.get("table_yaw_source") or "target_table_yaw"
-    target_yaw_valid = target_yaw is not None
+    reference_yaw = selected_push.get("selected_grasp_yaw_deg")
+    reference_yaw_source = "selected_clearance_grasp_yaw"
+    if reference_yaw is None:
+        reference_yaw = selected_push.get("predicted_selected_grasp_yaw_deg")
+        reference_yaw_source = "predicted_post_push_grasp_yaw"
+    if reference_yaw is None:
+        reference_yaw = held_object.get("selected_grasp_yaw_deg")
+        reference_yaw_source = held_object.get("grasp_yaw_source") or "target_selected_grasp_yaw"
+    if reference_yaw is None:
+        reference_yaw = held_object.get("table_yaw_deg")
+        reference_yaw_source = held_object.get("table_yaw_source") or "target_table_yaw"
+    reference_yaw_valid = reference_yaw is not None
+    orientation_policy = selected_push.get("push_orientation_policy") or "preserve_current_tool_orientation"
     return {
         "schema_version": "push_execution_plan_v1",
         "frame_id": "base_link",
@@ -466,9 +469,13 @@ def build_push_execution_plan(
         "distance_m": selected_push.get("distance_m", args.push_clearing_distance_m),
         "lift_m": args.push_clearing_lift_m,
         "contact_z_offset_m": args.push_clearing_contact_z_offset_m,
-        "target_yaw_deg": None if target_yaw is None else float(target_yaw),
-        "target_yaw_valid": bool(target_yaw_valid),
-        "target_yaw_source": target_yaw_source if target_yaw_valid else "missing_target_yaw",
+        "push_orientation_policy": orientation_policy,
+        "target_yaw_deg": None,
+        "target_yaw_valid": False,
+        "target_yaw_source": "not_used_for_push_orientation",
+        "reference_target_yaw_deg": None if reference_yaw is None else float(reference_yaw),
+        "reference_target_yaw_valid": bool(reference_yaw_valid),
+        "reference_target_yaw_source": reference_yaw_source if reference_yaw_valid else "missing_target_yaw",
         "target_table_yaw_valid": bool(held_object.get("table_yaw_valid")),
         "target_yaw_frame": "base_link",
         "target": copy.deepcopy(held_object),

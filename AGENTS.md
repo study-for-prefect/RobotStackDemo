@@ -153,17 +153,15 @@ Execution must require explicit user intent.
 
 ## Patch Policy
 
-Prefer minimal patches.
+Default to minimal, reviewable patches.
 
-Do not rewrite whole files.
+Do not rewrite whole files, reformat unrelated code, or rename unrelated files unless the change is required by the task.
 
-Do not reformat unrelated code.
+If the task requires structural changes, split the work by responsibility and add new files when it improves module boundaries.
 
-Do not rename unrelated files.
+Every new file must have a clear purpose.
 
-Add new files only when responsibility separation requires it.
-
-Explain every new file added.
+Large behavior changes should be implemented in small stages, with tests or runtime logs showing what changed.
 
 
 ## Robotics Standards

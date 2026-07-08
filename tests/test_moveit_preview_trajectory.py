@@ -79,6 +79,22 @@ class MoveItPreviewTrajectoryTests(unittest.TestCase):
         self.assertEqual(joint_name, "wrist_3_joint")
         self.assertAlmostEqual(delta, 1.6)
 
+    def test_max_joint_start_goal_delta_reports_slow_branch_jump(self):
+        traj = _Trajectory(
+            ["shoulder_pan_joint", "wrist_3_joint"],
+            [
+                [0.0, 0.0],
+                [0.4, 0.4],
+                [0.8, 0.8],
+                [1.2, 1.2],
+            ],
+        )
+
+        joint_name, delta = trajectory.max_joint_start_goal_delta(traj)
+
+        self.assertEqual(joint_name, "shoulder_pan_joint")
+        self.assertAlmostEqual(delta, 1.2)
+
     def test_gripper_close_accepts_contact_position_when_status_is_zero(self):
         args = Namespace(gripper_open_position=1000, gripper_close_position=0)
 
