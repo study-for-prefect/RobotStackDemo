@@ -27,7 +27,7 @@ def _candidate_summary(candidate: dict) -> dict:
     keys = (
         "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
-        "selected_grasp_yaw_deg", "safe_place_center_m",
+        "selected_grasp_yaw_deg", "predicted_selected_grasp_yaw_deg", "safe_place_center_m",
         "grasp_policy", "relaxed_pick_away_grasp", "ignored_grasp_blockers",
         "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
         "protected_structure_safe", "task_effective", "direct_clearance_candidate", "direct_progress_candidate",
@@ -302,6 +302,7 @@ def execute_pick_away_and_reobserve(
 
 
 def _selected_push_from_clearance_action(selected_action: dict) -> dict:
+    push_evaluation = selected_action.get("push_evaluation") or {}
     return {
         "type": "should_push_away",
         "subject": selected_action.get("obstacle_id"),
@@ -313,6 +314,12 @@ def _selected_push_from_clearance_action(selected_action: dict) -> dict:
         "distance_m": selected_action.get("distance_m"),
         "direction_source": selected_action.get("direction_source"),
         "direction_score": selected_action.get("score"),
+        "selected_grasp_yaw_deg": selected_action.get("selected_grasp_yaw_deg"),
+        "predicted_selected_grasp_yaw_deg": (
+            selected_action.get("predicted_selected_grasp_yaw_deg")
+            if selected_action.get("predicted_selected_grasp_yaw_deg") is not None
+            else push_evaluation.get("predicted_selected_grasp_yaw_deg")
+        ),
     }
 
 

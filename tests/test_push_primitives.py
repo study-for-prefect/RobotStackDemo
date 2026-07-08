@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from types import SimpleNamespace
+
 from tools.robot.push_primitives import build_push_targets
 from robot_scene_pipeline.grasp_yaw_search import select_best_grasp
 from robot_scene_pipeline.push_grasp_joint_evaluator import (
@@ -8,7 +10,7 @@ from robot_scene_pipeline.push_grasp_joint_evaluator import (
     evaluate_push_grasp_joint_candidates,
 )
 from robot_scene_pipeline.tool_swept_volume import check_tool_swept_volume
-from tools.workflows.stack_demo.push_clearing import evaluate_push_directions
+from tools.workflows.stack_demo.push_clearing import build_push_execution_plan, evaluate_push_directions
 from tools.workflows.stack_demo.push_flow import _raise_if_non_push_action
 
 
@@ -321,6 +323,38 @@ def test_tool_vertical_approach_collision_rejects_candidate():
     assert result["reason"] in ("vertical_approach_collision", "tool_swept_collision")
 
 
+def test_push_execution_plan_carries_target_yaw_for_motion_orientation():
+    target = make_object("target", (0.40, 0.00, 0.015))
+    target.update(
+        {
+            "table_yaw_deg": -88.0,
+            "table_yaw_valid": False,
+            "table_yaw_source": "min_area_rect",
+        }
+    )
+    obstacle = make_object("obstacle", (0.46, 0.00, 0.015))
+    scene = make_scene([target, obstacle])
+    plan = build_push_execution_plan(
+        scene,
+        target,
+        {
+            "subject": "obstacle",
+            "direction_base": [1.0, 0.0, 0.0],
+            "distance_m": 0.025,
+            "reason": "test",
+        },
+        SimpleNamespace(
+            push_clearing_distance_m=0.05,
+            push_clearing_lift_m=0.05,
+            push_clearing_contact_z_offset_m=0.015,
+        ),
+    )
+    assert plan["target_yaw_deg"] == -88.0
+    assert plan["target_yaw_valid"] is True
+    assert plan["target_yaw_source"] == "min_area_rect"
+    assert plan["target"]["id"] == "target"
+
+
 if __name__ == "__main__":
     test_push_targets()
     test_push_targets_reject_contact_above_thin_obstacle()
@@ -336,4 +370,5 @@ if __name__ == "__main__":
     test_future_grasp_target_is_not_a_hard_push_clearing_constraint()
     test_push_candidate_rejected_when_it_blocks_future_place_region()
     test_tool_vertical_approach_collision_rejects_candidate()
+    test_push_execution_plan_carries_target_yaw_for_motion_orientation()
     print("push_primitives tests passed")

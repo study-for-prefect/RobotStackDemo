@@ -7,10 +7,17 @@ from typing import Any, Dict, List, Tuple
 from sensor_msgs.msg import JointState
 
 from robot_scene_pipeline.grasp_orientation import normalize_quaternion_xyzw, quaternion_distance_rad
+from robot_scene_pipeline.grasp_orientation import downward_quaternion_for_yaw
 from tools.robot.push_primitives import build_push_targets
 
 from .execution import plan_and_maybe_execute_motion, plan_motion_trajectory
-from .orientation import tool0_goal_from_tcp, transform_position_quat
+from .orientation import (
+    estimate_downward_family_yaw_deg,
+    normalize_yaw_deg,
+    shortest_yaw_delta_deg,
+    tool0_goal_from_tcp,
+    transform_position_quat,
+)
 from .trajectory import (
     gripper_command_accepted,
     gripper_position_for_command,
@@ -24,9 +31,68 @@ def load_push_plan(path: str) -> Dict[str, Any]:
         return json.load(handle)
 
 
-def _push_stage_goals(push_plan: dict, args: Any) -> List[Tuple[str, List[float], bool]]:
+def _finite_float(value: Any) -> float:
+    output = float(value)
+    if not math.isfinite(output):
+        raise ValueError("Expected a finite float, got {!r}.".format(value))
+    return output
+
+
+def _push_target_yaw(push_plan: dict) -> Tuple[float, str]:
+    for key, source in (
+        ("target_yaw_deg", push_plan.get("target_yaw_source") or "target_yaw_deg"),
+        ("selected_grasp_yaw_deg", "selected_grasp_yaw_deg"),
+        ("target_table_yaw_deg", "target_table_yaw_deg"),
+    ):
+        if push_plan.get(key) is not None:
+            return _finite_float(push_plan[key]), str(source)
+    target = push_plan.get("target")
+    if isinstance(target, dict):
+        if target.get("selected_grasp_yaw_deg") is not None:
+            return _finite_float(target["selected_grasp_yaw_deg"]), str(
+                target.get("grasp_yaw_source") or "target.selected_grasp_yaw_deg"
+            )
+        if target.get("table_yaw_deg") is not None:
+            return _finite_float(target["table_yaw_deg"]), str(
+                target.get("table_yaw_source") or "target.table_yaw_deg"
+            )
+    raise ValueError("Push plan does not contain target yaw.")
+
+
+def _resolve_push_orientation(push_plan: dict, args: Any, current_quat_xyzw: List[float]) -> Tuple[List[float], Dict[str, Any]]:
+    current_quat = normalize_quaternion_xyzw(current_quat_xyzw)
+    try:
+        target_yaw, yaw_source = _push_target_yaw(push_plan)
+    except (TypeError, ValueError):
+        return current_quat, {
+            "source": "current_tool_orientation_no_target_yaw",
+            "target_yaw_deg": None,
+            "target_yaw_source": "missing_target_yaw",
+            "selected_yaw_deg": None,
+            "current_yaw_deg": None,
+            "yaw_delta_deg": 0.0,
+        }
+
+    current_yaw = estimate_downward_family_yaw_deg(current_quat, args.quat_xyzw)
+    candidates = [target_yaw, target_yaw + 180.0, target_yaw - 180.0]
+    selected_yaw = min(
+        candidates,
+        key=lambda yaw: abs(shortest_yaw_delta_deg(yaw, current_yaw)),
+    )
+    selected_yaw = normalize_yaw_deg(selected_yaw)
+    yaw_delta = shortest_yaw_delta_deg(selected_yaw, current_yaw)
+    return downward_quaternion_for_yaw(current_quat, yaw_delta), {
+        "source": "current_tool_orientation_plus_target_yaw",
+        "target_yaw_deg": normalize_yaw_deg(target_yaw),
+        "target_yaw_source": yaw_source,
+        "selected_yaw_deg": selected_yaw,
+        "current_yaw_deg": current_yaw,
+        "yaw_delta_deg": yaw_delta,
+    }
+
+
+def _push_stage_goals(push_plan: dict, args: Any, push_quat: List[float]) -> List[Tuple[str, List[float], bool]]:
     targets = build_push_targets(push_plan)
-    push_quat = normalize_quaternion_xyzw(args.quat_xyzw)
     tcp_offset_tool = [float(value) for value in args.tcp_offset_tool]
     stages = [
         ("pre_push", targets["pre_push"], False),
@@ -94,10 +160,22 @@ def run_push_plan(node: Any, args: Any, planning_start_state: Any, gripper: Any 
     close_at_pre_push = bool(args.execute and getattr(args, "close_gripper_for_push", False))
 
     try:
-        stage_goals = _push_stage_goals(push_plan, args)
-        push_quat = normalize_quaternion_xyzw(args.quat_xyzw)
         current_tool = node.current_tool_transform(timeout=args.tf_timeout)
-        current_pos, _current_quat = transform_position_quat(current_tool)
+        current_pos, current_quat = transform_position_quat(current_tool)
+        push_quat, orientation_report = _resolve_push_orientation(push_plan, args, current_quat)
+        node.get_logger().info(
+            "Push orientation source={source} target_yaw={target_yaw_deg} "
+            "target_yaw_source={target_yaw_source} current_yaw={current_yaw_deg} "
+            "selected_yaw={selected_yaw_deg} yaw_delta={yaw_delta_deg} "
+            "quat_xyzw=[{qx:.4f}, {qy:.4f}, {qz:.4f}, {qw:.4f}]".format(
+                qx=push_quat[0],
+                qy=push_quat[1],
+                qz=push_quat[2],
+                qw=push_quat[3],
+                **orientation_report,
+            )
+        )
+        stage_goals = _push_stage_goals(push_plan, args, push_quat)
 
         preflight = []
         start_state = planning_start_state

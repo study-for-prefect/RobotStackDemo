@@ -230,7 +230,12 @@ The selected real nudge then runs in one MoveIt process with
 `--close-gripper-for-push`: preflight `pre_push`, `contact`, `push_end`, and
 `retreat`, execute the open-gripper `pre_push` move first, close the gripper as
 a rigid paddle at that pre-push pose, execute `contact`, `push_end`, and
-`retreat`, then open the gripper. If any stage fails, the workflow writes
+`retreat`, then open the gripper. The generated push plan now carries the
+current target yaw, preferring selected grasp yaw and falling back to the
+detected target table yaw. The MoveIt push runtime reads the current `tool0`
+orientation first, then rotates from that posture to the nearest 180-degree
+equivalent target yaw for all push stages; it no longer plans pushes directly
+from the default `--quat-xyzw`. If any stage fails, the workflow writes
 `clearance_step_XX_result.json`, requests gripper-open recovery, and stops
 instead of continuing from a stale scene.
 Real `pick_away` actions build an obstacle pick plan plus a safe-place plan, and

@@ -568,6 +568,7 @@ def build_frontier_clearance_plan(
                             "enabling_gain": round(enabling_gain, 6),
                             "free_space_gain": round(free_space_gain, 6),
                             "current_grasp_gain": evaluation.get("current_grasp_gain", 0.0),
+                            "predicted_selected_grasp_yaw_deg": evaluation.get("predicted_selected_grasp_yaw_deg"),
                             "current_blocker_count": evaluation.get("current_blocker_count"),
                             "predicted_blocker_count": evaluation.get("predicted_blocker_count"),
                             "blocker_count_reduction": evaluation.get("blocker_count_reduction", 0),
