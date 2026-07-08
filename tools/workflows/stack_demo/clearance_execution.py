@@ -27,6 +27,7 @@ def _candidate_summary(candidate: dict) -> dict:
     keys = (
         "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
+        "collision_free", "sweep_collision_free", "workspace_feasible", "gripper_feasible",
         "selected_grasp_yaw_deg", "predicted_selected_grasp_yaw_deg", "safe_place_center_m",
         "grasp_policy", "relaxed_pick_away_grasp", "ignored_grasp_blockers",
         "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
@@ -38,6 +39,7 @@ def _candidate_summary(candidate: dict) -> dict:
         "target_yaw_gain", "direct_target_gain", "direct_progress_gain", "direct_progress_reason",
         "enabling_gain", "free_space_gain",
         "blocker_count_reduction", "current_grasp_gain", "post_push_grasp_feasible",
+        "distance_reference_object_id", "distance_reference_is_current_target",
         "target_distance_before_m", "target_distance_after_m", "target_distance_delta_m",
         "enables_blocker_object_id", "enabling_reason", "score", "reason",
     )
@@ -130,6 +132,21 @@ def _recover_open_gripper(args: Any, cycle_dir: str, reason: str) -> dict:
     return report
 
 
+def _remove_command_flag(command: list, flag: str, value_count: int = 0) -> None:
+    while flag in command:
+        index = command.index(flag)
+        del command[index:index + 1 + int(value_count)]
+
+
+def _plan_only_motion_command(command: list) -> list:
+    output = list(command)
+    _remove_command_flag(output, "--execute")
+    _remove_command_flag(output, "--enable-gripper")
+    _remove_command_flag(output, "--skip-gripper-init")
+    _remove_command_flag(output, "--gripper-port", value_count=1)
+    return output
+
+
 def _build_pick_away_place_plan(current_state: dict, obstacle: dict, selected_action: dict, args: Any) -> dict:
     safe_place = selected_action.get("safe_place_center_m")
     if not isinstance(safe_place, list) or len(safe_place) < 3:
@@ -215,6 +232,45 @@ def _pick_away_release_height(
         "object_center_z_m": round(float(center_z), 6),
         "release_gap_m": round(float(release_gap_m), 6),
     }
+
+
+def preflight_pick_away_candidate(
+    args: Any,
+    cycle_dir: str,
+    current_state: dict,
+    selected_action: dict,
+    step_index: int,
+) -> dict:
+    obstacle = object_by_string_id(current_state.get("objects", []), selected_action.get("obstacle_id"))
+    obstacle_for_pick = copy.deepcopy(obstacle)
+    obstacle_for_pick["selected_grasp_yaw_deg"] = selected_action.get("selected_grasp_yaw_deg")
+    obstacle_for_pick["grasp_yaw_source"] = "obstruction_frontier_pick_away"
+    candidate_id = str(selected_action.get("candidate_id")).replace(os.sep, "_")
+    pick_plan_path = os.path.join(
+        cycle_dir,
+        "clearance_step_{:02d}_candidate_{}_pick_away_pick_plan.json".format(step_index, candidate_id),
+    )
+    place_plan_path = os.path.join(
+        cycle_dir,
+        "clearance_step_{:02d}_candidate_{}_pick_away_place_plan.json".format(step_index, candidate_id),
+    )
+    build_offline_pick_plan(current_state, obstacle_for_pick, pick_plan_path, args)
+    place_plan = _build_pick_away_place_plan(current_state, obstacle_for_pick, selected_action, args)
+    write_json(place_plan_path, place_plan)
+    output = dict(selected_action)
+    output["pick_plan_path"] = pick_plan_path
+    output["place_plan_path"] = place_plan_path
+    try:
+        run(_plan_only_motion_command(pick_command(args, pick_plan_path)))
+        run(_plan_only_motion_command(place_command(args, place_plan_path)))
+    except Exception as exc:
+        output["moveit_feasible"] = False
+        output["executable_safe"] = False
+        output["moveit_preflight_error"] = str(exc)
+        return output
+    output["moveit_feasible"] = True
+    output["executable_safe"] = True
+    return output
 
 
 def execute_pick_away_and_reobserve(

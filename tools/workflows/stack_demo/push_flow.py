@@ -32,6 +32,7 @@ from .push_clearing import (
 from .scene import reacquire_target
 from .push_selection import choose_clearance_action
 from .target_recovery import missing_target_clearance_relations
+from .vlm_clearance import dedupe_candidates_by_id, select_clearance_with_vlm_policy
 
 def _relations_for_target(
     current_state: dict,
@@ -159,6 +160,7 @@ def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
             "grasp_policy", "relaxed_pick_away_grasp", "ignored_grasp_blockers",
             "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
             "future_task_feasible", "protected_structure_safe", "moveit_feasible",
+            "collision_free", "sweep_collision_free", "workspace_feasible", "gripper_feasible",
             "task_effective", "direct_clearance_candidate", "direct_progress_candidate",
             "enabling_clearance_candidate", "exploratory",
             "automatic_execution_allowed", "automatic_execution_reason",
@@ -167,6 +169,7 @@ def _write_frontier_debug_files(cycle_dir: str, frontier_plan: dict) -> None:
             "executable_safe", "direct_target_gain",
             "direct_progress_gain", "direct_progress_reason", "enabling_gain", "free_space_gain", "current_grasp_gain",
             "current_blocker_count", "predicted_blocker_count", "blocker_count_reduction",
+            "distance_reference_object_id", "distance_reference_is_current_target",
             "target_distance_before_m", "target_distance_after_m", "target_distance_delta_m",
             "post_push_grasp_feasible", "enables_blocker_object_id", "enabling_reason",
             "utility_score", "easiness_score",
@@ -223,6 +226,7 @@ def _candidate_summary(candidate: dict) -> dict:
     keys = (
         "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
+        "collision_free", "sweep_collision_free", "workspace_feasible", "gripper_feasible",
         "selected_grasp_yaw_deg", "safe_place_center_m",
         "grasp_policy", "relaxed_pick_away_grasp", "ignored_grasp_blockers",
         "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
@@ -234,6 +238,7 @@ def _candidate_summary(candidate: dict) -> dict:
         "target_yaw_gain", "direct_target_gain", "direct_progress_gain", "direct_progress_reason",
         "enabling_gain", "free_space_gain",
         "blocker_count_reduction", "current_grasp_gain", "post_push_grasp_feasible",
+        "distance_reference_object_id", "distance_reference_is_current_target",
         "target_distance_before_m", "target_distance_after_m", "target_distance_delta_m",
         "enables_blocker_object_id", "enabling_reason", "score", "reason",
     )
@@ -565,6 +570,7 @@ def handle_push_clearing_before_pick(
     automatic_push_attempt: int = 0,
 ) -> Tuple[dict, dict, dict]:
     step_index = int(automatic_push_attempt) + 1
+    vlm_policy_enabled = bool(getattr(args, "use_vlm_clearance_policy", False))
     current_state, held_object = _merge_scene_duplicates(current_state, held_object, cycle_dir)
     write_json(os.path.join(cycle_dir, "scene_state_before_action.json"), current_state)
     relations = _relations_for_target(
@@ -629,7 +635,11 @@ def handle_push_clearing_before_pick(
         step_index,
         future_place_regions=future_place_regions,
     )
-    if top_pick_away is not None and top_pick_away.get("executable_safe"):
+    if (
+        top_pick_away is not None
+        and top_pick_away.get("executable_safe")
+        and not vlm_policy_enabled
+    ):
         write_json(
             os.path.join(cycle_dir, "selected_action.json"),
             {
@@ -676,7 +686,8 @@ def handle_push_clearing_before_pick(
             future_place_regions=future_place_regions,
             automatic_push_attempt=automatic_push_attempt + 1,
         )
-    _raise_if_non_push_action(analysis, has_push_candidates=True)
+    if not (vlm_policy_enabled and top_pick_away is not None):
+        _raise_if_non_push_action(analysis, has_push_candidates=True)
     if analysis.get("action") == "pick" and analysis.get("grasp_feasible"):
         held_object = _apply_selected_grasp_to_target(held_object, analysis)
         write_json(
@@ -711,63 +722,107 @@ def handle_push_clearing_before_pick(
         future_place_regions=future_place_regions or [],
         evaluate_push_fn=evaluate_push_candidates,
     )
+    if vlm_policy_enabled and top_pick_away is not None:
+        frontier_plan["all_clearance_action_candidates"] = _dedupe_candidates_by_id(
+            [top_pick_away] + list(frontier_plan.get("all_clearance_action_candidates", []))
+        )
     frontier_plan["debug_dump_full_candidates"] = bool(getattr(args, "debug_dump_full_candidates", False))
-    preflight_report = _preflight_safe_candidates(
-        args,
-        cycle_dir,
-        current_state,
-        held_object,
-        frontier_plan,
-        step_index,
-    )
-    selectable_clearance_candidates = frontier_plan.get("safe_clearance_candidates", [])
-    selected_clearance, llm_selection = choose_clearance_action(
-        args,
-        cycle_dir,
-        held_object,
-        selectable_clearance_candidates,
-        memory,
-        step_index,
-    )
-    _assert_selection_consistency(selected_clearance, llm_selection)
-    frontier_plan["selected_clearance_action"] = selected_clearance
-    frontier_plan["llm_selection"] = llm_selection
-    _write_frontier_debug_files(cycle_dir, frontier_plan)
+    if vlm_policy_enabled:
+        selected_clearance, llm_selection, final_safety_gate, preflight_report = _select_clearance_with_vlm_policy(
+            args,
+            cycle_dir,
+            current_state,
+            held_object,
+            analysis,
+            protected_ids,
+            base_id,
+            memory,
+            step_index,
+            frontier_plan.get("all_clearance_action_candidates", []),
+        )
+        selectable_clearance_candidates = [
+            candidate for candidate in preflight_report.get("candidates", [])
+            if (
+                candidate.get("collision_free")
+                and candidate.get("moveit_feasible")
+                and candidate.get("sweep_collision_free")
+                and candidate.get("workspace_feasible")
+                and candidate.get("gripper_feasible")
+            )
+        ]
+        frontier_plan["preflight_clearance_candidates"] = preflight_report.get("candidates", [])
+        frontier_plan["safe_clearance_candidates"] = selectable_clearance_candidates
+        frontier_plan["selected_clearance_action"] = selected_clearance
+        frontier_plan["llm_selection"] = llm_selection
+        frontier_plan["final_safety_gate"] = final_safety_gate
+        _write_frontier_debug_files(cycle_dir, frontier_plan)
+    else:
+        final_safety_gate = {}
+        preflight_report = _preflight_safe_candidates(
+            args,
+            cycle_dir,
+            current_state,
+            held_object,
+            frontier_plan,
+            step_index,
+        )
+        selectable_clearance_candidates = frontier_plan.get("safe_clearance_candidates", [])
+        selected_clearance, llm_selection = choose_clearance_action(
+            args,
+            cycle_dir,
+            held_object,
+            selectable_clearance_candidates,
+            memory,
+            step_index,
+        )
+        _assert_selection_consistency(selected_clearance, llm_selection)
+        frontier_plan["selected_clearance_action"] = selected_clearance
+        frontier_plan["llm_selection"] = llm_selection
+        _write_frontier_debug_files(cycle_dir, frontier_plan)
 
     if selected_clearance is None:
         _write_blocked_no_clearance_failure(args, cycle_dir, runtime, held_object, analysis, step_index)
         write_json(
             os.path.join(cycle_dir, "selected_action.json"),
             {
-                "action": "replan_required",
-                "reason": "no_feasible_clearance_action",
+                "action": llm_selection.get("decision_type", "replan_required") if vlm_policy_enabled else "replan_required",
+                "reason": llm_selection.get("reason", "no_feasible_clearance_action") if vlm_policy_enabled else "no_feasible_clearance_action",
                 "grasp_action": analysis.get("action"),
                 "clearance_step_index": step_index,
-                "multi_step_status": "no_feasible_clearance_action",
+                "multi_step_status": "vlm_policy_no_executable_action" if vlm_policy_enabled else "no_feasible_clearance_action",
                 "moveit_preflight_failures": preflight_report.get("failures", []),
+                "final_safety_gate": final_safety_gate,
             },
         )
         write_json(
             os.path.join(cycle_dir, "clearance_verification.json"),
             {
-                "status": "not_requested",
-                "reason": "no_feasible_clearance_action",
-                "safe_candidate_count": 0,
+                "status": "rejected_by_safety_gate" if final_safety_gate.get("rejected_by_safety_gate") else "not_requested",
+                "reason": llm_selection.get("reason", "no_feasible_clearance_action") if vlm_policy_enabled else "no_feasible_clearance_action",
+                "safe_candidate_count": len(selectable_clearance_candidates),
                 "failure_state": "manual_required",
                 "failure_reason": "grasp_blocked_no_executable_clearance",
                 "moveit_preflight_failures": preflight_report.get("failures", []),
+                "final_safety_gate": final_safety_gate,
             },
         )
         raise RuntimeError(
-            "Target {} has all grasps blocked and no executable clearance action; pick planning is stopped.".format(
+            "Target {} has no VLM-approved executable clearance action; pick planning is stopped.".format(
+                held_object.get("id")
+            )
+            if vlm_policy_enabled
+            else "Target {} has all grasps blocked and no executable clearance action; pick planning is stopped.".format(
                 held_object.get("id")
             )
         )
 
-    ordered_candidates = [selected_clearance] + [
-        candidate for candidate in selectable_clearance_candidates
-        if candidate.get("candidate_id") != selected_clearance.get("candidate_id")
-    ]
+    if vlm_policy_enabled:
+        ordered_candidates = [selected_clearance]
+    else:
+        ordered_candidates = [selected_clearance] + [
+            candidate for candidate in selectable_clearance_candidates
+            if candidate.get("candidate_id") != selected_clearance.get("candidate_id")
+        ]
     preflight_failures = []
     next_state = None
     next_held = None
@@ -783,6 +838,8 @@ def handle_push_clearing_before_pick(
                 "selected_candidate_id": clearance_action.get("candidate_id"),
                 "multi_step_status": "selected_one_frontier_action",
                 "post_action_requirement": "reobserve_and_rebuild_obstruction_graph",
+                "vlm_clearance_policy_output": llm_selection if vlm_policy_enabled else None,
+                "final_safety_gate": final_safety_gate if vlm_policy_enabled else None,
             },
         )
         try:
@@ -828,6 +885,8 @@ def handle_push_clearing_before_pick(
                     "error": str(exc),
                 }
             )
+            if vlm_policy_enabled:
+                break
             continue
     if next_state is None:
         _write_blocked_no_clearance_failure(args, cycle_dir, runtime, held_object, analysis, step_index)

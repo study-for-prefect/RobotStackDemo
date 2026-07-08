@@ -31,6 +31,14 @@ def parse_args() -> argparse.Namespace:
         help="Execute geometry-based obstacle push clearing before pick when should_push_away is detected.",
     )
     parser.add_argument(
+        "--use-vlm-clearance-policy",
+        action="store_true",
+        help=(
+            "Use the VLM policy to choose the next clearance candidate. "
+            "Code still generates physical candidates and applies collision/MoveIt safety gates."
+        ),
+    )
+    parser.add_argument(
         "--push-clearing-distance-m",
         type=float,
         default=0.05,

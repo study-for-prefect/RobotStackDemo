@@ -61,6 +61,25 @@ python3 -m unittest discover -s tests
 真实推障仍必须显式 `--execute --execute-push-clearing`，短距离 nudge
 候选会先进入 MoveIt 预检，预检通过后才会执行。
 
+清障决策可以显式切到 VLM/LLM policy：
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  ... \
+  --use-vlm-clearance-policy
+```
+
+当前架构分工：
+
+- LLM/VLM = task rule policy，只从物理候选里选择 `candidate_id`。
+- Code = YOLO + D435i 感知、object state、depth geometry、base frame 坐标、
+  物理候选生成、碰撞/工作空间/夹爪/MoveIt 安全门、执行。
+- MoveIt = IK、碰撞检测、轨迹规划、关节跳变检查。
+
+开启 VLM 清障后，代码不再用几何分数、任务收益或 `target_yaw_gain`
+选择最终清障动作；VLM JSON 解析失败或安全门拒绝时，会停在 fail-safe
+状态等待重新观察或人工处理，不会自动回退到几何最高分。
+
 涉及真实机械臂运动的命令默认只规划或采集；确认 UR5、MoveIt、TF、相机和夹爪状态后，再显式添加 `--execute`。yaw 角误差检测不要手动转动末端，使用 `yaw_rotation_probe.py --record-mode auto --execute` 让代码只改变目标 yaw 后自动记录。检验位姿的 `tool0` XYZ 写在 `config/yaw_rotation_probe_pose.json`，姿态由代码固定为 tool0 `+Z` 对准 base_link `-Z`，只允许 yaw 变化。
 
 ## 相机启动方式

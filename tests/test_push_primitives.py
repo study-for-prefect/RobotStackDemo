@@ -84,6 +84,26 @@ def test_push_targets_reject_contact_above_thin_obstacle():
         assert "too high for obstacle height" in str(exc)
 
 
+def test_push_targets_reject_contact_too_close_to_table():
+    plan = {
+        "schema_version": "push_execution_plan_v1",
+        "frame_id": "base_link",
+        "direction_base": [1.0, 0.0, 0.0],
+        "distance_m": 0.025,
+        "lift_m": 0.05,
+        "contact_z_offset_m": 0.001,
+        "obstacle": {
+            "geometry_center_m": [0.42, 0.10, 0.015],
+            "dimensions_m": [0.04, 0.04, 0.03],
+        },
+    }
+    try:
+        build_push_targets(plan)
+        raise AssertionError("expected low contact height rejection")
+    except ValueError as exc:
+        assert "too low for obstacle height" in str(exc)
+
+
 def make_object(object_id, center, size=(0.04, 0.04, 0.03)):
     return {
         "id": object_id,
@@ -392,6 +412,7 @@ def test_push_execution_plan_records_reference_yaw_without_motion_orientation():
 if __name__ == "__main__":
     test_push_targets()
     test_push_targets_reject_contact_above_thin_obstacle()
+    test_push_targets_reject_contact_too_close_to_table()
     test_direction_evaluation_selects_open_side()
     test_direction_evaluation_reports_no_safe_direction()
     test_all_yaws_blocked_selects_safe_joint_push()

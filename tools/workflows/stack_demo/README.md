@@ -15,7 +15,8 @@ entry point. This package separates the workflow by responsibility:
 | `clearance_policy.py` | Clearance candidate preflight/executable safety gates |
 | `push_clearing.py` | Push-plan construction and locked-structure annotations |
 | `push_flow.py` | Multi-step push execution, dry-run reporting, re-observation |
-| `push_selection.py` | LLM/geometry selection among already-safe push candidates |
+| `push_selection.py` | Legacy LLM/geometry selection among already-safe push candidates |
+| `robot_scene_pipeline/vlm_clearance_policy.py` | VLM task-rule policy input, strict JSON parsing, and final safety gate reports |
 | `target_recovery.py` | Missing-target recovery and high-obstacle clearance relations |
 | `app.py` | Top-level cycle orchestration and final success/failure output |
 | `constants.py` | Shared project paths |
@@ -242,10 +243,54 @@ Real `pick_away` actions build an obstacle pick plan plus a safe-place plan, and
 both are sent through the existing MoveIt pick/place preview before motion.
 `relaxed_top_pick_away_grasp` actions are not automatic hardware actions because
 they deliberately ignore current grasp blockers.
-When at least one executable full-scene `pick_away` candidate exists, the
-workflow chooses the highest-ranked pick-away deterministically before asking
-the LLM to choose among nudge candidates. This keeps directly graspable
-obstacles from being converted into less stable pushes.
+By default, the legacy selector still ranks executable clearance candidates
+inside code. To move the final clearance decision to the VLM/LLM policy, enable:
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  ... \
+  --use-vlm-clearance-policy
+```
+
+With this flag enabled, `pick_away` and `nudge` remain normal physical action
+interfaces, but code does not choose between them by `score`, `target_yaw_gain`,
+`after_grasp_feasible`, task benefit, or other geometric reward fields. Code
+only generates physical candidates, runs collision/workspace/gripper checks,
+runs MoveIt preflight when hardware execution is requested, and applies the
+final safety gate. The VLM receives the current scene image, compact object
+facts, task state, and `physical_clearance_candidates.json`; it must choose one
+existing `candidate_id` or return `none`/`reobserve`.
+
+The policy prompt enforces:
+
+- current target graspable => prefer target pick;
+- otherwise choose the most reasonable clearance object;
+- do not move the base or completed stack;
+- do not damage future task objects;
+- prefer minimal disturbance and releasing current target grasp space;
+- choose `nudge` or `pick_away` from the provided physical candidates only;
+- never output coordinates, joints, velocities, ROS topics, or new actions.
+
+The required output is strict JSON:
+
+```json
+{
+  "selected_candidate_id": "...",
+  "decision_type": "pick|place|nudge|pick_away|reobserve|none",
+  "object_id": 0,
+  "target_object_id": 0,
+  "reason": "...",
+  "confidence": 0.0,
+  "need_reobserve_after_action": true
+}
+```
+
+The final code-side safety gate accepts a selected candidate only when all are
+true: `collision_free`, `moveit_feasible`, `sweep_collision_free`,
+`workspace_feasible`, and `gripper_feasible`. If the VLM returns invalid JSON,
+an unknown candidate id, `none`/`reobserve`, or a candidate failing any gate, the
+workflow records `rejected_by_safety_gate` and stops fail-safe. It does not fall
+back to the highest geometry score.
 
 Each evaluated action receives a stable `candidate_id`.
 `all_clearance_action_candidates.json` contains a compact scored summary.
@@ -256,11 +301,11 @@ contains only executable candidates with
 `push_swept_safe=true`, `push_end_safe=true`, `task_effective=true`, and
 `protected_structure_safe=true`. Full nested evaluator dumps are written only
 with `--debug-dump-full-candidates`. When LLM selection is enabled, the LLM
-receives only `safe_clearance_candidates`. It may choose one `candidate_id`; it
-cannot introduce a new direction, obstacle, or action. If the LLM is unavailable
-or returns an unknown/unsafe id, the workflow falls back to the highest code
-score from the safe list. If the safe list is empty, no selected clearance action
-is produced.
+receives only `safe_clearance_candidates`. It may choose one `candidate_id`;
+it cannot introduce a new direction, obstacle, or action. This is the legacy
+selector used when `--use-vlm-clearance-policy` is not enabled; in that legacy
+mode only, an unavailable LLM may fall back to the highest code score from the
+safe list. The VLM policy path described above never uses that fallback.
 
 Before the first placement, stack estimation is anchored to the requested base
 object only. Nearby loose blocks inside the search radius are not allowed to
@@ -269,7 +314,7 @@ scoped confirmation checks both XY and Z; a same-label object near the planned
 XY but with a height error larger than `--post-place-match-z-tolerance-m`
 (default `0.025 m`) is treated as missing instead of confirming the placement.
 
-LLM push selection is enabled by default and can be disabled explicitly:
+Legacy LLM push selection is enabled by default and can be disabled explicitly:
 
 ```bash
 python3 tools/workflows/stack_demo_pipeline.py \
@@ -308,6 +353,12 @@ cycle_*/selected_clearance_action.json
 cycle_*/clearance_verification.json
 cycle_*/clearance_step_XX_moveit_preflight.json
 cycle_*/clearance_step_XX_llm_selection.json
+cycle_*/objects_for_vlm.json
+cycle_*/task_state_for_vlm.json
+cycle_*/physical_clearance_candidates.json
+cycle_*/vlm_clearance_policy_input.json
+cycle_*/vlm_clearance_policy_output.json
+cycle_*/final_safety_gate.json
 cycle_*/clearance_step_XX_result.json
 cycle_*/multi_step_clearance_summary.json
 ```

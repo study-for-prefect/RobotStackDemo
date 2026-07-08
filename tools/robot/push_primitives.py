@@ -46,6 +46,12 @@ def build_push_targets(push_plan: Dict[str, Any]) -> Dict[str, List[float]]:
         raise ValueError("lift_m must be in [0.02, 0.30].")
     if not math.isfinite(contact_z_offset_m) or not 0.0 <= contact_z_offset_m <= 0.10:
         raise ValueError("contact_z_offset_m must be in [0.0, 0.10].")
+    min_contact_offset = max(0.004, min(0.012, 0.20 * size[2]))
+    if contact_z_offset_m < min_contact_offset:
+        raise ValueError(
+            "contact_z_offset_m {:.4f} is too low for obstacle height {:.4f}; "
+            "raise the push contact to avoid table contact.".format(contact_z_offset_m, size[2])
+        )
     max_contact_offset = max(0.004, 0.75 * size[2])
     if contact_z_offset_m > max_contact_offset:
         raise ValueError(

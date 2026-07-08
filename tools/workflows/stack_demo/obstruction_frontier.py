@@ -577,6 +577,8 @@ def build_frontier_clearance_plan(
                             "current_blocker_count": evaluation.get("current_blocker_count"),
                             "predicted_blocker_count": evaluation.get("predicted_blocker_count"),
                             "blocker_count_reduction": evaluation.get("blocker_count_reduction", 0),
+                            "distance_reference_object_id": relation_target.get("id"),
+                            "distance_reference_is_current_target": _object_id(relation_target) == _object_id(target),
                             "target_distance_before_m": evaluation.get("target_distance_before_m"),
                             "target_distance_after_m": evaluation.get("target_distance_after_m"),
                             "target_distance_delta_m": evaluation.get("target_distance_delta_m"),
