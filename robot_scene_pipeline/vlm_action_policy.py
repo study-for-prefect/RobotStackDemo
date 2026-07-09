@@ -55,6 +55,8 @@ def build_vlm_action_decision_input(
         "base_frame": current_state.get("base_frame", "base_link"),
         "instruction": current_state.get("instruction"),
         "clearance_step_index": int(step_index),
+        "current_task_target_object_id": target_object.get("id"),
+        "target_object_id_rule": "Must equal current_task_target_object_id. It is not the destination/base/stack-top id.",
         "objects": [
             compact_object_for_action_policy(obj)
             for obj in current_state.get("objects", [])
@@ -76,6 +78,11 @@ def build_vlm_action_decision_input(
             "placed_order": structure.get("placed_order", []),
             "current_top": structure.get("current_top"),
         },
+        "stack_reference": {
+            "base_object_id": base_id,
+            "protected_object_ids": [value for value in protected_ids or []],
+            "note": "These are placement/protection references, not target_object_id for the action JSON.",
+        },
         "policy_role_split": {
             "vlm": "high_level_action_intent_only",
             "code": "physical_feasibility_safety_validation_and_execution",
@@ -84,7 +91,7 @@ def build_vlm_action_decision_input(
         "output_schema": {
             "action_type": "pick|nudge|pick_away|reobserve|stop",
             "object_id": "int|string|null",
-            "target_object_id": "int|string|null",
+            "target_object_id": "must equal current_task_target_object_id; never use base/current_top/destination id here",
             "push_direction_base": "[x,y,z] unit vector in base_link, required for nudge",
             "push_distance_m": "0.01..0.05, required for nudge",
             "safe_place_center_base_m": "[x,y,z] in base_link, required for pick_away",
@@ -150,12 +157,15 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         "图片只用于核对带编号物体；结构化输入中的 base_link 坐标、尺寸、bbox 和任务状态是决策依据。\n"
         "不要输出关节角、轨迹、速度、ROS 控制命令或相机内参。\n\n"
         "你必须自己决定动作意图：\n"
-        "- pick: 当前任务目标已经适合抓取。\n"
+        "- pick: 当前任务目标已经适合抓取；object_id 必须是 target_object.id。\n"
         "- nudge: 推开某个松散物体；你必须给出 base_link 下的单位方向向量和 0.01 到 0.05 m 的距离。\n"
         "- pick_away: 抓走某个松散物体，并给出 base_link 下的安全临时放置中心 safe_place_center_base_m。\n"
         "- reobserve: 视觉信息不足，需要重新观察。\n"
         "- stop: 没有安全/合理动作。\n\n"
         "约束：不移动 base、placed、locked、protected 物体；优先最小扰动和保护已堆叠结构。\n"
+        "target_object_id 永远表示当前循环的 target_object.id，不是放置参考物、底座、红色基座或 current_top。\n"
+        "如果 action_type=pick，则 object_id 和 target_object_id 都必须等于输入里的 current_task_target_object_id。\n"
+        "如果 action_type=nudge 或 pick_away，则 object_id 是要推/抓走的障碍物，target_object_id 仍然必须等于 current_task_target_object_id。\n"
         "代码会独立验证物理可行性、安全和 MoveIt，不安全会停止。\n\n"
         "只输出严格 JSON：\n"
         "{\n"

@@ -66,6 +66,28 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertFalse(safety["accepted"])
         self.assertIn("object_id_exists", safety["failed_fields"])
 
+    def test_target_object_id_must_be_current_target_not_base(self):
+        selected, safety = vlm_action_policy.validate_vlm_action_decision(
+            {
+                "action_type": "pick",
+                "object_id": 1,
+                "target_object_id": 3,
+                "reason": "wrongly used placement base as target",
+                "confidence": 0.9,
+                "raw_decision": {},
+            },
+            _scene(),
+            _target(),
+            protected_ids=[3],
+            analysis={"grasp_feasible": True, "selected_grasp_yaw_deg": 0.0},
+        )
+
+        detail = safety["checks"]["target_object_id_matches_current_target"]["detail"]
+        self.assertIsNone(selected)
+        self.assertIn("target_object_id_matches_current_target", safety["failed_fields"])
+        self.assertEqual(detail["expected_current_target_object_id"], 1)
+        self.assertEqual(detail["actual_target_object_id"], 3)
+
     def test_locked_or_protected_object_rejected(self):
         scene = _scene()
         scene["objects"][1]["state"] = "locked"
@@ -172,6 +194,24 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertEqual(raw["call_status"], "fail_safe_stop")
         self.assertEqual(raw["decision"]["action_type"], "stop")
         self.assertIn("vlm_json_or_call_failed", raw["decision"]["reason"])
+
+    def test_action_input_disambiguates_target_id_from_stack_reference(self):
+        payload = vlm_action_policy.build_vlm_action_decision_input(
+            "/tmp/scene.png",
+            "/tmp/overlay.png",
+            _scene(),
+            _target(),
+            {"grasp_feasible": True, "selected_grasp_yaw_deg": 0.0},
+            protected_ids=[3],
+            base_id=3,
+            memory={"structure": {"base": "base_block", "current_top": "base_block", "placed_order": ["base_block"]}},
+            step_index=1,
+        )
+        prompt = vlm_action_policy.build_vlm_action_prompt(payload)
+
+        self.assertEqual(payload["current_task_target_object_id"], 1)
+        self.assertIn("not target_object_id", payload["stack_reference"]["note"])
+        self.assertIn("target_object_id 永远表示当前循环的 target_object.id", prompt)
 
 
 def _scene():

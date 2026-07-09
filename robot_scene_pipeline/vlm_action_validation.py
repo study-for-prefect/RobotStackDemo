@@ -43,8 +43,18 @@ def validate_vlm_action_decision(
     object_map = {str(obj.get("id")): obj for obj in objects if obj.get("id") is not None}
     obj = object_map.get(str(decision.get("object_id"))) if decision.get("object_id") is not None else None
     target_matches = str(decision.get("target_object_id")) == str(target_object.get("id"))
-    _record(safety, "object_id_exists", obj is not None)
-    _record(safety, "target_object_id_matches_current_target", target_matches)
+    _record(safety, "object_id_exists", obj is not None, {"object_id": decision.get("object_id")})
+    _record(
+        safety,
+        "target_object_id_matches_current_target",
+        target_matches,
+        {
+            "expected_current_target_object_id": target_object.get("id"),
+            "actual_target_object_id": decision.get("target_object_id"),
+            "selected_object_id": decision.get("object_id"),
+            "note": "target_object_id is the current loop target, not the placement base/current_top.",
+        },
+    )
     if obj is None or not target_matches:
         safety["reason"] = "object_or_target_validation_failed"
         return None, safety
