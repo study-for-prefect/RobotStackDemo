@@ -29,6 +29,8 @@ def _candidate_summary(candidate: dict) -> dict:
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
         "selected_grasp_yaw_deg", "predicted_selected_grasp_yaw_deg", "safe_place_center_m",
         "grasp_policy", "relaxed_pick_away_grasp", "ignored_grasp_blockers",
+        "contact_z_offset_m", "raw_contact_z_offset_m", "min_contact_z_offset_m",
+        "contact_z_offset_source", "requested_contact_z_offset_m",
         "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
         "protected_structure_safe", "task_effective", "direct_clearance_candidate", "direct_progress_candidate",
         "enabling_clearance_candidate", "exploratory", "automatic_execution_allowed",
@@ -314,6 +316,8 @@ def _selected_push_from_clearance_action(selected_action: dict) -> dict:
         "distance_m": selected_action.get("distance_m"),
         "direction_source": selected_action.get("direction_source"),
         "direction_score": selected_action.get("score"),
+        "contact_z_offset_m": selected_action.get("contact_z_offset_m"),
+        "requested_contact_z_offset_m": selected_action.get("requested_contact_z_offset_m"),
         "selected_grasp_yaw_deg": selected_action.get("selected_grasp_yaw_deg"),
         "predicted_selected_grasp_yaw_deg": (
             selected_action.get("predicted_selected_grasp_yaw_deg")

@@ -48,6 +48,15 @@ def parse_args() -> argparse.Namespace:
         default=0.015,
         help="Contact z offset above table for push clearing.",
     )
+    parser.add_argument(
+        "--push-clearing-min-contact-z-offset-m",
+        type=float,
+        default=0.020,
+        help=(
+            "Minimum closed-gripper TCP contact z offset above the estimated table for push clearing. "
+            "This safety floor is only for nudge/push clearing, not normal pick height."
+        ),
+    )
     parser.add_argument("--push-tool-width-m", type=float, default=0.035)
     parser.add_argument("--push-tool-safety-margin-m", type=float, default=0.005)
     parser.add_argument("--grasp-gripper-side-clearance-m", type=float, default=0.006)

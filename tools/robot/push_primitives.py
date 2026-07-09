@@ -16,6 +16,47 @@ def _finite_vector(value: Any, length: int, name: str) -> List[float]:
     return output
 
 
+def _finite_optional_float(value: Any, default: float, name: str) -> float:
+    if value is None:
+        return float(default)
+    try:
+        output = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("{} must be numeric.".format(name))
+    if not math.isfinite(output):
+        raise ValueError("{} must be finite.".format(name))
+    return output
+
+
+def push_contact_z_offset_m(push_plan: Dict[str, Any], obstacle_height_m: float) -> float:
+    """Return the contact offset after applying the closed-gripper table clearance floor."""
+    contact_z_offset_m = _finite_optional_float(
+        push_plan.get("contact_z_offset_m"),
+        0.0,
+        "contact_z_offset_m",
+    )
+    min_contact_z_offset_m = _finite_optional_float(
+        push_plan.get("min_contact_z_offset_m"),
+        0.0,
+        "min_contact_z_offset_m",
+    )
+    if not 0.0 <= contact_z_offset_m <= 0.10:
+        raise ValueError("contact_z_offset_m must be in [0.0, 0.10].")
+    if not 0.0 <= min_contact_z_offset_m <= 0.10:
+        raise ValueError("min_contact_z_offset_m must be in [0.0, 0.10].")
+
+    applied_offset_m = max(contact_z_offset_m, min_contact_z_offset_m)
+    max_contact_offset = max(0.004, 0.75 * float(obstacle_height_m))
+    if applied_offset_m > max_contact_offset:
+        raise ValueError(
+            "contact_z_offset_m {:.4f} is too high for obstacle height {:.4f}; "
+            "closed-gripper push would need a contact above the safe push band. "
+            "Use pick-away, raise only after verifying hardware clearance, or lower "
+            "min_contact_z_offset_m explicitly.".format(applied_offset_m, obstacle_height_m)
+        )
+    return applied_offset_m
+
+
 def build_push_targets(push_plan: Dict[str, Any]) -> Dict[str, List[float]]:
     """Validate one push plan and return pre-push, contact, push, and retreat targets."""
     if push_plan.get("schema_version") != "push_execution_plan_v1":
@@ -39,19 +80,11 @@ def build_push_targets(push_plan: Dict[str, Any]) -> Dict[str, List[float]]:
 
     distance_m = float(push_plan.get("distance_m"))
     lift_m = float(push_plan.get("lift_m"))
-    contact_z_offset_m = float(push_plan.get("contact_z_offset_m"))
     if not math.isfinite(distance_m) or not 0.0 < distance_m <= 0.20:
         raise ValueError("distance_m must be in (0.0, 0.20].")
     if not math.isfinite(lift_m) or not 0.02 <= lift_m <= 0.30:
         raise ValueError("lift_m must be in [0.02, 0.30].")
-    if not math.isfinite(contact_z_offset_m) or not 0.0 <= contact_z_offset_m <= 0.10:
-        raise ValueError("contact_z_offset_m must be in [0.0, 0.10].")
-    max_contact_offset = max(0.004, 0.75 * size[2])
-    if contact_z_offset_m > max_contact_offset:
-        raise ValueError(
-            "contact_z_offset_m {:.4f} is too high for obstacle height {:.4f}; "
-            "use pick-away or a lower push contact.".format(contact_z_offset_m, size[2])
-        )
+    contact_z_offset_m = push_contact_z_offset_m(push_plan, size[2])
 
     contact_margin = max(size[0], size[1]) * 0.5 + 0.015
     push_start_xy = [

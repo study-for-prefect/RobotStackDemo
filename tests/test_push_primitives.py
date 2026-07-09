@@ -36,6 +36,27 @@ def test_push_targets():
     assert targets["retreat"] == [0.455, 0.1, 0.07]
 
 
+def test_push_targets_apply_closed_gripper_table_clearance_floor():
+    plan = {
+        "schema_version": "push_execution_plan_v1",
+        "frame_id": "base_link",
+        "direction_base": [-1.0, 0.0, 0.0],
+        "distance_m": 0.05,
+        "lift_m": 0.05,
+        "contact_z_offset_m": 0.015,
+        "min_contact_z_offset_m": 0.020,
+        "obstacle": {
+            "geometry_center_m": [0.46, 0.10, 0.02],
+            "dimensions_m": [0.06, 0.03, 0.03],
+        },
+    }
+    targets = build_push_targets(plan)
+    assert targets["contact"] == [0.505, 0.1, 0.025]
+    assert targets["push_end"] == [0.455, 0.1, 0.025]
+    assert abs(targets["pre_push"][2] - 0.075) < 1e-9
+    assert abs(targets["retreat"][2] - 0.075) < 1e-9
+
+
 def test_nudge_execution_plan_preserves_current_tool_orientation():
     args = SimpleNamespace(
         push_clearing_distance_m=0.025,
@@ -64,6 +85,10 @@ def test_nudge_execution_plan_preserves_current_tool_orientation():
     assert plan["target_yaw_deg"] is None
     assert plan["target_yaw_valid"] is False
     assert plan["reference_target_yaw_deg"] == 91.41
+    assert plan["raw_contact_z_offset_m"] == 0.015
+    assert plan["min_contact_z_offset_m"] == 0.020
+    assert plan["contact_z_offset_m"] == 0.020
+    assert plan["contact_z_offset_source"] == "raised_to_closed_gripper_table_clearance_floor"
 
 
 def test_push_targets_reject_contact_above_thin_obstacle():
@@ -417,6 +442,7 @@ def test_push_execution_plan_records_reference_yaw_without_motion_orientation():
 
 if __name__ == "__main__":
     test_push_targets()
+    test_push_targets_apply_closed_gripper_table_clearance_floor()
     test_push_targets_reject_contact_above_thin_obstacle()
     test_direction_evaluation_selects_open_side()
     test_direction_evaluation_reports_no_safe_direction()

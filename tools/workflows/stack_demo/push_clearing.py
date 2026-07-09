@@ -460,9 +460,12 @@ def build_push_execution_plan(
     reference_yaw_valid = reference_yaw is not None
     orientation_policy = selected_push.get("push_orientation_policy") or "preserve_current_tool_orientation"
     requested_contact_z_offset = float(args.push_clearing_contact_z_offset_m)
+    min_contact_z_offset = float(getattr(args, "push_clearing_min_contact_z_offset_m", 0.020))
     contact_z_offset = selected_push.get("contact_z_offset_m")
     if contact_z_offset is None:
         contact_z_offset = effective_push_contact_z_offset_m(obstacle, requested_contact_z_offset)
+    raw_contact_z_offset = float(contact_z_offset)
+    contact_z_offset = max(raw_contact_z_offset, min_contact_z_offset)
     return {
         "schema_version": "push_execution_plan_v1",
         "frame_id": "base_link",
@@ -474,6 +477,12 @@ def build_push_execution_plan(
         "distance_m": selected_push.get("distance_m", args.push_clearing_distance_m),
         "lift_m": args.push_clearing_lift_m,
         "contact_z_offset_m": float(contact_z_offset),
+        "raw_contact_z_offset_m": raw_contact_z_offset,
+        "min_contact_z_offset_m": min_contact_z_offset,
+        "contact_z_offset_source": (
+            "raised_to_closed_gripper_table_clearance_floor" if contact_z_offset > raw_contact_z_offset
+            else "selected_or_effective_push_contact"
+        ),
         "requested_contact_z_offset_m": requested_contact_z_offset,
         "push_orientation_policy": orientation_policy,
         "target_yaw_deg": None,

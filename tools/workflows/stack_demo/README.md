@@ -188,6 +188,10 @@ Frontier clearing 的候选动作统一评分：
   `safe_clearance_candidates`；系统应继续清障或等待人工确认，不能忽略
   真实 blocker 硬抓。
 - `nudge`: 障碍物不可抓或 pick_away 不安全时，才生成小距离拨动候选，默认距离 `0.025 m`。
+  nudge 会把夹爪闭合作为刚性拨片使用，因此最终 push plan 会对 TCP 接触高度应用
+  `--push-clearing-min-contact-z-offset-m`（默认 `0.020 m`）的桌面安全下限。
+  这个下限只影响清障 push，不改变正常 pick 的抓取高度。若很薄的障碍物需要低于该
+  下限才可能接触，MoveIt 预检会拒绝该 nudge，系统应改用 pick-away 或人工确认后再显式调参。
 - `direct_target_gain`: 清除后目标可抓 yaw 数量增加，或目标变得可抓。
 - `enabling_gain`: 清除后关键 blocker 变得可抓、可推，或释放其接近/扫掠通道。
 - `free_space_gain`: 清除后产生新的局部空隙、安全接近通道或临时落点。
