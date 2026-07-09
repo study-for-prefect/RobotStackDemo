@@ -313,6 +313,13 @@ become the stack top before anything has actually been placed. After a place,
 scoped confirmation checks both XY and Z; a same-label object near the planned
 XY but with a height error larger than `--post-place-match-z-tolerance-m`
 (default `0.025 m`) is treated as missing instead of confirming the placement.
+For stacked blocks, detector geometry may report a merged object whose center Z
+is lower than the planned release height while `top_z_base_m` correctly matches
+the placed stack top. Post-place critical matching therefore accepts either
+center-Z or top-Z agreement, then still verifies stack growth before continuing.
+If label/template reacquisition is still missing but stack growth is valid, the
+placement is accepted as `stack_growth_geometry` and the placed memory object is
+restored to `placed` instead of blocking the next pick.
 
 Legacy LLM push selection is enabled by default and can be disabled explicitly:
 

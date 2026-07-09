@@ -2,7 +2,10 @@
 
 from robot_scene_pipeline.scene_memory import update_from_detections, update_from_scoped_detections
 from tools.workflows.stack_demo.observation_scope import _scope_report, expected_placed_template
-from tools.workflows.stack_demo.post_place_observation import _planned_height_fallback
+from tools.workflows.stack_demo.post_place_observation import (
+    _planned_height_fallback,
+    _restore_geometry_confirmed_placed_memory,
+)
 
 
 def detection(label, center, size=(0.04, 0.04, 0.03)):
@@ -133,10 +136,62 @@ def test_post_place_scope_rejects_xy_match_with_bad_height():
     assert missing[0]["template_id"] == 3
 
 
+def test_post_place_scope_accepts_stack_detection_by_top_z():
+    template = {
+        "id": 1,
+        "label": "square blue",
+        "geometry_center_m": [0.2854, 0.1899, 0.05775],
+    }
+    stacked_detection = {
+        "id": 1,
+        "label": "square blue",
+        "geometry_center_m": [0.286, 0.1916, 0.0184],
+        "dimensions_m": [0.0237, 0.0236, 0.0752],
+        "top_z_base_m": 0.0559,
+    }
+    observed, missing = _scope_report(
+        {"objects": [stacked_detection]},
+        [template],
+        max_dist_m=0.07,
+        max_z_delta_m=0.025,
+    )
+    assert missing == []
+    assert observed[0]["template_id"] == 1
+
+
+def test_geometry_confirmed_post_place_restores_memory_state():
+    memory = {
+        "objects": {
+            "square_blue_1": {
+                "label": "square blue",
+                "state": "unconfirmed_missing",
+                "visible": False,
+                "pushable": False,
+                "graspable": False,
+                "observation_confidence": 0.15,
+                "missing_observation_scope": "after_place",
+                "unconfirmed_missing_count": 1,
+            }
+        }
+    }
+    report = {
+        "status": "critical_missing",
+        "critical_memory_ids": ["square_blue_1"],
+    }
+    restored = _restore_geometry_confirmed_placed_memory(memory, report)
+    obj = restored["objects"]["square_blue_1"]
+    assert obj["state"] == "placed"
+    assert obj["post_place_confirmed_by"] == "stack_growth_geometry"
+    assert obj["observation_confidence"] == 0.7
+    assert "missing_observation_scope" not in obj
+
+
 if __name__ == "__main__":
     test_scoped_update_keeps_missing_objects_low_confidence_not_operable()
     test_scoped_update_marks_missing_critical_as_unconfirmed_missing()
     test_expected_placed_template_uses_tcp_place_center()
     test_planned_height_fallback_accepts_confirmed_placed_object_xy()
     test_post_place_scope_rejects_xy_match_with_bad_height()
+    test_post_place_scope_accepts_stack_detection_by_top_z()
+    test_geometry_confirmed_post_place_restores_memory_state()
     print("scoped observation memory tests passed")

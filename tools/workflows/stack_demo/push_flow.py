@@ -723,12 +723,12 @@ def handle_push_clearing_before_pick(
         evaluate_push_fn=evaluate_push_candidates,
     )
     if vlm_policy_enabled and top_pick_away is not None:
-        frontier_plan["all_clearance_action_candidates"] = _dedupe_candidates_by_id(
+        frontier_plan["all_clearance_action_candidates"] = dedupe_candidates_by_id(
             [top_pick_away] + list(frontier_plan.get("all_clearance_action_candidates", []))
         )
     frontier_plan["debug_dump_full_candidates"] = bool(getattr(args, "debug_dump_full_candidates", False))
     if vlm_policy_enabled:
-        selected_clearance, llm_selection, final_safety_gate, preflight_report = _select_clearance_with_vlm_policy(
+        selected_clearance, llm_selection, final_safety_gate, preflight_report = select_clearance_with_vlm_policy(
             args,
             cycle_dir,
             current_state,

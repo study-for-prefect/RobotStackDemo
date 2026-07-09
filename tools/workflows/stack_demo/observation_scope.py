@@ -63,12 +63,41 @@ def _matching_object(
     if max_z_delta_m is not None and template_center is not None:
         candidates = [
             obj for obj in candidates
-            if abs(_finite_xyz(obj)[2] - template_center[2]) <= float(max_z_delta_m)
+            if _z_matches_template(obj, template_center[2], float(max_z_delta_m))
         ]
     candidates.sort(key=lambda obj: _xy_distance(obj, template))
     if candidates and _xy_distance(candidates[0], template) <= float(max_dist_m):
         return candidates[0]
     return None
+
+
+def _object_top_z(obj: ObjectDict) -> Optional[float]:
+    for key in ("top_z_base_m", "top_z_m", "top_z", "geometry_top_z_m"):
+        value = obj.get(key)
+        if value is None:
+            continue
+        try:
+            top_z = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(top_z):
+            return top_z
+    center = _finite_xyz(obj)
+    size = obj.get("dimensions_m") or obj.get("size_m")
+    if center is None or not isinstance(size, (list, tuple)) or len(size) < 3:
+        return None
+    try:
+        return float(center[2]) + 0.5 * float(size[2])
+    except (TypeError, ValueError):
+        return None
+
+
+def _z_matches_template(obj: ObjectDict, template_z_m: float, max_z_delta_m: float) -> bool:
+    center = _finite_xyz(obj)
+    if center is not None and abs(float(center[2]) - float(template_z_m)) <= float(max_z_delta_m):
+        return True
+    top_z = _object_top_z(obj)
+    return top_z is not None and abs(float(top_z) - float(template_z_m)) <= float(max_z_delta_m)
 
 
 def _memory_id_for_template(memory: dict, template: ObjectDict, max_dist_m: float) -> Optional[str]:
@@ -212,6 +241,7 @@ def observe_empty_with_scope(
     description: str = "Post-action observation",
     allow_critical_label_fallback: bool = False,
     critical_match_z_tolerance_m: Optional[float] = None,
+    fail_on_missing_critical: bool = True,
 ) -> Tuple[Optional[dict], dict, dict]:
     critical = [copy.deepcopy(obj) for obj in critical_templates if isinstance(obj, dict)]
     noncritical = [copy.deepcopy(obj) for obj in (noncritical_templates or []) if isinstance(obj, dict)]
@@ -314,7 +344,7 @@ def observe_empty_with_scope(
         "missing_critical": selected_missing,
     }
     write_json(os.path.join(output_dir, "scoped_observation_report.json"), report)
-    if selected_missing:
+    if selected_missing and fail_on_missing_critical:
         raise RuntimeError(
             "{} refused to continue: critical objects still missing after scoped recovery: {}".format(
                 description,

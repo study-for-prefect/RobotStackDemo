@@ -10,6 +10,24 @@ from .observation_scope import expected_placed_template, observe_empty_with_scop
 from .scene import estimate_current_stack
 
 
+def _restore_geometry_confirmed_placed_memory(memory: dict, post_place_observation: dict) -> dict:
+    if post_place_observation.get("status") != "critical_missing":
+        return memory
+    for obj_id in post_place_observation.get("critical_memory_ids", []):
+        obj = memory.get("objects", {}).get(str(obj_id))
+        if obj is None:
+            continue
+        obj["state"] = "placed"
+        obj["visible"] = False
+        obj["graspable"] = False
+        obj["pushable"] = False
+        obj["observation_confidence"] = max(float(obj.get("observation_confidence", 0.0)), 0.7)
+        obj["post_place_confirmed_by"] = "stack_growth_geometry"
+        obj.pop("missing_observation_scope", None)
+        obj.pop("unconfirmed_missing_count", None)
+    return memory
+
+
 def _planned_height_fallback(
     held_object: dict,
     place_step: dict,
@@ -79,6 +97,7 @@ def handle_post_place_observation(
         scope_name="after_place",
         description="Post-place scoped observation",
         critical_match_z_tolerance_m=getattr(args, "post_place_match_z_tolerance_m", 0.025),
+        fail_on_missing_critical=False,
     )
     if post_place_state is not None:
         current_state = post_place_state
@@ -118,4 +137,5 @@ def handle_post_place_observation(
                 post_place_verification["reason"],
             )
         )
+    memory = _restore_geometry_confirmed_placed_memory(memory, post_place_observation)
     return current_state, memory, post_place_stack
