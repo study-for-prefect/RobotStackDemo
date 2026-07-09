@@ -82,6 +82,28 @@ python3 tools/workflows/stack_demo_pipeline.py \
 
 涉及真实机械臂运动的命令默认只规划或采集；确认 UR5、MoveIt、TF、相机和夹爪状态后，再显式添加 `--execute`。yaw 角误差检测不要手动转动末端，使用 `yaw_rotation_probe.py --record-mode auto --execute` 让代码只改变目标 yaw 后自动记录。检验位姿的 `tool0` XYZ 写在 `config/yaw_rotation_probe_pose.json`，姿态由代码固定为 tool0 `+Z` 对准 base_link `-Z`，只允许 yaw 变化。
 
+## 运行前 TF 检查
+
+闭环堆叠依赖 `base_link <- camera_color_optical_frame` 和
+`base_link <- tool0` 同时连通。`scripts/start_robot_stack_tmux.sh` 会先删除旧
+`/tmp/scene_tf_base_color_optical.json`，再由 TF bridge 周期性刷新；perception
+server 会等 fresh TF JSON 出现后再启动。`scripts/run_stack_task.sh` 在真正执行前
+还会用 `/usr/bin/python3 tools/robot/tf_lookup_json.py --once --require-tool`
+强制刷新一次，避免使用旧 TF。
+
+如果只看到 `Known TF frames`，并且 frame 列表里 `camera_link` 挂在
+`wrist_3_link` 下、`base_link` 挂在 `world` 下，但缺少
+`shoulder_link -> ... -> wrist_3_link` 这段 UR 动态链，说明不是 LLM 没决策，
+而是 base 到相机/末端的 TF 树断开。先检查：
+
+```bash
+ros2 topic echo /joint_states --once
+ros2 run tf2_ros tf2_echo base_link wrist_3_link
+```
+
+若这两项失败，先恢复 UR driver、robot_state_publisher / MoveIt、hand-eye
+static TF，并确认所有终端的 `ROS_DOMAIN_ID` / RMW 配置一致。
+
 ## 相机启动方式
 
 项目内默认不直接打开 D435i 设备，而是订阅外部 ROS 2 RealSense 驱动发布的已对齐 RGB-D 话题。先在项目外终端启动相机驱动，例如：

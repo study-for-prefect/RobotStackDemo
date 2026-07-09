@@ -24,6 +24,8 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
+rm -f "$TF_JSON"
+
 tmux new-session -d -s "$SESSION" -n ur_driver "
 source /opt/ros/humble/setup.bash
 if [ -f /home/wxm/realsense_ws/install/setup.bash ]; then
@@ -110,13 +112,16 @@ fi
 cd $PROJECT
 
 while true; do
+  echo \"[tf_bridge] checking base_link<-camera_color_optical_frame and base_link<-tool0 ...\"
   python3 tools/robot/tf_lookup_json.py \
     --base-frame base_link \
     --camera-frame camera_color_optical_frame \
     --tool-frame tool0 \
     --require-tool \
-    --output $TF_JSON
-  sleep 0.5
+    --output $TF_JSON \
+    --timeout 3.0 \
+    --once
+  sleep 1.0
 done
 "
 
@@ -134,6 +139,11 @@ fi
 source $HOME/miniconda3/etc/profile.d/conda.sh
 conda activate yolo
 cd $PROJECT
+
+while [ ! -f $TF_JSON ]; do
+  echo \"[perception] waiting for fresh TF JSON: $TF_JSON\"
+  sleep 1.0
+done
 
 python3 -m robot_scene_pipeline.perception_server \
   --detector-weight models/yolo/weights/best.pt \

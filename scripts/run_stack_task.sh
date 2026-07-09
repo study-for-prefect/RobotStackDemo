@@ -57,6 +57,22 @@ if [ ! -f /tmp/scene_tf_base_color_optical.json ]; then
   exit 1
 fi
 
+echo "检查并刷新 TF：base_link <- camera_color_optical_frame, tool0"
+/usr/bin/python3 tools/robot/tf_lookup_json.py \
+  --base-frame base_link \
+  --camera-frame camera_color_optical_frame \
+  --tool-frame tool0 \
+  --require-tool \
+  --output /tmp/scene_tf_base_color_optical.json \
+  --timeout 3.0 \
+  --once || {
+    echo
+    echo "ERROR: TF 未就绪。通常是 UR 动态关节 TF 没有发布，或 ROS_DOMAIN_ID/RMW 环境不一致。"
+    echo "请先确认：ros2 topic echo /joint_states --once"
+    echo "再确认：ros2 run tf2_ros tf2_echo base_link wrist_3_link"
+    exit 1
+  }
+
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 OUTPUT_DIR="runtime/stack_push_execute_${RUN_ID}"
 
