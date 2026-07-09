@@ -18,7 +18,6 @@ from tools.workflows.stack_demo.pick import build_offline_pick_plan
 from tools.workflows.stack_demo.placement import build_frozen_place_step, validate_place_second_snapshot
 from tools.workflows.stack_demo.push_clearing import (
     current_protected_structure_ids,
-    pushable_blocking_relations,
     relation_objects_with_protected_structure,
 )
 
@@ -40,16 +39,6 @@ def target_analysis(relations):
     matches = [relation for relation in relations if relation.get("type") == "target_grasp_analysis"]
     assert len(matches) == 1
     return matches[0]
-
-
-def push_candidates(objects, relations, target_id):
-    return pushable_blocking_relations(
-        {"objects": objects},
-        relations,
-        target_id,
-        base_id=None,
-        previous_locked_stack=None,
-    )
 
 
 def test_near_relation():
@@ -126,7 +115,6 @@ def test_side_block_in_row_uses_continuous_pick_yaw_without_push():
     assert analysis["action"] == "pick"
     assert analysis["grasp_feasible"] is True
     assert analysis["selected_grasp_yaw_deg"] not in fixed_yaws
-    assert not push_candidates(objects, relations, "target")
 
 
 def test_grasp_yaw_prefers_target_axis_over_extra_clearance():
@@ -192,7 +180,6 @@ def test_close_square_row_uses_top_grasp_equivalent_yaw_without_push():
     assert analysis["action"] == "pick"
     assert analysis["grasp_feasible"] is True
     assert analysis["selected_grasp_yaw_deg"] is not None
-    assert not push_candidates(objects, relations, 0)
 
 
 def test_adjacent_center_gap_blocker_allows_perpendicular_green_grasp():
@@ -216,7 +203,6 @@ def test_adjacent_center_gap_blocker_allows_perpendicular_green_grasp():
     assert analysis["action"] == "pick"
     assert analysis["grasp_feasible"] is True
     assert abs(normalize_yaw_signed_180(float(analysis["selected_grasp_yaw_deg"]) - 89.2)) <= 2.0
-    assert not push_candidates([target, blue], relations, 0)
 
 
 def test_signed_yaw_normalization_keeps_small_negative_equivalent():
@@ -248,7 +234,7 @@ def test_loose_objects_block_all_yaws_returns_push_clearing():
     analysis = target_analysis(relations)
     assert analysis["action"] in ("push_clearing", "pick_away")
     assert analysis["all_grasps_blocked"] is True
-    assert push_candidates(objects, relations, "target")
+    assert any(relation.get("type") == "should_push_away" for relation in relations)
 
 
 def test_base_blocks_all_yaws_returns_replan_without_push():
@@ -264,7 +250,6 @@ def test_base_blocks_all_yaws_returns_replan_without_push():
     analysis = target_analysis(relations)
     assert analysis["action"] == "replan_required"
     assert analysis["blocked_by_base"] is True
-    assert not push_candidates(objects, relations, "target")
 
 
 def test_placed_or_locked_structure_blocks_all_yaws_returns_replan_without_push():
@@ -284,7 +269,6 @@ def test_placed_or_locked_structure_blocks_all_yaws_returns_replan_without_push(
         analysis = target_analysis(relations)
         assert analysis["action"] == "replan_required"
         assert analysis[field] is True
-        assert not push_candidates(objects, relations, "target")
 
 
 def test_protected_structure_rebinds_by_template_when_detector_id_changes():

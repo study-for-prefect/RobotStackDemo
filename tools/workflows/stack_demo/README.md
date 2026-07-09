@@ -1,211 +1,99 @@
 # Stack Demo Workflow
 
-`tools/workflows/stack_demo_pipeline.py` remains the single command-line
-entry point. This package separates the workflow by responsibility:
+`tools/workflows/stack_demo_pipeline.py` remains the single command-line entry.
+This workflow is VLM-first: the model decides the initial stack structure and
+each high-level action from the snapshot image plus compact detection JSON.
+
+## Responsibility Split
 
 | Module | Responsibility |
 | --- | --- |
 | `arguments.py` | Command-line options and defaults |
 | `commands.py` | External process commands and observation capture |
-| `scene.py` | Scene lookup, target reacquisition, memory matching, stack estimation |
+| `scene.py` | Initial VLM stack decision, scene lookup, target reacquisition, stack estimation |
+| `push_flow.py` | VLM action loop before each pick |
+| `vlm_action.py` | VLM action-intent workflow glue and MoveIt preflight handoff |
+| `robot_scene_pipeline/vlm_stack_policy.py` | Initial stack-order prompt, call, and validation |
+| `robot_scene_pipeline/vlm_action_policy.py` | Action-intent prompt, parsing, and code-side safety validation |
+| `clearance_execution.py` | Validated nudge and pick-away execution helpers |
 | `pick.py` | Pick plans, motion command construction, dry-run scene simulation |
 | `placement.py` | Place-on-stack geometry and safety validation |
-| `obstruction_frontier.py` | Obstruction graph, frontier candidates, utility/easiness/risk scoring |
-| `clearance_placement.py` | Temporary safe-place selection for pick-away clearance |
-| `clearance_policy.py` | Clearance candidate preflight/executable safety gates |
-| `push_clearing.py` | Push-plan construction and locked-structure annotations |
-| `push_flow.py` | Multi-step push execution, dry-run reporting, re-observation |
-| `push_selection.py` | Legacy LLM/geometry selection among already-safe push candidates |
-| `robot_scene_pipeline/vlm_clearance_policy.py` | VLM task-rule policy input, strict JSON parsing, and final safety gate reports |
-| `target_recovery.py` | Missing-target recovery and high-obstacle clearance relations |
 | `app.py` | Top-level cycle orchestration and final success/failure output |
-| `constants.py` | Shared project paths |
 
-Object identity in this workflow is snapshot-local:
+## VLM Decisions
 
-- `id` is the detector instance id inside the current observation. It is used
-  for pick/place/push planning, but it is not stable across observations.
-- `label` is the detector class name, such as `square green`.
-- `label_id` / `class_id` are YOLO class ids. Objects of the same class share
-  these values; they are not unique instance ids.
-
-After every scoped observation, protected stack objects are rebound from the
-current detector objects by label and geometry template. Do not use an old
-snapshot id as proof that the same physical object still has that id.
-
-Run the workflow through the existing entry:
-
-```bash
-python3 tools/workflows/stack_demo_pipeline.py --help
-```
-
-Hardware execution remains opt-in through `--execute`. The refactor does not
-introduce another executable path or change pick/place behavior.
-
-## Persistent Perception Server
-
-Start perception once before running stack demo:
-
-```bash
-python3 -m robot_scene_pipeline.perception_server \
-  --detector-weight models/yolo/weights/best.pt \
-  --base-frame base_link \
-  --camera-frame camera_color_optical_frame
-```
-
-The server keeps subscribing to `/camera/camera/color/image_raw` and
-`/camera/camera/aligned_depth_to_color/image_raw`, loads YOLO once, and returns
-the latest detections, depth geometry, tabletop geometry, and base-frame
-coordinates on request. `stack_demo_pipeline.py` requests this server by
-default through `--perception-server-url http://127.0.0.1:8765`; it no longer
-starts `robot_scene_pipeline.snapshot_pipeline` as a subprocess unless
-`--allow-snapshot-subprocess-fallback` is explicitly provided.
-
-## Pick Yaw And Close Snapshot
-
-Pick yaw selection is axis-first. The adaptive yaw search still checks obstacle
-clearance, but it now prefers a feasible yaw aligned with the detected block
-principal axis or its 90-degree equivalent before choosing a larger off-axis
-clearance angle. This avoids cases where a square block detected near `0 deg`
-is grasped at `20-30 deg` only because that angle has slightly more clearance.
-
-The selected yaw is written as a signed 180-degree-equivalent angle, so a yaw
-such as `176 deg` is reported as `-4 deg`. The analysis also records
-`selected_grasp_axis_delta_deg`; values near zero mean the final grasp yaw is
-aligned with the block axis.
-
-The close target snapshot after moving above the block is disabled by default.
-The stack workflow now picks from the locked first observation unless this flag
-is explicitly provided:
-
-```bash
-python3 tools/workflows/stack_demo_pipeline.py \
-  ... \
-  --enable-second-pick-snapshot
-```
-
-When the flag is omitted, `pick_second_xy_correction.json` records
-`correction_applied: false` and `fallback:
-use_locked_first_observation_without_second_snapshot`. This is the preferred
-default for stable tabletop stacking because it avoids stopping above the target
-for another RGB-D capture.
-
-When `--enable-second-pick-snapshot` is enabled, the approach pose used for
-that snapshot is `target_position_m.z + --second-snapshot-hover-above-object-m`
-and the default hover distance is `0.10 m`. The correction is no longer
-"believe the second object coordinate"; it measures the current TCP-to-target
-XY error from TF plus the second observation, then applies only that bounded
-delta to the locked first pick plan. The report is still written to
-`pick_second_xy_correction.json`.
-
-## Locked Place Yaw And Calibration
-
-Placement yaw is locked before the pick. With the default
-`--place-yaw-strategy base`, the final held-object close observation is only a
-verification snapshot; it cannot rewrite `target_position_m` or
-`chosen_place_yaw_deg`. If that snapshot reports a different base id, label,
-size, center, Z, or yaw, the workflow writes
-`place_final_held_observation_rejected_use_locked.json` and still executes the
-locked `place_on_top_plan_locked_before_pick.json`.
-
-Use one calibration file for systematic offsets:
-
-```bash
-python3 tools/workflows/stack_demo_pipeline.py \
-  ... \
-  --calibration-json runtime/stack_calibration.json
-```
-
-The file may contain:
+Initial stack decision output:
 
 ```json
 {
-  "affine_xy": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-  "grasp_base_bias_m": [0.0, 0.0, 0.0],
-  "place_base_bias_m": [0.0, 0.0, 0.0],
-  "tcp_offset_tool_m": [0.0, 0.0, 0.15],
-  "max_correction_m": {"xy_m": 0.02, "z_m": 0.015}
+  "base_object_id": 1,
+  "full_stack_order": [1, 2, 3],
+  "stack_order": [2, 3],
+  "structure_plan": {},
+  "reason": "...",
+  "confidence": 0.8
 }
 ```
 
-Pick/place plans record the applied correction source, before/after target
-point, base bias, XY norm, Z magnitude, and limits. `tcp_offset_tool_m` is used
-only by robot motion to convert TCP goals to `tool0`; it is not mixed into
-camera-frame XY compensation.
+Per-step action output:
 
-Pick target height is also bounded by the detected object thickness. The
-configured `--pick-target-lift-m` first proposes a grasp Z from the geometry
-center, then the workflow clamps that Z into `[object_bottom + margin,
-object_top - margin]`; the margin is `--pick-target-z-margin-m` (default
-`0.002 m`, capped at one quarter of object height). Pick plans write
-`pick_grasp_height` and `grasp_final_xyz_m`, so a thin or low-confidence block
-cannot accidentally generate a grasp point above its top surface.
+```json
+{
+  "action_type": "pick|nudge|pick_away|reobserve|stop",
+  "object_id": 2,
+  "target_object_id": 1,
+  "push_direction_base": [1.0, 0.0, 0.0],
+  "push_distance_m": 0.025,
+  "safe_place_center_base_m": [0.20, -0.10, 0.02],
+  "reason": "...",
+  "confidence": 0.8
+}
+```
 
-## 抓取遮挡与 Frontier 清障
+The VLM input uses the original snapshot, optional numbered overlay, bbox,
+base-link object centers, dimensions, object state, protected ids, current
+target, and scene memory. It does not include camera intrinsics or raw robot
+control commands.
 
-抓取遮挡不再是单一 boolean。每次 pick 前会先对目标运行连续 yaw 搜索：
+## Code Safety Gates
 
-- 搜索范围是 `[0, 180)`，因为平行夹爪 180 度等价。
-- 候选 yaw 来自目标主轴、障碍物方向、当前腕部 yaw 偏置和均匀 fallback 采样。
-- 可行候选优先贴近目标主轴；只有主轴附近不可行时才偏离主轴去换取避障空间。
-- 先用粗粒度 `yaw_step_deg` 找候选，再用 `local_refine_step_deg` 细化可行区间。
-- 默认夹爪外宽 `0.112 m`，内宽 `0.048 m`。
-- 抓取阻挡按平行夹爪两侧手指占用带评估；夹爪中间开口不再被当成
-  实心外框。若相邻物体落在开口中线附近，系统可以选择 90 度等价抓取，
-  而不是继续清障。
+Code validates VLM intent before any motion:
 
-`geometry_relations_before_pick.json` 里会写入 `target_grasp_analysis`，包括
-`selected_grasp_yaw_deg`、`feasible_yaw_intervals_deg`、
-`selected_grasp_axis_delta_deg`、`blocked_yaw_intervals_deg`、`all_grasps_blocked` 和
-`blocking_objects_by_interval`。
+- object ids must exist in the current observation;
+- base, locked, placed, protected, or `pushable=false` objects cannot be moved;
+- `nudge` direction must be a base-link unit XY vector and distance must be
+  `0.01..0.05 m`;
+- `nudge` end and swept path must avoid protected structure;
+- `pick_away` must have a VLM-proposed `safe_place_center_base_m` that avoids
+  visible objects, protected structure, future stack regions, and table bounds;
+- hardware clearing actions must pass existing MoveIt preflight before motion.
 
-决策顺序：
+Invalid JSON, unknown ids, unsafe intent, or MoveIt failure stops fail-safe.
+The workflow does not fall back to geometry scores or generated candidates.
 
-1. 如果目标被上方物体压住，返回 `remove_top_object`，不靠旋转夹爪解决。
-2. 否则先选最佳抓取 yaw。
-3. 如果存在可行 yaw，直接 `pick`，并把 `selected_grasp_yaw_deg` 写入 pick plan。
-4. 只有目标没有安全抓取 yaw 时，才构建 `obstruction_graph`。
-5. graph 从直接阻挡目标抓取的障碍开始；若障碍本身不可操作，继续展开阻挡该障碍的二级/三级障碍。
-6. 未标注 `role/state` 的当前检测物体按松散可移动物体评估；`base`、
-   `structure`、`locked`、`placed` 或 `pushable=false` 的物体仍然不可推。
-7. 如果目标 `all_grasps_blocked=true` 且没有可执行清障动作，写入
-   `no_feasible_clearance_action` / `failure_state`，当前目标进入
-   `manual_required`/`replan`，不会继续生成 pick plan，也不会退回
-   `min_area_rect` yaw 硬抓。
+## Logs
 
-Frontier clearing 的候选动作统一评分：
+Initial stage:
 
-- `pick_away`: 障碍物自身有可抓 yaw 时优先生成。若有 `table_bounds`，
-  安全放置点必须在桌面边界内，并默认避开所有当前可见物体，而不是只避开
-  目标/受保护结构；若没有 `table_bounds`，则从已观察到的场景范围中选一个
-  保守放置点。临时清障放置优先选择距离当前目标约 `0.11 m` 的近处空位，
-  并通过 `clearance_safe_place_max_distance_m`（默认 `0.14 m`）限制放太远
-  导致后续目标离开视野。安全放置点还必须避开 `future_place_regions`，
-  避免清障后挡住后续堆叠区域。place plan 会写入 `clearance_place_height`，
-  若目标 XY 下方已有物体，会按局部最高支撑面抬高释放高度，避免同色/邻近
-  清障放置时低空碰撞。只有 `full_scene_grasp` 的 pick-away 可以进入自动执行
-  安全候选。完整场景抓取被邻近散块阻挡时，`relaxed_top_pick_away_grasp`
-  只写入全集诊断，不进入 `preflight_clearance_candidates` 或
-  `safe_clearance_candidates`；系统应继续清障或等待人工确认，不能忽略
-  真实 blocker 硬抓。
-- `nudge`: 障碍物不可抓或 pick_away 不安全时，才生成小距离拨动候选，默认距离 `0.025 m`。
-- `direct_target_gain`: 清除后目标可抓 yaw 数量增加，或目标变得可抓。
-- `enabling_gain`: 清除后关键 blocker 变得可抓、可推，或释放其接近/扫掠通道。
-- `free_space_gain`: 清除后产生新的局部空隙、安全接近通道或临时落点。
-- `easiness`: 障碍物自身可抓 yaw 数量、几何评分、操作路径复杂度代理。
-- `risk`: 间接层级、碰撞/扫掠/未来放置风险。风险是硬过滤之外的排序惩罚，不能绕过安全检查。
+```text
+initial_order_vlm/vlm_stack_decision_input.json
+initial_order_vlm/vlm_stack_decision_raw.json
+initial_order_vlm/vlm_stack_decision_validated.json
+```
 
-最终按 `utility + easiness - risk` 排序。`utility` 由上面三类收益合成。
-清障目标不是清空桌面，而是制造当前目标的抓取空间；`target_yaw_gain=0`
-的动作只有在 `direct_progress_gain`、`enabling_gain`、`blocker_count_reduction`
-或 `current_grasp_gain` 可验证时才会作为多步清障候选。短距离 nudge
-如果被保守几何模型标出软接触，只能保留在全集诊断里；即使它能减少当前
-阻挡，只要 `approach_path_safe=false` 或 `push_swept_safe=false`，也不能进入
-MoveIt 预检或真实执行。若候选本身 `geometry_feasible=false` 或
-`future_task_feasible=false`，即使它看起来能清理未来放置区，也只能留在全集里
-作为诊断候选，不能进入可执行安全候选。
+Each action step:
 
-Hardware execution remains separately opt-in:
+```text
+cycle_*/vlm_action_decision_input.json
+cycle_*/vlm_action_decision_raw.json
+cycle_*/vlm_action_decision_validated.json
+cycle_*/vlm_action_safety_report.json
+cycle_*/selected_action.json
+cycle_*/clearance_verification.json
+cycle_*/clearance_step_XX_result.json
+```
+
+Hardware execution remains opt-in:
 
 ```bash
 python3 tools/workflows/stack_demo_pipeline.py \
@@ -213,194 +101,3 @@ python3 tools/workflows/stack_demo_pipeline.py \
   --execute \
   --execute-push-clearing
 ```
-
-Without both flags, clearance candidates are recorded only; they are not called
-`safe` unless MoveIt has actually accepted them. In live execution, nudge
-candidates first run MoveIt preflight as candidate filtering. Only candidates
-that satisfy all hard code-side gates enter `safe_clearance_candidates.json`:
-`feasible=true`, `geometry_feasible=true`, `approach_path_safe=true`,
-`push_swept_safe=true`, `push_end_safe=true`, `protected_structure_safe=true`,
-`task_effective=true`, and `moveit_feasible=true`.
-For staged nudge clearing, `clearance_preflight_allowed=true` records the
-equivalent code-side gate. `soft_clearance_geometry_allowed=true` is diagnostic
-only; MoveIt reachability never overrides failed approach/swept geometry,
-`geometry_feasible=false`, or `future_task_feasible=false`. The candidate still
-becomes `safe` only after MoveIt preflight sets `moveit_feasible=true`.
-
-The selected real nudge then runs in one MoveIt process with
-`--close-gripper-for-push`: preflight `pre_push`, `contact`, `push_end`, and
-`retreat`, execute the open-gripper `pre_push` move first, close the gripper as
-a rigid paddle at that pre-push pose, execute `contact`, `push_end`, and
-`retreat`, then open the gripper. The generated push plan now carries the
-current target yaw, preferring selected grasp yaw and falling back to the
-detected target table yaw. The MoveIt push runtime reads the current `tool0`
-orientation first, then rotates from that posture to the nearest 180-degree
-equivalent target yaw for all push stages; it no longer plans pushes directly
-from the default `--quat-xyzw`. If any stage fails, the workflow writes
-`clearance_step_XX_result.json`, requests gripper-open recovery, and stops
-instead of continuing from a stale scene.
-Real `pick_away` actions build an obstacle pick plan plus a safe-place plan, and
-both are sent through the existing MoveIt pick/place preview before motion.
-`relaxed_top_pick_away_grasp` actions are not automatic hardware actions because
-they deliberately ignore current grasp blockers.
-By default, the legacy selector still ranks executable clearance candidates
-inside code. To move the final clearance decision to the VLM/LLM policy, enable:
-
-```bash
-python3 tools/workflows/stack_demo_pipeline.py \
-  ... \
-  --use-vlm-clearance-policy
-```
-
-With this flag enabled, `pick_away` and `nudge` remain normal physical action
-interfaces, but code does not choose between them by `score`, `target_yaw_gain`,
-`after_grasp_feasible`, task benefit, or other geometric reward fields. Code
-only generates physical candidates, runs collision/workspace/gripper checks,
-runs MoveIt preflight when hardware execution is requested, and applies the
-final safety gate. The VLM receives the current scene image, compact object
-facts, task state, and `physical_clearance_candidates.json`; it must choose one
-existing `candidate_id` or return `none`/`reobserve`.
-
-The policy prompt enforces:
-
-- current target graspable => prefer target pick;
-- otherwise choose the most reasonable clearance object;
-- do not move the base or completed stack;
-- do not damage future task objects;
-- prefer minimal disturbance and releasing current target grasp space;
-- choose `nudge` or `pick_away` from the provided physical candidates only;
-- never output coordinates, joints, velocities, ROS topics, or new actions.
-
-The required output is strict JSON:
-
-```json
-{
-  "selected_candidate_id": "...",
-  "decision_type": "pick|place|nudge|pick_away|reobserve|none",
-  "object_id": 0,
-  "target_object_id": 0,
-  "reason": "...",
-  "confidence": 0.0,
-  "need_reobserve_after_action": true
-}
-```
-
-The final code-side safety gate accepts a selected candidate only when all are
-true: `collision_free`, `moveit_feasible`, `sweep_collision_free`,
-`workspace_feasible`, and `gripper_feasible`. If the VLM returns invalid JSON,
-an unknown candidate id, `none`/`reobserve`, or a candidate failing any gate, the
-workflow records `rejected_by_safety_gate` and stops fail-safe. It does not fall
-back to the highest geometry score.
-
-Each evaluated action receives a stable `candidate_id`.
-`all_clearance_action_candidates.json` contains a compact scored summary.
-`preflight_clearance_candidates.json` contains geometry-feasible, task-effective
-candidates that still require MoveIt preflight. `safe_clearance_candidates.json`
-contains only executable candidates with
-`geometry_feasible=true`, `moveit_feasible=true`, `approach_path_safe=true`,
-`push_swept_safe=true`, `push_end_safe=true`, `task_effective=true`, and
-`protected_structure_safe=true`. Full nested evaluator dumps are written only
-with `--debug-dump-full-candidates`. When LLM selection is enabled, the LLM
-receives only `safe_clearance_candidates`. It may choose one `candidate_id`;
-it cannot introduce a new direction, obstacle, or action. This is the legacy
-selector used when `--use-vlm-clearance-policy` is not enabled; in that legacy
-mode only, an unavailable LLM may fall back to the highest code score from the
-safe list. The VLM policy path described above never uses that fallback.
-
-Before the first placement, stack estimation is anchored to the requested base
-object only. Nearby loose blocks inside the search radius are not allowed to
-become the stack top before anything has actually been placed. After a place,
-scoped confirmation checks both XY and Z; a same-label object near the planned
-XY but with a height error larger than `--post-place-match-z-tolerance-m`
-(default `0.025 m`) is treated as missing instead of confirming the placement.
-For stacked blocks, detector geometry may report a merged object whose center Z
-is lower than the planned release height while `top_z_base_m` correctly matches
-the placed stack top. Post-place critical matching therefore accepts either
-center-Z or top-Z agreement, then still verifies stack growth before continuing.
-If label/template reacquisition is still missing but stack growth is valid, the
-placement is accepted as `stack_growth_geometry` and the placed memory object is
-restored to `placed` instead of blocking the next pick.
-
-Pick/place approach motions use object-yaw pre-rotation before translation.
-The stack workflow defaults to `--pre-rotate-wrist-yaw-sign negative`; pass
-`--pre-rotate-wrist-yaw-sign auto` only when diagnosing wrist_3 yaw mapping.
-After a joint-wrist3 pre-rotate executes, the runner verifies the measured TCP
-yaw. If the yaw error is still above `--max-grasp-yaw-error-deg`, it tries one
-in-place pose pre-rotate repair at the current safe height; translation is still
-refused if the repaired yaw remains outside the gate.
-
-Legacy LLM push selection is enabled by default and can be disabled explicitly:
-
-```bash
-python3 tools/workflows/stack_demo_pipeline.py \
-  ... \
-  --disable-llm-push-selection
-```
-
-After each executed clearance action, the workflow performs a scoped
-observation, rebinds current ids, rebuilds scene memory, reconstructs the
-obstruction graph, and reruns candidate generation. It never executes multiple
-clearance actions from the same stale scene. If the target remains blocked, it
-can automatically replan more than once:
-
-```bash
-python3 tools/workflows/stack_demo_pipeline.py \
-  ... \
-  --max-automatic-push-clearing-attempts 4 \
-  --obstruction-graph-max-depth 3 \
-  --clearance-nudge-distance-m 0.025 \
-  --clearance-frontier-top-k 6 \
-  --clearance-candidate-top-n-per-obstacle 8
-```
-
-Each step writes its own reports:
-
-```text
-stack_object_selection_debug.json
-cycle_*/obstruction_graph.json
-cycle_*/obstacle_frontier_candidates.json
-cycle_*/evaluated_frontier_candidates.json
-cycle_*/clearance_candidate_pruning.json
-cycle_*/all_clearance_action_candidates.json
-cycle_*/preflight_clearance_candidates.json
-cycle_*/safe_clearance_candidates.json
-cycle_*/selected_clearance_action.json
-cycle_*/clearance_verification.json
-cycle_*/clearance_step_XX_moveit_preflight.json
-cycle_*/clearance_step_XX_llm_selection.json
-cycle_*/objects_for_vlm.json
-cycle_*/task_state_for_vlm.json
-cycle_*/physical_clearance_candidates.json
-cycle_*/vlm_clearance_policy_input.json
-cycle_*/vlm_clearance_policy_output.json
-cycle_*/final_safety_gate.json
-cycle_*/clearance_step_XX_result.json
-cycle_*/multi_step_clearance_summary.json
-```
-
-If the target is not detected before pick, the workflow first attempts scoped
-multi-view recovery. If recovery still fails, it keeps the locked first
-observation template as the target region and only considers visible nearby
-loose objects that are high enough to plausibly hide or block that target. These
-missing-target clearing candidates still go through the same safety evaluator
-before any dry-run or real push is selected. During target recovery only, if a
-scoped observation sees exactly one object with the required label but it has
-moved outside the normal XY match gate, the report records
-`match_policy=unique_label_outside_distance_gate` and uses that live detection
-instead of continuing with a stale locked template.
-
-Useful missing-target tuning parameters:
-
-```bash
-python3 tools/workflows/stack_demo_pipeline.py \
-  ... \
-  --missing-target-clearance-radius-m 0.10 \
-  --high-block-min-top-z-delta-m 0.01
-```
-
-If no automatic push is feasible during live execution, the workflow asks the
-operator to clear an obstacle, then captures one new observation and updates
-scene memory. Operator confirmation is not treated as proof that the target is
-safe to pick: if the target is still blocked by loose movable objects, the
-workflow returns to automatic push planning; if a critical/protected object is
-missing or still blocks every safe option, it refuses to continue.

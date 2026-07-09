@@ -16,10 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force-llm-decision",
         action="store_true",
-        help=(
-            "Always call the VLM/LLM to parse the initial stack order. "
-            "Detected ids are still repaired from explicit color instructions before execution."
-        ),
+        help="Deprecated compatibility flag; stack order is always VLM-first in online mode.",
     )
     parser.add_argument("--offline-scene-state", default="")
     parser.add_argument("--base-object-id", type=int, default=None)
@@ -31,11 +28,11 @@ def parse_args() -> argparse.Namespace:
         help="Execute geometry-based obstacle push clearing before pick when should_push_away is detected.",
     )
     parser.add_argument(
-        "--use-vlm-clearance-policy",
+        "--use-vlm-action-policy",
         action="store_true",
         help=(
-            "Use the VLM policy to choose the next clearance candidate. "
-            "Code still generates physical candidates and applies collision/MoveIt safety gates."
+            "Deprecated compatibility flag; high-level action intent is always VLM-first. "
+            "Code validates object ids, push direction/distance, protected structure safety, and MoveIt preflight."
         ),
     )
     parser.add_argument(
@@ -60,20 +57,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--push-tool-safety-margin-m", type=float, default=0.005)
     parser.add_argument("--grasp-gripper-side-clearance-m", type=float, default=0.006)
     parser.add_argument("--max-automatic-push-clearing-attempts", type=int, default=4)
-    parser.set_defaults(enable_llm_push_selection=True)
-    parser.add_argument("--enable-llm-push-selection", dest="enable_llm_push_selection", action="store_true")
-    parser.add_argument("--disable-llm-push-selection", dest="enable_llm_push_selection", action="store_false")
-    parser.add_argument("--missing-target-clearance-radius-m", type=float, default=0.10)
-    parser.add_argument("--high-block-min-top-z-delta-m", type=float, default=0.01)
-    parser.add_argument("--obstruction-graph-max-depth", type=int, default=3)
-    parser.add_argument("--clearance-nudge-distance-m", type=float, default=0.025)
-    parser.add_argument("--clearance-frontier-top-k", type=int, default=6)
-    parser.add_argument("--clearance-candidate-top-n-per-obstacle", type=int, default=8)
-    parser.add_argument(
-        "--debug-dump-full-candidates",
-        action="store_true",
-        help="Write full clearance candidate debug JSON with nested evaluator details.",
-    )
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--conda-env", default="yolo")
     parser.add_argument("--ros-python", default="/usr/bin/python3")
@@ -199,12 +182,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scoped-observation-max-attempts", type=int, default=5)
     parser.add_argument("--scoped-observation-match-distance-m", type=float, default=0.07)
     parser.add_argument("--post-place-match-z-tolerance-m", type=float, default=0.025)
-    parser.add_argument(
-        "--clearance-safe-place-max-distance-m",
-        type=float,
-        default=0.14,
-        help="Maximum XY distance from the current target for temporary pick-away placement.",
-    )
     parser.add_argument("--place-yaw-strategy", choices=("stack", "base", "held"), default="base")
     parser.add_argument("--place-center-strategy", choices=("top", "base"), default="top")
     parser.add_argument("--max-stack-top-center-offset-m", type=float, default=0.015)

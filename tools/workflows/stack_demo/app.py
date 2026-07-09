@@ -180,7 +180,7 @@ def main() -> int:
             raw_decision,
             initial_state,
             args.instruction,
-            prefer_explicit_rule=True,
+            prefer_explicit_rule=False,
         )
         print_decision_summary(initial_state, decision)
         write_json(os.path.join(args.output_dir, "stack_blocks_decision.json"), decision)

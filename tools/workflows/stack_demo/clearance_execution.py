@@ -1,4 +1,4 @@
-"""Execution helpers for frontier clearance actions."""
+"""Execution helpers for validated VLM action intents."""
 
 from __future__ import annotations
 
@@ -23,27 +23,16 @@ class ClearancePreflightFailed(RuntimeError):
     """A selected clearance action failed MoveIt preflight before hardware motion."""
 
 
-def _candidate_summary(candidate: dict) -> dict:
+def _action_summary(action: dict) -> dict:
     keys = (
-        "candidate_id", "action", "action_type", "obstacle_id", "target_object_id",
+        "action_id", "action", "action_type", "object_id", "obstacle_id", "target_object_id",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
         "collision_free", "sweep_collision_free", "workspace_feasible", "gripper_feasible",
-        "selected_grasp_yaw_deg", "predicted_selected_grasp_yaw_deg", "safe_place_center_m",
-        "grasp_policy", "relaxed_pick_away_grasp", "ignored_grasp_blockers",
-        "geometry_feasible", "approach_path_safe", "push_swept_safe", "push_end_safe",
-        "protected_structure_safe", "task_effective", "direct_clearance_candidate", "direct_progress_candidate",
-        "enabling_clearance_candidate", "exploratory", "automatic_execution_allowed",
-        "automatic_execution_reason", "clearance_preflight_allowed",
-        "verified_clearance_progress", "soft_clearance_geometry_allowed",
-        "future_task_clearance_override",
-        "target_yaw_gain", "direct_target_gain", "direct_progress_gain", "direct_progress_reason",
-        "enabling_gain", "free_space_gain",
-        "blocker_count_reduction", "current_grasp_gain", "post_push_grasp_feasible",
-        "distance_reference_object_id", "distance_reference_is_current_target",
-        "target_distance_before_m", "target_distance_after_m", "target_distance_delta_m",
-        "enables_blocker_object_id", "enabling_reason", "score", "reason",
+        "selected_grasp_yaw_deg", "predicted_selected_grasp_yaw_deg", "safe_place_center_m", "geometry_feasible",
+        "approach_path_safe", "push_swept_safe", "push_end_safe", "protected_structure_safe", "task_effective",
+        "automatic_execution_allowed", "clearance_preflight_allowed", "reason", "confidence",
     )
-    return {key: candidate.get(key) for key in keys if key in candidate}
+    return {key: action.get(key) for key in keys if key in action}
 
 
 def _direction_matches(first: object, second: object, tolerance: float = 1e-6) -> bool:
@@ -54,19 +43,19 @@ def _direction_matches(first: object, second: object, tolerance: float = 1e-6) -
     return all(abs(float(first[index]) - float(second[index])) <= tolerance for index in range(2))
 
 
-def _assert_nudge_candidate_consistency(selected_action: dict, push_execution_plan: dict) -> None:
-    candidate_id = selected_action.get("candidate_id")
-    plan_candidate_id = push_execution_plan.get("candidate_id")
-    if candidate_id is None:
-        raise RuntimeError("Selected nudge action is missing candidate_id.")
-    if plan_candidate_id is not None and str(plan_candidate_id) != str(candidate_id):
+def _assert_nudge_action_consistency(selected_action: dict, push_execution_plan: dict) -> None:
+    action_id = selected_action.get("action_id")
+    plan_action_id = push_execution_plan.get("action_id")
+    if action_id is None:
+        raise RuntimeError("Selected nudge action is missing action_id.")
+    if plan_action_id is not None and str(plan_action_id) != str(action_id):
         raise RuntimeError(
-            "Nudge candidate_id mismatch: selected={} plan={}.".format(candidate_id, plan_candidate_id)
+            "Nudge action_id mismatch: selected={} plan={}.".format(action_id, plan_action_id)
         )
     if not _direction_matches(selected_action.get("direction_base"), push_execution_plan.get("direction_base")):
         raise RuntimeError(
-            "Nudge direction mismatch for candidate {}: selected={} plan={}.".format(
-                candidate_id,
+            "Nudge direction mismatch for action {}: selected={} plan={}.".format(
+                action_id,
                 selected_action.get("direction_base"),
                 push_execution_plan.get("direction_base"),
             )
@@ -74,7 +63,7 @@ def _assert_nudge_candidate_consistency(selected_action: dict, push_execution_pl
 
 
 def _build_nudge_execution_plan(args: Any, current_state: dict, held_object: dict, selected_action: dict) -> dict:
-    selected_push = _selected_push_from_clearance_action(selected_action)
+    selected_push = _selected_push_from_vlm_action(selected_action)
     push_execution_plan = build_push_execution_plan(
         current_state,
         held_object,
@@ -83,25 +72,20 @@ def _build_nudge_execution_plan(args: Any, current_state: dict, held_object: dic
         direction_evaluations=[selected_action.get("push_evaluation", {})],
     )
     push_execution_plan["action_type"] = "nudge"
-    push_execution_plan["candidate_id"] = selected_action.get("candidate_id")
-    _assert_nudge_candidate_consistency(selected_action, push_execution_plan)
+    push_execution_plan["action_id"] = selected_action.get("action_id")
+    _assert_nudge_action_consistency(selected_action, push_execution_plan)
     return push_execution_plan
 
 
-def preflight_nudge_candidate(
-    args: Any,
-    cycle_dir: str,
-    current_state: dict,
-    held_object: dict,
-    selected_action: dict,
-    step_index: int,
+def preflight_nudge_action(
+    args: Any, cycle_dir: str, current_state: dict, held_object: dict, selected_action: dict, step_index: int,
 ) -> dict:
     push_execution_plan = _build_nudge_execution_plan(args, current_state, held_object, selected_action)
     plan_path = os.path.join(
         cycle_dir,
-        "clearance_step_{:02d}_candidate_{}_push_plan.json".format(
+        "clearance_step_{:02d}_action_{}_push_plan.json".format(
             step_index,
-            str(selected_action.get("candidate_id")).replace(os.sep, "_"),
+            str(selected_action.get("action_id")).replace(os.sep, "_"),
         ),
     )
     write_json(plan_path, push_execution_plan)
@@ -164,11 +148,11 @@ def _build_pick_away_place_plan(current_state: dict, obstacle: dict, selected_ac
         "object_label": obstacle.get("label"),
         "reference_object_id": None,
         "reference_label": None,
-        "relative_position": "frontier_safe_place",
+        "relative_position": "vlm_safe_place",
         "reason": "Place cleared obstacle at a safe table location.",
         "status": "planned",
         "coordinate_frame": "base_frame",
-        "coordinate_source": "obstruction_frontier_safe_place",
+        "coordinate_source": "vlm_action_safe_place",
         "target_position_m": [round(float(safe_place[0]), 5), round(float(safe_place[1]), 5), round(release_z, 5)],
         "approach_position_m": [
             round(float(safe_place[0]), 5),
@@ -180,18 +164,13 @@ def _build_pick_away_place_plan(current_state: dict, obstacle: dict, selected_ac
         "target_yaw_valid": True,
         "exact_tool_yaw_required": True,
         "yaw_frame": "base_link",
-        "yaw_source": "obstruction_frontier_pick_away",
+        "yaw_source": "vlm_action_pick_away",
         "clearance_place_height": height_report,
     }
     return plan_envelope(current_state, step)
 
 
-def _pick_away_release_height(
-    current_state: dict,
-    obstacle: dict,
-    safe_place: list,
-    release_gap_m: float,
-) -> Tuple[float, dict]:
+def _pick_away_release_height(current_state: dict, obstacle: dict, safe_place: list, release_gap_m: float) -> Tuple[float, dict]:
     center_z = float(safe_place[2])
     obstacle_size = get_size(obstacle)
     if obstacle_size is None:
@@ -234,25 +213,21 @@ def _pick_away_release_height(
     }
 
 
-def preflight_pick_away_candidate(
-    args: Any,
-    cycle_dir: str,
-    current_state: dict,
-    selected_action: dict,
-    step_index: int,
+def preflight_pick_away_action(
+    args: Any, cycle_dir: str, current_state: dict, selected_action: dict, step_index: int,
 ) -> dict:
     obstacle = object_by_string_id(current_state.get("objects", []), selected_action.get("obstacle_id"))
     obstacle_for_pick = copy.deepcopy(obstacle)
     obstacle_for_pick["selected_grasp_yaw_deg"] = selected_action.get("selected_grasp_yaw_deg")
-    obstacle_for_pick["grasp_yaw_source"] = "obstruction_frontier_pick_away"
-    candidate_id = str(selected_action.get("candidate_id")).replace(os.sep, "_")
+    obstacle_for_pick["grasp_yaw_source"] = "vlm_action_pick_away"
+    action_id = str(selected_action.get("action_id")).replace(os.sep, "_")
     pick_plan_path = os.path.join(
         cycle_dir,
-        "clearance_step_{:02d}_candidate_{}_pick_away_pick_plan.json".format(step_index, candidate_id),
+        "clearance_step_{:02d}_action_{}_pick_away_pick_plan.json".format(step_index, action_id),
     )
     place_plan_path = os.path.join(
         cycle_dir,
-        "clearance_step_{:02d}_candidate_{}_pick_away_place_plan.json".format(step_index, candidate_id),
+        "clearance_step_{:02d}_action_{}_pick_away_place_plan.json".format(step_index, action_id),
     )
     build_offline_pick_plan(current_state, obstacle_for_pick, pick_plan_path, args)
     place_plan = _build_pick_away_place_plan(current_state, obstacle_for_pick, selected_action, args)
@@ -289,7 +264,7 @@ def execute_pick_away_and_reobserve(
     obstacle = object_by_string_id(current_state.get("objects", []), selected_action.get("obstacle_id"))
     obstacle_for_pick = copy.deepcopy(obstacle)
     obstacle_for_pick["selected_grasp_yaw_deg"] = selected_action.get("selected_grasp_yaw_deg")
-    obstacle_for_pick["grasp_yaw_source"] = "obstruction_frontier_pick_away"
+    obstacle_for_pick["grasp_yaw_source"] = "vlm_action_pick_away"
     pick_plan_path = os.path.join(cycle_dir, "pick_away_step_{:02d}_pick_plan.json".format(step_index))
     place_plan_path = os.path.join(cycle_dir, "pick_away_step_{:02d}_place_plan.json".format(step_index))
     build_offline_pick_plan(current_state, obstacle_for_pick, pick_plan_path, args)
@@ -311,7 +286,7 @@ def execute_pick_away_and_reobserve(
             {
                 "action": "pick_away",
                 "result": "dry_run_only",
-                "selected_clearance_action": _candidate_summary(selected_action),
+                "selected_action": _action_summary(selected_action),
             },
         )
         return current_state, memory, held_template
@@ -357,15 +332,15 @@ def execute_pick_away_and_reobserve(
     return observed_state, memory, held_object
 
 
-def _selected_push_from_clearance_action(selected_action: dict) -> dict:
+def _selected_push_from_vlm_action(selected_action: dict) -> dict:
     push_evaluation = selected_action.get("push_evaluation") or {}
     return {
         "type": "should_push_away",
         "subject": selected_action.get("obstacle_id"),
         "object": selected_action.get("blocks", [selected_action.get("target_object_id")])[0],
-        "source": "obstruction_frontier",
+        "source": "vlm_action_policy",
         "reason": selected_action.get("reason"),
-        "candidate_id": selected_action.get("candidate_id"),
+        "action_id": selected_action.get("action_id"),
         "direction_base": selected_action.get("direction_base"),
         "distance_m": selected_action.get("distance_m"),
         "direction_source": selected_action.get("direction_source"),
@@ -393,7 +368,7 @@ def execute_nudge_and_reobserve(
     base_template: Optional[dict],
     step_index: int,
 ) -> Tuple[dict, dict, dict]:
-    selected_push = _selected_push_from_clearance_action(selected_action)
+    selected_push = _selected_push_from_vlm_action(selected_action)
     obstacle = object_by_string_id(current_state.get("objects", []), selected_push["subject"])
     obstacle_memory_id = memory_id_for_scene_object(memory, obstacle)
     push_execution_plan = _build_nudge_execution_plan(args, current_state, held_object, selected_action)
@@ -415,7 +390,7 @@ def execute_nudge_and_reobserve(
             {
                 "action": "nudge",
                 "result": "dry_run_only",
-                "selected_clearance_action": _candidate_summary(selected_action),
+                "selected_action": _action_summary(selected_action),
                 "post_push_requirement": "reobserve_and_rerun_clearance_loop",
             },
         )
@@ -423,7 +398,7 @@ def execute_nudge_and_reobserve(
 
     if not selected_action.get("executable_safe"):
         raise ClearancePreflightFailed(
-            "Selected nudge candidate {} is not executable_safe.".format(selected_action.get("candidate_id"))
+            "Selected nudge action {} is not executable_safe.".format(selected_action.get("action_id"))
         )
 
     runtime["current_stage"] = "nudge_single_process_preflight_execute_step_{:02d}".format(step_index)
@@ -451,8 +426,8 @@ def execute_nudge_and_reobserve(
             {
                 "action": "nudge",
                 "result": "failed_before_or_during_motion",
-                "selected_candidate_id": selected_action.get("candidate_id"),
-                "selected_clearance_action": _candidate_summary(selected_action),
+                "selected_action_id": selected_action.get("action_id"),
+                "selected_action": _action_summary(selected_action),
                 "gripper_open_recovery": recovery,
                 "error": str(exc),
             },
@@ -497,7 +472,7 @@ def execute_nudge_and_reobserve(
             obstacle_memory_id,
             selected_push["direction_base"],
             selected_push.get("distance_m", args.push_clearing_distance_m),
-            reason=selected_push.get("reason") or "frontier_nudge_clearance",
+            reason=selected_push.get("reason") or "vlm_action_nudge",
             result="success",
             observed_delta_m=observed_delta_m,
         )
@@ -511,7 +486,7 @@ def execute_nudge_and_reobserve(
         {
             "action": "nudge",
             "result": "executed_and_reobserved",
-            "selected_clearance_action": _candidate_summary(selected_action),
+            "selected_action": _action_summary(selected_action),
             "post_observation": post_observation,
             "observed_delta_m": observed_delta_m,
         },

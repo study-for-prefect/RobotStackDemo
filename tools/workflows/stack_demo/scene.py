@@ -6,13 +6,13 @@ import os
 import time
 
 from robot_scene_pipeline.llm_scene_reasoner import (
-    StackColorSelectionError,
-    build_stack_blocks_prompt,
-    call_ollama,
-    normalize_stack_blocks_decision,
-    rule_stack_blocks_decision,
     stack_color_requirement_report,
     validate_stack_blocks_decision,
+)
+from robot_scene_pipeline.vlm_stack_policy import (
+    build_vlm_stack_decision_input,
+    call_vlm_stack_policy,
+    validate_vlm_stack_decision,
 )
 from tools.planning.decision_to_execution import write_json
 from robot_scene_pipeline.stack_state import estimate_stack_state
@@ -44,24 +44,13 @@ def _move_to_initial_recovery_offset(args, attempt):
 
 
 def _initial_decision_valid(args, state):
-    if args.stack_decision_json or args.force_llm_decision:
-        return True, None
-    decision = rule_stack_blocks_decision(args.instruction, state.get("objects", []))
-    if decision is None:
-        objects = [obj for obj in state.get("objects", []) if not obj.get("is_workspace")]
-        if len(objects) >= 2:
-            return True, "structure planner will choose roles"
-        return False, "not enough detected blocks for structure planning"
-    try:
-        validate_stack_blocks_decision(
-            decision,
-            state.get("objects", []),
-            args.instruction,
-            prefer_explicit_rule=True,
-        )
-    except (RuntimeError, ValueError) as exc:
-        return False, str(exc)
-    return True, None
+    objects = [
+        obj for obj in state.get("objects", [])
+        if not obj.get("is_workspace") and str(obj.get("label", "")).lower() != "workspace"
+    ]
+    if len(objects) >= 2:
+        return True, "vlm_stack_planner_will_choose_roles"
+    return False, "not enough detected blocks for VLM stack planning"
 
 
 def _write_initial_required_objects_report(args, output_dir, state, decision_error=None):
@@ -96,6 +85,16 @@ def _raise_initial_required_objects_missing(args, state, decision_error):
         state,
         decision_error=decision_error,
     )
+
+
+def _call_initial_vlm_stack_decision(args, state, output_dir):
+    policy_input = build_vlm_stack_decision_input(state, args.instruction)
+    raw_output = call_vlm_stack_policy(args, policy_input)
+    write_json(os.path.join(output_dir, "vlm_stack_decision_input.json"), policy_input)
+    write_json(os.path.join(output_dir, "vlm_stack_decision_raw.json"), raw_output)
+    decision = validate_vlm_stack_decision(raw_output, state, args.instruction)
+    write_json(os.path.join(output_dir, "vlm_stack_decision_validated.json"), decision)
+    return decision
     missing = report.get("missing_colors", [])
     raise RuntimeError(
         "Initial required objects are still missing after recovery observation: "
@@ -167,39 +166,25 @@ def load_or_capture_initial(args):
             ),
             flush=True,
         )
-    if args.stack_decision_json:
-        decision = load_json(args.stack_decision_json)
-    else:
-        try:
-            decision = None if args.force_llm_decision else rule_stack_blocks_decision(args.instruction, state.get("objects", []))
-        except StackColorSelectionError as exc:
-            _raise_initial_required_objects_missing(args, state, str(exc))
-        if decision is None:
-            reasoning_dir = os.path.join(args.output_dir, "initial_order_llm")
-            capture_scene_observation(args, reasoning_dir, stack_reasoning=False)
-            state = load_json(os.path.join(reasoning_dir, "private_scene_state.json"))
-            _write_initial_required_objects_report(args, reasoning_dir, state, decision_error=None)
-            llm_input = load_json(os.path.join(reasoning_dir, "llm_input.json"))
-            prompt = build_stack_blocks_prompt(llm_input)
-            raw_result = call_ollama(args, prompt, state.get("snapshot_image", ""))
-            decision = normalize_stack_blocks_decision(
-                raw_result,
-                hard_prior_objects=llm_input.get("hard_priors", {}).get("objects", []),
-                instruction=args.instruction,
-                prefer_explicit_rule=True,
-            )
-            write_json(os.path.join(reasoning_dir, "llm_scene_graph_decision_raw.json"), {"raw": raw_result})
-            write_json(os.path.join(reasoning_dir, "llm_scene_graph_decision.json"), decision)
+    reasoning_dir = os.path.join(args.output_dir, "initial_order_vlm")
+    capture_scene_observation(args, reasoning_dir, stack_reasoning=False)
+    state = load_json(os.path.join(reasoning_dir, "private_scene_state.json"))
+    _write_initial_required_objects_report(args, reasoning_dir, state, decision_error=None)
+    try:
+        decision = _call_initial_vlm_stack_decision(args, state, reasoning_dir)
+    except Exception as exc:
+        _write_initial_required_objects_report(args, reasoning_dir, state, decision_error=str(exc))
+        raise
     write_stack_object_selection_debug(args.output_dir, decision)
     return state, decision
 
 
-def validate_decision(decision, initial_state, instruction="", prefer_explicit_rule=True):
+def validate_decision(decision, initial_state, instruction="", prefer_explicit_rule=False):
     validated = validate_stack_blocks_decision(
         decision,
         initial_state.get("objects", []),
         instruction,
-        prefer_explicit_rule=prefer_explicit_rule,
+        prefer_explicit_rule=False,
     )
     base_id = int(validated["base_object_id"])
     order = [int(value) for value in validated["stack_order"]]
