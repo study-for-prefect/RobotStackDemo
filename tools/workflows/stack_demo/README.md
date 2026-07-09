@@ -321,6 +321,14 @@ If label/template reacquisition is still missing but stack growth is valid, the
 placement is accepted as `stack_growth_geometry` and the placed memory object is
 restored to `placed` instead of blocking the next pick.
 
+Pick/place approach motions use object-yaw pre-rotation before translation.
+The stack workflow now defaults to `--pre-rotate-wrist-yaw-sign auto`, so the
+MoveIt runner evaluates both wrist_3 yaw mappings instead of assuming a fixed
+sign. After a joint-wrist3 pre-rotate executes, the runner verifies the measured
+TCP yaw. If the yaw error is still above `--max-grasp-yaw-error-deg`, it tries
+one in-place pose pre-rotate repair at the current safe height; translation is
+still refused if the repaired yaw remains outside the gate.
+
 Legacy LLM push selection is enabled by default and can be disabled explicitly:
 
 ```bash

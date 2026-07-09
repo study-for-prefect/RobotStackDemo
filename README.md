@@ -91,10 +91,10 @@ server 会等 fresh TF JSON 出现后再启动。`scripts/run_stack_task.sh` 在
 还会用 `/usr/bin/python3 tools/robot/tf_lookup_json.py --once --require-tool`
 强制刷新一次，避免使用旧 TF。
 
-如果只看到 `Known TF frames`，并且 frame 列表里 `camera_link` 挂在
-`wrist_3_link` 下、`base_link` 挂在 `world` 下，但缺少
-`shoulder_link -> ... -> wrist_3_link` 这段 UR 动态链，说明不是 LLM 没决策，
-而是 base 到相机/末端的 TF 树断开。先检查：
+如果只看到 `Known TF frames`，并且 frame 列表里只有相机静态链，或只有
+`tool0_controller -> base` 这类 controller frame，但没有可连通的
+`base_link <- tool0` 与 `base_link <- camera_color_optical_frame`，说明不是
+LLM 没决策，而是 base 到相机/末端的 TF 树断开。先检查：
 
 ```bash
 ros2 topic echo /joint_states --once
@@ -103,6 +103,11 @@ ros2 run tf2_ros tf2_echo base_link wrist_3_link
 
 若这两项失败，先恢复 UR driver、robot_state_publisher / MoveIt、hand-eye
 static TF，并确认所有终端的 `ROS_DOMAIN_ID` / RMW 配置一致。
+
+堆叠执行中的抓取/放置 yaw 预旋转默认使用 `--pre-rotate-wrist-yaw-sign auto`。
+MoveIt 会先尝试 wrist_3 的正负 yaw 映射；如果执行后 yaw 仍超过阈值，会在
+当前位置再做一次原地 pose 姿态修正。修正仍无法满足
+`--max-grasp-yaw-error-deg` 时才拒绝继续平移。
 
 ## 相机启动方式
 

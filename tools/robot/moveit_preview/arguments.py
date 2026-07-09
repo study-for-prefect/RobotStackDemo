@@ -239,6 +239,12 @@ def parse_args():
     )
     parser.add_argument("--orientation-settle-attempts", type=int, default=2)
     parser.add_argument("--orientation-settle-wait-s", type=float, default=0.25)
+    parser.add_argument(
+        "--pre-rotate-yaw-repair-attempts",
+        type=int,
+        default=1,
+        help="Retry an in-place pose pre-rotate when joint-wrist3 pre-rotate leaves too much yaw error.",
+    )
     parser.add_argument("--planning-time", type=float, default=5.0)
     parser.add_argument("--max-joint-delta", type=float, default=1.2, help="Warn if any joint changes more than this radian value.")
     parser.add_argument(

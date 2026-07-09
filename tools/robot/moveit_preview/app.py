@@ -17,6 +17,7 @@ from .execution import (
     plan_and_maybe_execute_joint_motion,
     plan_and_maybe_execute_motion,
     run_hover_only,
+    select_best_pose_pre_rotate_plan,
     select_best_pre_rotate_plan,
     settle_orientation_before_descent,
 )
@@ -30,6 +31,7 @@ from .orientation import (
     transform_position_quat,
 )
 from .plan_io import load_joint_pose, load_plan, load_tcp_offset
+from .pre_rotate_repair import repair_pre_rotate_yaw_if_needed
 from .push import run_push_plan
 from .steps import (
     command_sequence_for_step,
@@ -445,25 +447,24 @@ def main() -> Optional[int]:
                         current_pos, current_quat = transform_position_quat(current_tool)
                         step_start_state = node.latest_joint_state
                         if step_selected_yaw_deg is not None:
-                            actual_yaw = estimate_downward_family_yaw_deg(current_quat, args.quat_xyzw)
-                            yaw_error = (
-                                abs(shortest_yaw_delta_deg(step_selected_yaw_deg, actual_yaw))
-                                if step.get("exact_tool_yaw_required")
-                                else gripper_yaw_error_deg(step_selected_yaw_deg, actual_yaw)
+                            repaired, current_pos, current_quat, step_start_state = repair_pre_rotate_yaw_if_needed(
+                                node,
+                                args,
+                                step,
+                                step_quat_xyzw,
+                                step_selected_yaw_deg,
+                                current_pos,
+                                current_quat,
+                                step_start_state,
+                                select_best_pose_pre_rotate_plan,
+                                plan_and_maybe_execute_motion,
                             )
-                            node.get_logger().info(
-                                "Pre-rotate yaw verification: target_yaw={:.2f} actual_tcp_yaw={:.2f} "
-                                "yaw_error_deg={:.2f}".format(
-                                    step_selected_yaw_deg,
-                                    actual_yaw,
-                                    yaw_error,
-                                )
-                            )
-                            if yaw_error > float(args.max_grasp_yaw_error_deg):
+                            if not repaired:
                                 raise RuntimeError(
-                                    "Refusing translation after pre-rotate: yaw_error_deg {:.2f} exceeds {:.2f}. "
-                                    "Check --pre-rotate-wrist-yaw-sign.".format(
-                                        yaw_error, args.max_grasp_yaw_error_deg
+                                    "Refusing translation after pre-rotate: yaw repair could not reach {:.2f} deg "
+                                    "within {:.2f} deg. Check TF, wrist_3 response, and object yaw calibration.".format(
+                                        step_selected_yaw_deg,
+                                        args.max_grasp_yaw_error_deg,
                                     )
                                 )
 

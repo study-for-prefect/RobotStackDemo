@@ -1,9 +1,9 @@
 """ROS 2 node and TF frame resolution for MoveIt preview."""
 
 import time
+from typing import Dict, List
 
 import rclpy
-import yaml
 from pymoveit2 import MoveIt2
 from pymoveit2.robots import ur
 from rclpy.duration import Duration
@@ -12,12 +12,42 @@ from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from tf2_ros import Buffer, TransformListener
 
+try:
+    import yaml
+except Exception:  # PyYAML is optional for unit tests and minimal ROS envs.
+    yaml = None
+
+
+def simple_tf_frame_payload(frames_yaml: str) -> Dict[str, dict]:
+    payload = {}
+    current = None
+    for raw_line in str(frames_yaml or "").splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        if not raw_line.startswith((" ", "\t")) and line.endswith(":"):
+            current = line[:-1].strip().strip("'\"").lstrip("/")
+            if current:
+                payload.setdefault(current, {})
+            continue
+        if current and line.strip().startswith("parent:"):
+            parent = line.split(":", 1)[1].strip().strip("'\"").lstrip("/")
+            payload.setdefault(current, {})["parent"] = parent
+    return payload
+
 def tf_frame_names(frames_yaml):
     try:
-        payload = yaml.safe_load(frames_yaml) or {}
+        payload = yaml.safe_load(frames_yaml) if yaml is not None else simple_tf_frame_payload(frames_yaml)
+        payload = payload or {}
     except Exception:
-        return []
-    return sorted(str(name).lstrip("/") for name in payload if name)
+        payload = simple_tf_frame_payload(frames_yaml)
+    names = set()
+    for child, entry in payload.items():
+        if child:
+            names.add(str(child).lstrip("/"))
+        if isinstance(entry, dict) and entry.get("parent"):
+            names.add(str(entry["parent"]).lstrip("/"))
+    return sorted(names)
 
 
 def tf_name_matches(frame, requested):
@@ -38,6 +68,16 @@ def tf_candidate_pairs(frames, requested_base, requested_tool):
     return pairs
 
 
+def nearby_frame_candidates(frames: List[str], requested: str) -> List[str]:
+    requested = str(requested).lstrip("/")
+    output = []
+    for frame in frames:
+        leaf = str(frame).split("/")[-1]
+        if requested in leaf or leaf in requested:
+            output.append(frame)
+    return output[:8]
+
+
 def tf_tree_diagnosis(frames_yaml, requested_base, requested_tool):
     frames = tf_frame_names(frames_yaml)
     base_matches = [frame for frame in frames if tf_name_matches(frame, requested_base)]
@@ -48,7 +88,15 @@ def tf_tree_diagnosis(frames_yaml, requested_base, requested_tool):
             "and verify ROS_DOMAIN_ID/RMW settings."
         )
     if not base_matches or not tool_matches:
-        return "Missing TF frame candidates: base_matches={} tool_matches={}.".format(base_matches, tool_matches)
+        return (
+            "Missing exact TF frame candidates: base_matches={} tool_matches={}. "
+            "nearby_base_frames={} nearby_tool_frames={}.".format(
+                base_matches,
+                tool_matches,
+                nearby_frame_candidates(frames, requested_base),
+                nearby_frame_candidates(frames, requested_tool),
+            )
+        )
     return (
         "Base and tool frames exist but are disconnected. This usually means multiple robot_state_publisher "
         "instances, inconsistent UR prefixes, or a missing fixed joint between the robot and tool. "
