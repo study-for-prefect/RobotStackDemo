@@ -104,9 +104,9 @@ ros2 run tf2_ros tf2_echo base_link wrist_3_link
 若这两项失败，先恢复 UR driver、robot_state_publisher / MoveIt、hand-eye
 static TF，并确认所有终端的 `ROS_DOMAIN_ID` / RMW 配置一致。
 
-堆叠执行中的抓取/放置 yaw 预旋转默认使用 `--pre-rotate-wrist-yaw-sign auto`。
-MoveIt 会先尝试 wrist_3 的正负 yaw 映射；如果执行后 yaw 仍超过阈值，会在
-当前位置再做一次原地 pose 姿态修正。修正仍无法满足
+堆叠执行中的抓取/放置 yaw 预旋转默认使用 `--pre-rotate-wrist-yaw-sign negative`。
+如需排查 wrist_3 yaw 映射，可显式改为 `auto` 让 MoveIt 尝试正负两个映射。
+如果执行后 yaw 仍超过阈值，会在当前位置再做一次原地 pose 姿态修正。修正仍无法满足
 `--max-grasp-yaw-error-deg` 时才拒绝继续平移。
 
 ## 相机启动方式

@@ -170,7 +170,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-grasp-yaw-error-deg", type=float, default=5.0)
     parser.add_argument("--max-grasp-orientation-error-deg", type=float, default=0.5)
-    parser.add_argument("--pre-rotate-wrist-yaw-sign", choices=("auto", "positive", "negative"), default="auto")
+    parser.add_argument("--pre-rotate-wrist-yaw-sign", choices=("auto", "positive", "negative"), default="negative")
     parser.add_argument("--max-pre-rotate-joint-delta", type=float, default=3.1416)
     parser.add_argument("--max-second-snapshot-correction-m", type=float, default=0.006)
     parser.add_argument("--second-snapshot-max-z-error-m", type=float, default=0.06)
