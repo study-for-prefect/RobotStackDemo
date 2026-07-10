@@ -45,6 +45,7 @@ def build_vlm_action_decision_input(
     base_id: Any,
     memory: Optional[dict],
     step_index: int,
+    manipulator_geometry: Optional[dict] = None,
 ) -> dict:
     """Build VLM input from images, objective scene facts, and task state."""
     structure = (memory or {}).get("structure") or {}
@@ -86,6 +87,11 @@ def build_vlm_action_decision_input(
             "protected_object_ids": [value for value in protected_ids or []],
             "note": "These identify the physical structure that must not be moved.",
         },
+        "manipulator_geometry": manipulator_geometry or {
+            "closed_gripper_outer_width_m": 0.112,
+            "finger_length_m": 0.12,
+            "contact_rule": "For nudge, contact starts on the side opposite push_direction_base and approaches vertically.",
+        },
         "policy_role_split": {
             "vlm": "scene_diagnosis_object_action_direction_distance_and_benefit_prediction",
             "code": "collision_grasp_and_execution_feasibility_validation_only",
@@ -95,7 +101,11 @@ def build_vlm_action_decision_input(
             "scene_problem": "string; VLM diagnosis of the current scene",
             "action_type": "pick|nudge|pick_away|reobserve|stop",
             "object_id": "int|string|null",
+            "object_label": "exact objects[].label for object_id; required for executable actions",
+            "object_center_base_m": "exact objects[].geometry_center_base_m for object_id",
             "target_object_id": "int|string|null; task object this action is intended to advance, chosen by VLM",
+            "target_object_label": "exact objects[].label for target_object_id",
+            "target_object_center_base_m": "exact objects[].geometry_center_base_m for target_object_id",
             "push_direction_base": "[x,y,z] unit vector in base_link, required for nudge",
             "push_distance_m": "0.01..0.05, required for nudge",
             "safe_place_center_base_m": "[x,y,z] in base_link, required for pick_away",
@@ -146,7 +156,11 @@ def call_vlm_action_policy(args: Any, policy_input: dict) -> dict:
                 "scene_problem": "VLM response could not be parsed or obtained.",
                 "action_type": "stop",
                 "object_id": None,
+                "object_label": None,
+                "object_center_base_m": None,
                 "target_object_id": None,
+                "target_object_label": None,
+                "target_object_center_base_m": None,
                 "push_direction_base": None,
                 "push_distance_m": None,
                 "safe_place_center_base_m": None,
@@ -178,6 +192,10 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         "pick 时两者通常相同；nudge/pick_away 时 object_id 可是障碍物，target_object_id 可是受益对象。\n"
         "不要因为 current_plan_focus 存在就机械选择它；先看全图和全部几何，再说明你的判断。\n"
         "同颜色/label 多实例必须用 id、bbox 和 base_link 中心区分，禁止只按颜色猜。\n"
+        "对于可执行动作，object_label/object_center_base_m 和 target_object_label/target_object_center_base_m "
+        "必须从 objects 对应 id 原样复制；id、label、中心不一致会被拒绝。\n"
+        "nudge 的夹爪从 push_direction_base 反方向一侧接触并垂直接近；必须根据 manipulator_geometry "
+        "确认该接触侧和工具扫掠走廊没有其他物体。不要把推动当成精确堆叠手段。\n"
         "如果 scene_integrity.object_ids_unique=false，输出 stop 并说明检测 id 不唯一，不能执行。\n"
         "代码只会验证碰撞、抓取/放置几何和 MoveIt 可行性，不会替你选择另一个动作。\n\n"
         "只输出严格 JSON：\n"
@@ -185,7 +203,11 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         '  "scene_problem": "...",\n'
         '  "action_type": "pick|nudge|pick_away|reobserve|stop",\n'
         '  "object_id": 0,\n'
+        '  "object_label": "exact detector label",\n'
+        '  "object_center_base_m": [0.0, 0.0, 0.0],\n'
         '  "target_object_id": 0,\n'
+        '  "target_object_label": "exact detector label",\n'
+        '  "target_object_center_base_m": [0.0, 0.0, 0.0],\n'
         '  "push_direction_base": [1.0, 0.0, 0.0],\n'
         '  "push_distance_m": 0.025,\n'
         '  "safe_place_center_base_m": [0.0, 0.0, 0.0],\n'
@@ -210,11 +232,23 @@ def parse_vlm_action_decision_text(text: str) -> ActionDict:
     predicted_benefit = _required_text(decision, "predicted_scene_benefit")
     risk_assessment = _required_text(decision, "risk_assessment")
     reason = _required_text(decision, "reason")
+    executable = action_type in ("pick", "nudge", "pick_away")
+    object_center = _required_center(decision, "object_center_base_m") if executable else decision.get("object_center_base_m")
+    target_center = (
+        _required_center(decision, "target_object_center_base_m")
+        if executable else decision.get("target_object_center_base_m")
+    )
     return {
         "scene_problem": scene_problem,
         "action_type": action_type,
         "object_id": decision.get("object_id"),
+        "object_label": _required_text(decision, "object_label") if executable else decision.get("object_label"),
+        "object_center_base_m": object_center,
         "target_object_id": decision.get("target_object_id"),
+        "target_object_label": (
+            _required_text(decision, "target_object_label") if executable else decision.get("target_object_label")
+        ),
+        "target_object_center_base_m": target_center,
         "push_direction_base": decision.get("push_direction_base"),
         "push_distance_m": decision.get("push_distance_m"),
         "safe_place_center_base_m": decision.get("safe_place_center_base_m"),
@@ -288,3 +322,16 @@ def _strict_confidence(value: Any) -> float:
     if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
         raise ValueError("VLM action output confidence must be within 0.0..1.0.")
     return confidence
+
+
+def _required_center(decision: ActionDict, key: str) -> List[float]:
+    value = decision.get(key)
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError("VLM action output requires {} as XYZ vector.".format(key))
+    try:
+        center = [float(item) for item in value]
+    except (TypeError, ValueError):
+        raise ValueError("VLM action output {} must be numeric.".format(key))
+    if not all(math.isfinite(item) for item in center):
+        raise ValueError("VLM action output {} must be finite.".format(key))
+    return center

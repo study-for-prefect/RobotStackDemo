@@ -15,6 +15,7 @@ ActionDict = Dict[str, Any]
 MIN_PUSH_DISTANCE_M = 0.01
 MAX_PUSH_DISTANCE_M = 0.05
 DIRECTION_TOLERANCE = 1e-3
+GROUNDING_CENTER_TOLERANCE_M = 0.005
 
 
 def validate_vlm_action_decision(
@@ -59,6 +60,21 @@ def validate_vlm_action_decision(
     )
     if obj is None or target is None:
         safety["reason"] = "object_or_target_validation_failed"
+        return None, safety
+    object_label_ok = _label_matches(decision.get("object_label"), obj.get("label"))
+    target_label_ok = _label_matches(decision.get("target_object_label"), target.get("label"))
+    object_center_ok, object_center_detail = _center_matches(decision.get("object_center_base_m"), obj)
+    target_center_ok, target_center_detail = _center_matches(decision.get("target_object_center_base_m"), target)
+    _record(safety, "object_label_matches_selected_id", object_label_ok, {
+        "reported": decision.get("object_label"), "observed": obj.get("label"),
+    })
+    _record(safety, "target_label_matches_selected_id", target_label_ok, {
+        "reported": decision.get("target_object_label"), "observed": target.get("label"),
+    })
+    _record(safety, "object_center_matches_selected_id", object_center_ok, object_center_detail)
+    _record(safety, "target_center_matches_selected_id", target_center_ok, target_center_detail)
+    if not all((object_label_ok, target_label_ok, object_center_ok, target_center_ok)):
+        safety["reason"] = "decision_object_grounding_mismatch"
         return None, safety
     movable_ok = _object_can_move(obj, protected_ids, require_pushable=action_type == "nudge")
     _record(safety, "object_not_base_placed_locked_protected", movable_ok)
@@ -223,7 +239,11 @@ def _base_action(decision: dict, action_type: str, obj: dict, target: dict) -> d
         "action": action_type if action_type in ("pick", "pick_away") else "push_away",
         "action_type": action_type,
         "object_id": obj.get("id"),
+        "object_label": obj.get("label"),
+        "object_center_base_m": get_center(obj),
         "target_object_id": target.get("id"),
+        "target_object_label": target.get("label"),
+        "target_object_center_base_m": get_center(target),
         "scene_problem": decision.get("scene_problem"),
         "predicted_scene_benefit": decision.get("predicted_scene_benefit"),
         "risk_assessment": decision.get("risk_assessment"),
@@ -242,6 +262,27 @@ def _object_can_move(obj: ObjectDict, protected_ids: Iterable[Any], require_push
     if obj.get("state") in ("locked", "placed", "protected"):
         return False
     return not require_pushable or obj.get("pushable") is not False
+
+
+def _label_matches(reported: Any, observed: Any) -> bool:
+    return str(reported or "").strip().lower() == str(observed or "").strip().lower()
+
+
+def _center_matches(reported: Any, obj: ObjectDict) -> Tuple[bool, dict]:
+    observed = get_center(obj)
+    if observed is None or not isinstance(reported, (list, tuple)) or len(reported) != 3:
+        return False, {"reported": reported, "observed": observed, "tolerance_m": GROUNDING_CENTER_TOLERANCE_M}
+    try:
+        report_center = [float(value) for value in reported]
+        distance = math.sqrt(sum((report_center[index] - float(observed[index])) ** 2 for index in range(3)))
+    except (TypeError, ValueError):
+        return False, {"reported": reported, "observed": observed, "tolerance_m": GROUNDING_CENTER_TOLERANCE_M}
+    return distance <= GROUNDING_CENTER_TOLERANCE_M, {
+        "reported": report_center,
+        "observed": [float(value) for value in observed[:3]],
+        "distance_m": round(distance, 6),
+        "tolerance_m": GROUNDING_CENTER_TOLERANCE_M,
+    }
 
 
 def _select_grasp(obj: ObjectDict, objects: Iterable[ObjectDict], options: dict) -> dict:

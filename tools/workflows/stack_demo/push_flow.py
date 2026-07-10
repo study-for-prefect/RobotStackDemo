@@ -153,7 +153,8 @@ def _merge_scene_duplicates(current_state: dict, held_object: dict, cycle_dir: s
 
 def _action_summary(action: dict) -> dict:
     keys = (
-        "action_id", "action", "action_type", "object_id", "obstacle_id", "target_object_id",
+        "action_id", "action", "action_type", "object_id", "object_label", "obstacle_id",
+        "target_object_id", "target_object_label",
         "direction_base", "distance_m", "safe_place_center_m", "moveit_feasible", "executable_safe",
         "collision_free", "sweep_collision_free", "selected_grasp_yaw_deg",
         "protected_structure_safe", "reason", "confidence",

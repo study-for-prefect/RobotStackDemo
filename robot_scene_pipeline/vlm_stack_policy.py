@@ -58,6 +58,7 @@ def build_vlm_stack_decision_input(state: dict, instruction: str) -> dict:
             "base_object_id": "int",
             "stack_order": "list[int], place order excluding base_object_id",
             "full_stack_order": "list[int], starts with base_object_id",
+            "object_bindings": "list of selected id + exact observed label + base_link center",
             "structure_plan": "object",
             "reason": "string",
             "confidence": "0.0..1.0",
@@ -142,11 +143,13 @@ def validate_vlm_stack_decision(raw_output: dict, state: dict) -> dict:
     unknown_ids = set(full_stack_order) - valid_ids
     if unknown_ids:
         raise ValueError("VLM stack decision references unknown object ids: {}".format(sorted(unknown_ids)))
+    object_bindings = _validate_object_bindings(decision.get("object_bindings"), full_stack_order, state)
     validated = dict(decision)
     validated["task_type"] = "stack_blocks"
     validated["base_object_id"] = base_id
     validated["stack_order"] = stack_order
     validated["full_stack_order"] = full_stack_order
+    validated["object_bindings"] = object_bindings
     validated["stack_order_semantics"] = "place_order_excludes_base"
     validated["confidence"] = _strict_confidence(decision.get("confidence"))
     validated["decision_source"] = "vlm_stack_policy"
@@ -162,6 +165,8 @@ def build_vlm_stack_prompt(policy_input: dict) -> str:
         "stack_order 必须是不含 base_object_id 的放置顺序，full_stack_order 必须以 base_object_id 开头。\n\n"
         "你负责理解用户任务语义并保证 JSON 顺序与目标一致；代码只检查 JSON 结构、物体 id 和几何是否可执行。\n\n"
         "如果同一种颜色/label 有多个实例，必须用编号图、object id、bbox 和 base_link 坐标区分；不要只按颜色猜。\n\n"
+        "先为 full_stack_order 中每个 id 输出 object_bindings，并从 objects 原样复制 observed_label 和 "
+        "geometry_center_base_m；任何 id/label/中心不一致都会停止。\n\n"
         "只输出严格 JSON：\n"
         "{\n"
         '  "task_type": "stack_blocks",\n'
@@ -169,6 +174,9 @@ def build_vlm_stack_prompt(policy_input: dict) -> str:
         '  "base_object_id": 0,\n'
         '  "full_stack_order": [0, 1, 2],\n'
         '  "stack_order": [1, 2],\n'
+        '  "object_bindings": [\n'
+        '    {"object_id": 0, "observed_label": "exact detector label", "geometry_center_base_m": [0.0, 0.0, 0.0]}\n'
+        '  ],\n'
         '  "stack_order_semantics": "place_order_excludes_base",\n'
         '  "reason": "...",\n'
         '  "confidence": 0.0\n'
@@ -225,6 +233,51 @@ def _label_instance_groups(objects: Iterable[ObjectDict]) -> List[dict]:
             ],
         })
     return output
+
+
+def _validate_object_bindings(bindings: Any, full_order: List[int], state: dict) -> List[dict]:
+    if not isinstance(bindings, list):
+        raise ValueError("VLM stack decision requires object_bindings list.")
+    object_map = {
+        int(obj["id"]): obj
+        for obj in state.get("objects", [])
+        if isinstance(obj, dict) and obj.get("id") is not None
+    }
+    binding_map = {}
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            raise ValueError("VLM stack object_bindings entries must be objects.")
+        object_id = int(binding.get("object_id"))
+        if object_id in binding_map:
+            raise ValueError("VLM stack object_bindings ids must be unique.")
+        binding_map[object_id] = binding
+    if set(binding_map) != set(full_order):
+        raise ValueError("VLM stack object_bindings must cover exactly full_stack_order ids.")
+    validated = []
+    for object_id in full_order:
+        binding = binding_map[object_id]
+        observed = object_map[object_id]
+        reported_label = str(binding.get("observed_label") or "").strip().lower()
+        observed_label = str(observed.get("label") or "").strip().lower()
+        if reported_label != observed_label:
+            raise ValueError("VLM stack object binding label does not match id {}.".format(object_id))
+        reported_center = binding.get("geometry_center_base_m")
+        observed_center = observed.get("geometry_center_m") or observed.get("center_3d_base_m")
+        if not isinstance(reported_center, (list, tuple)) or len(reported_center) != 3 or not observed_center:
+            raise ValueError("VLM stack object binding center is missing for id {}.".format(object_id))
+        try:
+            center = [float(value) for value in reported_center]
+            distance = math.sqrt(sum((center[index] - float(observed_center[index])) ** 2 for index in range(3)))
+        except (TypeError, ValueError):
+            raise ValueError("VLM stack object binding center is invalid for id {}.".format(object_id))
+        if not math.isfinite(distance) or distance > 0.005:
+            raise ValueError("VLM stack object binding center does not match id {}.".format(object_id))
+        validated.append({
+            "object_id": object_id,
+            "observed_label": observed.get("label"),
+            "geometry_center_base_m": [float(value) for value in observed_center[:3]],
+        })
+    return validated
 
 
 def _strict_confidence(value: Any) -> float:

@@ -42,7 +42,18 @@ def parse_args() -> argparse.Namespace:
         default=0.015,
         help="Contact z offset above table for push clearing.",
     )
-    parser.add_argument("--push-tool-width-m", type=float, default=0.035)
+    parser.add_argument(
+        "--push-tool-finger-length-m",
+        type=float,
+        default=0.12,
+        help="Conservative closed-gripper finger length used by nudge swept-volume validation.",
+    )
+    parser.add_argument(
+        "--push-tool-yaw-offset-deg",
+        type=float,
+        default=0.0,
+        help="Calibrated yaw offset from base_link push direction to the closed-gripper pushing face.",
+    )
     parser.add_argument("--push-tool-safety-margin-m", type=float, default=0.005)
     parser.add_argument("--grasp-gripper-side-clearance-m", type=float, default=0.006)
     parser.add_argument("--max-vlm-action-attempts", type=int, default=4)

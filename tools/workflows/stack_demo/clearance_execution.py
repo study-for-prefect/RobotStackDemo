@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from robot_scene_pipeline.geometry_relations import get_center, get_size, object_xy_aabb, xy_aabb_overlap
 from robot_scene_pipeline.scene_memory import mark_pushed, save_memory
+from robot_scene_pipeline.tool_swept_volume import check_tool_swept_volume
 from tools.planning.decision_to_execution import write_json
 
 from .commands import open_gripper_command, push_clear_command, push_preflight_command, run
@@ -25,7 +26,8 @@ class ClearancePreflightFailed(RuntimeError):
 
 def _action_summary(action: dict) -> dict:
     keys = (
-        "action_id", "action", "action_type", "object_id", "obstacle_id", "target_object_id",
+        "action_id", "action", "action_type", "object_id", "object_label", "obstacle_id",
+        "target_object_id", "target_object_label",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
         "collision_free", "sweep_collision_free", "selected_grasp_yaw_deg", "safe_place_center_m",
         "protected_structure_safe", "scene_problem", "predicted_scene_benefit", "risk_assessment",
@@ -61,11 +63,12 @@ def _assert_nudge_action_consistency(selected_action: dict, push_execution_plan:
         )
 
 
-def _build_nudge_execution_plan(args: Any, current_state: dict, held_object: dict, selected_action: dict) -> dict:
+def _build_nudge_execution_plan(args: Any, current_state: dict, selected_action: dict) -> dict:
     selected_push = _selected_push_from_vlm_action(selected_action)
+    task_target = object_by_string_id(current_state.get("objects", []), selected_action.get("target_object_id"))
     push_execution_plan = build_push_execution_plan(
         current_state,
-        held_object,
+        task_target,
         selected_push,
         args,
     )
@@ -76,9 +79,9 @@ def _build_nudge_execution_plan(args: Any, current_state: dict, held_object: dic
 
 
 def preflight_nudge_action(
-    args: Any, cycle_dir: str, current_state: dict, held_object: dict, selected_action: dict, step_index: int,
+    args: Any, cycle_dir: str, current_state: dict, selected_action: dict, step_index: int,
 ) -> dict:
-    push_execution_plan = _build_nudge_execution_plan(args, current_state, held_object, selected_action)
+    push_execution_plan = _build_nudge_execution_plan(args, current_state, selected_action)
     plan_path = os.path.join(
         cycle_dir,
         "clearance_step_{:02d}_action_{}_push_plan.json".format(
@@ -87,18 +90,31 @@ def preflight_nudge_action(
         ),
     )
     write_json(plan_path, push_execution_plan)
+    tool_report = check_tool_swept_volume(
+        push_execution_plan,
+        current_state.get("objects", []),
+        ignore_object_ids=[selected_action.get("obstacle_id")],
+        gripper_outer_width_m=float(getattr(args, "grasp_gripper_outer_width_m", 0.112)),
+        finger_length_m=float(getattr(args, "push_tool_finger_length_m", 0.12)),
+        safety_margin_m=float(getattr(args, "push_tool_safety_margin_m", 0.005)),
+    )
+    output = dict(selected_action)
+    output["push_execution_plan_path"] = plan_path
+    output["tool_swept_volume_report"] = tool_report
+    if not tool_report.get("feasible"):
+        output["moveit_feasible"] = False
+        output["executable_safe"] = False
+        output["preflight_failure_stage"] = "tool_swept_volume"
+        output["moveit_preflight_error"] = "tool_swept_volume_rejected: {}".format(tool_report.get("reason"))
+        return output
     try:
         run(push_preflight_command(args, plan_path))
     except Exception as exc:
-        output = dict(selected_action)
         output["moveit_feasible"] = False
         output["executable_safe"] = False
         output["moveit_preflight_error"] = str(exc)
-        output["push_execution_plan_path"] = plan_path
         return output
-    output = dict(selected_action)
     output["moveit_feasible"] = True
-    output["push_execution_plan_path"] = plan_path
     return output
 
 
@@ -358,7 +374,7 @@ def execute_nudge_and_reobserve(
     selected_push = _selected_push_from_vlm_action(selected_action)
     obstacle = object_by_string_id(current_state.get("objects", []), selected_push["subject"])
     obstacle_memory_id = memory_id_for_scene_object(memory, obstacle)
-    push_execution_plan = _build_nudge_execution_plan(args, current_state, held_object, selected_action)
+    push_execution_plan = _build_nudge_execution_plan(args, current_state, selected_action)
     push_execution_plan_path = os.path.join(cycle_dir, "push_execution_plan.json")
     write_json(push_execution_plan_path, push_execution_plan)
     write_json(

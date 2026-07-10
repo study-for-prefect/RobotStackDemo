@@ -7,6 +7,7 @@ import math
 from typing import Any, Dict, Iterable, List, Optional
 
 from robot_scene_pipeline.geometry_relations import get_center
+from tools.robot.push_primitives import build_push_targets
 
 
 ObjectDict = Dict[str, Any]
@@ -100,7 +101,9 @@ def build_push_execution_plan(
         reference_yaw = held_object.get("table_yaw_deg")
         reference_yaw_source = held_object.get("table_yaw_source") or "target_table_yaw"
     reference_yaw_valid = reference_yaw is not None
-    return {
+    direction = [float(value) for value in selected_push["direction_base"][:2]]
+    push_yaw_deg = math.degrees(math.atan2(direction[1], direction[0])) + float(args.push_tool_yaw_offset_deg)
+    plan = {
         "schema_version": "push_execution_plan_v1",
         "frame_id": "base_link",
         "execution_status": "not_executed",
@@ -111,10 +114,11 @@ def build_push_execution_plan(
         "distance_m": float(selected_push["distance_m"]),
         "lift_m": args.push_clearing_lift_m,
         "contact_z_offset_m": args.push_clearing_contact_z_offset_m,
-        "push_orientation_policy": selected_push.get("push_orientation_policy") or "preserve_current_tool_orientation",
-        "target_yaw_deg": None,
-        "target_yaw_valid": False,
-        "target_yaw_source": "not_used_for_push_orientation",
+        "push_orientation_policy": "align_to_target_yaw",
+        "target_yaw_deg": round(push_yaw_deg, 3),
+        "target_yaw_valid": True,
+        "target_yaw_source": "push_direction_base_plus_calibrated_tool_offset",
+        "push_tool_yaw_offset_deg": float(args.push_tool_yaw_offset_deg),
         "reference_target_yaw_deg": None if reference_yaw is None else float(reference_yaw),
         "reference_target_yaw_valid": bool(reference_yaw_valid),
         "reference_target_yaw_source": reference_yaw_source if reference_yaw_valid else "missing_target_yaw",
@@ -124,3 +128,5 @@ def build_push_execution_plan(
         "obstacle": obstacle,
         "reason": selected_push.get("reason"),
     }
+    plan["resolved_push_targets_base_m"] = build_push_targets(plan)
+    return plan

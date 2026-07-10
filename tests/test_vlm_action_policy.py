@@ -35,7 +35,11 @@ class VlmActionPolicyTests(unittest.TestCase):
             {
                 "action_type": "pick",
                 "object_id": 1,
+                "object_label": "blue_block",
+                "object_center_base_m": [0.0, 0.0, 0.02],
                 "target_object_id": 1,
+                "target_object_label": "blue_block",
+                "target_object_center_base_m": [0.0, 0.0, 0.02],
                 "reason": "target is graspable",
                 "confidence": 0.9,
                 "raw_decision": {},
@@ -67,7 +71,11 @@ class VlmActionPolicyTests(unittest.TestCase):
             {
                 "action_type": "pick",
                 "object_id": 1,
+                "object_label": "blue_block",
+                "object_center_base_m": [0.0, 0.0, 0.02],
                 "target_object_id": 3,
+                "target_object_label": "base_block",
+                "target_object_center_base_m": [0.25, 0.20, 0.02],
                 "reason": "VLM declares which task object the action advances",
                 "confidence": 0.9,
                 "raw_decision": {},
@@ -147,7 +155,11 @@ class VlmActionPolicyTests(unittest.TestCase):
             {
                 "action_type": "pick_away",
                 "object_id": 2,
+                "object_label": "red_block",
+                "object_center_base_m": [0.10, 0.0, 0.02],
                 "target_object_id": 1,
+                "target_object_label": "blue_block",
+                "target_object_center_base_m": [0.0, 0.0, 0.02],
                 "safe_place_center_base_m": [0.16, -0.16, 0.02],
                 "reason": "remove blocker",
                 "confidence": 0.7,
@@ -167,7 +179,11 @@ class VlmActionPolicyTests(unittest.TestCase):
             {
                 "action_type": "pick_away",
                 "object_id": 2,
+                "object_label": "red_block",
+                "object_center_base_m": [0.10, 0.0, 0.02],
                 "target_object_id": 1,
+                "target_object_label": "blue_block",
+                "target_object_center_base_m": [0.0, 0.0, 0.02],
                 "safe_place_center_base_m": [0.25, 0.20, 0.02],
                 "reason": "bad place",
                 "confidence": 0.7,
@@ -201,7 +217,11 @@ class VlmActionPolicyTests(unittest.TestCase):
                 json.dumps({
                     "action_type": "pick",
                     "object_id": 1,
+                    "object_label": "blue_block",
+                    "object_center_base_m": [0.0, 0.0, 0.02],
                     "target_object_id": 1,
+                    "target_object_label": "blue_block",
+                    "target_object_center_base_m": [0.0, 0.0, 0.02],
                     "reason": "pick it",
                     "confidence": 0.8,
                 })
@@ -214,7 +234,11 @@ class VlmActionPolicyTests(unittest.TestCase):
                     "scene_problem": "clear scene",
                     "action_type": "pick",
                     "object_id": 1,
+                    "object_label": "blue_block",
+                    "object_center_base_m": [0.0, 0.0, 0.02],
                     "target_object_id": 1,
+                    "target_object_label": "blue_block",
+                    "target_object_center_base_m": [0.0, 0.0, 0.02],
                     "predicted_scene_benefit": "advance the stack",
                     "risk_assessment": "low",
                     "reason": "target is isolated",
@@ -228,7 +252,11 @@ class VlmActionPolicyTests(unittest.TestCase):
                 "scene_problem": "object 2 blocks access to object 1",
                 "action_type": "nudge",
                 "object_id": 2,
+                "object_label": "red_block",
+                "object_center_base_m": [0.10, 0.0, 0.02],
                 "target_object_id": 1,
+                "target_object_label": "blue_block",
+                "target_object_center_base_m": [0.0, 0.0, 0.02],
                 "push_direction_base": [1.0, 0.0, 0.0],
                 "push_distance_m": 0.02,
                 "predicted_scene_benefit": "open a grasp corridor around object 1",
@@ -240,6 +268,20 @@ class VlmActionPolicyTests(unittest.TestCase):
 
         self.assertEqual(decision["scene_problem"], "object 2 blocks access to object 1")
         self.assertIn("grasp corridor", decision["predicted_scene_benefit"])
+
+    def test_action_grounding_label_mismatch_is_rejected(self):
+        decision = _decision()
+        decision["object_label"] = "square green"
+
+        selected, safety = vlm_action_policy.validate_vlm_action_decision(
+            decision,
+            _scene(),
+            protected_ids=[3],
+        )
+
+        self.assertIsNone(selected)
+        self.assertEqual(safety["reason"], "decision_object_grounding_mismatch")
+        self.assertIn("object_label_matches_selected_id", safety["failed_fields"])
 
     def test_action_input_contains_objective_scene_and_advisory_task_focus(self):
         payload = vlm_action_policy.build_vlm_action_decision_input(
@@ -262,6 +304,7 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertNotIn("blocking_objects", encoded)
         self.assertNotIn("action_candidates", encoded)
         self.assertNotIn("recommended_direction", encoded)
+        self.assertIn("contact_rule", payload["manipulator_geometry"])
         self.assertIn("没有代码生成的候选动作", prompt)
 
     def test_action_input_lists_same_label_instances_for_id_based_choice(self):
@@ -337,11 +380,22 @@ def _decision(
     push_direction_base=None,
     push_distance_m=0.02,
 ):
+    objects = {
+        1: ("blue_block", [0.0, 0.0, 0.02]),
+        2: ("red_block", [0.10, 0.0, 0.02]),
+        3: ("base_block", [0.25, 0.20, 0.02]),
+    }
+    object_grounding = objects.get(object_id, (None, None))
+    target_grounding = objects.get(target_object_id, (None, None))
     return {
         "scene_problem": "the intended task object is obstructed",
         "action_type": "nudge",
         "object_id": object_id,
+        "object_label": object_grounding[0],
+        "object_center_base_m": object_grounding[1],
         "target_object_id": target_object_id,
+        "target_object_label": target_grounding[0],
+        "target_object_center_base_m": target_grounding[1],
         "push_direction_base": push_direction_base or [1.0, 0.0, 0.0],
         "push_distance_m": push_distance_m,
         "predicted_scene_benefit": "increase free space around the task object",

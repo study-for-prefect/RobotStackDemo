@@ -72,7 +72,9 @@ python3 tools/workflows/stack_demo_pipeline.py \
 `--use-vlm-action-policy` 现在只是兼容开关；在线堆叠主流程默认就是 VLM-first：
 
 - VLM = 初始结构/堆叠顺序，以及每轮场景问题、动作类型、操作物体、方向、距离和预期收益。
-- 每轮动作输出 `scene_problem`、`action_type`、`object_id`、`target_object_id`、
+- 每轮动作输出 `scene_problem`、`action_type`、`object_id`、`object_label`、
+  `object_center_base_m`、`target_object_id`、`target_object_label`、
+  `target_object_center_base_m`、
   `push_direction_base`、`push_distance_m`、`safe_place_center_base_m`、
   `predicted_scene_benefit`、`risk_assessment`、`reason`、`confidence`。
 - Code = YOLO + D435i 感知、TF 坐标转换、object state、base_link 坐标、
@@ -89,9 +91,16 @@ object id、bbox 和 `base_link` 中心区分，不能只按颜色猜。
 强制 `pick.object_id` 与它相等。VLM 选定 `pick`/`pick_away` 物体后，代码才搜索抓取 yaw；
 VLM 选定 `nudge` 后，代码才检查终点和扫掠路径。
 
+VLM 必须把所选 id 对应的检测 label 和 `base_link` 中心原样回填。代码只验证这组三元组
+是否与当前检测一致，用来阻止“reason 说绿色、object_id 实际指向黄色”的 grounding 错误。
+初始堆叠输出同样通过 `object_bindings` 绑定 id、label 和中心，但代码不替 VLM解释任务顺序。
+
 VLM 输出后，代码会校验 object id、base/placed/locked/protected 状态、推动距离
 范围、`base_link` 单位方向、`pick_away` 临时放置点、保护结构终点区域、
 保护结构扫掠碰撞和 MoveIt 预检。普通 `pick` 也必须在真实执行前通过 plan-only 预检。
+`nudge` 会先从推动反方向计算接触点，按推动方向加 `--push-tool-yaw-offset-deg` 设置闭合夹爪
+yaw，并用夹爪外宽、`--push-tool-finger-length-m` 和安全余量检查预推、下降、接触、推动、
+撤离五段工具扫掠体；工具走廊有物体时不会调用 MoveIt。
 非法 JSON、未知 object id、不安全方向/距离、保护结构碰撞或 MoveIt 不可行都会 fail-safe 停止，
 不会自动回退到代码评分最高动作。每轮动作决策前，代码会先保证当前 snapshot
 内 object id 唯一；若检测结果出现重复 id，会写 `scene_state_unique_object_ids.json`

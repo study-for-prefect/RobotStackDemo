@@ -25,6 +25,20 @@ class StackDemoArgumentsTests(unittest.TestCase):
 
         self.assertTrue(args.use_vlm_action_policy)
 
+    def test_push_tool_geometry_can_be_calibrated(self):
+        with patch(
+            "sys.argv",
+            [
+                "stack_demo_pipeline.py",
+                "--push-tool-yaw-offset-deg", "90",
+                "--push-tool-finger-length-m", "0.11",
+            ],
+        ):
+            args = parse_args()
+
+        self.assertEqual(args.push_tool_yaw_offset_deg, 90.0)
+        self.assertEqual(args.push_tool_finger_length_m, 0.11)
+
     def test_old_vlm_clearance_policy_flag_is_removed(self):
         with patch("sys.argv", ["stack_demo_pipeline.py", "--use-vlm-clearance-policy"]):
             with redirect_stderr(io.StringIO()):

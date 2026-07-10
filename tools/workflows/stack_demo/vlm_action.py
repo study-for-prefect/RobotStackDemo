@@ -40,6 +40,17 @@ def select_autonomous_vlm_action(
         base_id,
         memory,
         step_index,
+        manipulator_geometry={
+            "closed_gripper_outer_width_m": float(getattr(args, "grasp_gripper_outer_width_m", 0.112)),
+            "finger_length_m": float(getattr(args, "push_tool_finger_length_m", 0.12)),
+            "safety_margin_m": float(getattr(args, "push_tool_safety_margin_m", 0.005)),
+            "contact_z_offset_m": float(getattr(args, "push_clearing_contact_z_offset_m", 0.015)),
+            "push_tool_yaw_offset_deg": float(getattr(args, "push_tool_yaw_offset_deg", 0.0)),
+            "contact_rule": (
+                "The closed gripper approaches vertically at the object side opposite push_direction_base, "
+                "then moves along push_direction_base. The full tool corridor must be clear."
+            ),
+        },
     )
     raw_output = call_vlm_action_policy(args, policy_input)
     decision = raw_output.get("decision") or {}
@@ -69,7 +80,7 @@ def select_autonomous_vlm_action(
         preflight_report["run_moveit_preflight"] = run_clearance_preflight
         if run_clearance_preflight:
             checked = (
-                preflight_nudge_action(args, cycle_dir, current_state, task_focus_object, selected, step_index)
+                preflight_nudge_action(args, cycle_dir, current_state, selected, step_index)
                 if selected.get("action_type") == "nudge"
                 else preflight_pick_away_action(args, cycle_dir, current_state, selected, step_index)
             )
@@ -133,14 +144,36 @@ def _apply_preflight_result(
     preflight_report["action"] = checked
     if checked.get("moveit_feasible"):
         checked["executable_safe"] = True
-        return selected, mark_moveit_result(checked, safety_report, True)
+        passed = mark_moveit_result(checked, safety_report, True)
+        tool_report = checked.get("tool_swept_volume_report")
+        if tool_report is not None:
+            passed["tool_swept_volume_report"] = tool_report
+            passed.setdefault("checks", {})["tool_swept_volume_clear"] = {
+                "ok": bool(tool_report.get("feasible")),
+                "detail": tool_report,
+            }
+        return selected, passed
     preflight_report["failures"].append(
         {
             "action_type": checked.get("action_type"),
             "object_id": decision.get("object_id"),
+            "stage": checked.get("preflight_failure_stage") or "moveit",
             "reason": checked.get("moveit_preflight_error") or "moveit_preflight_failed",
         }
     )
+    if checked.get("preflight_failure_stage") == "tool_swept_volume":
+        failed = dict(safety_report)
+        failed["accepted"] = False
+        failed["moveit_feasible"] = None
+        failed["reason"] = "tool_swept_volume_rejected"
+        failed["tool_swept_volume_report"] = checked.get("tool_swept_volume_report")
+        failed.setdefault("checks", {})["tool_swept_volume_clear"] = {
+            "ok": False,
+            "detail": checked.get("tool_swept_volume_report") or {},
+        }
+        if "tool_swept_volume_clear" not in failed.setdefault("failed_fields", []):
+            failed["failed_fields"].append("tool_swept_volume_clear")
+        return None, failed
     return selected, mark_moveit_result(
         checked,
         safety_report,
@@ -151,20 +184,26 @@ def _apply_preflight_result(
 
 def _validated_output(raw_output: dict, selected: Optional[dict], safety_report: dict) -> dict:
     decision = raw_output.get("decision") or {}
+    accepted = bool(safety_report.get("accepted"))
     return {
         "schema_version": "vlm_action_decision_validated_v1",
         "selection_source": "vlm_action_policy",
-        "selection_status": "selected" if safety_report.get("accepted") else "fail_safe_stop",
+        "selection_status": "selected" if accepted else "fail_safe_stop",
         "scene_problem": decision.get("scene_problem"),
         "action_type": decision.get("action_type", "stop"),
         "object_id": decision.get("object_id"),
+        "object_label": decision.get("object_label"),
+        "object_center_base_m": decision.get("object_center_base_m"),
         "target_object_id": decision.get("target_object_id"),
+        "target_object_label": decision.get("target_object_label"),
+        "target_object_center_base_m": decision.get("target_object_center_base_m"),
         "push_direction_base": decision.get("push_direction_base"),
         "push_distance_m": decision.get("push_distance_m"),
         "safe_place_center_base_m": decision.get("safe_place_center_base_m"),
         "predicted_scene_benefit": decision.get("predicted_scene_benefit"),
         "risk_assessment": decision.get("risk_assessment"),
-        "reason": decision.get("reason") or safety_report.get("reason"),
+        "reason": decision.get("reason") if accepted else safety_report.get("reason"),
+        "vlm_reason": decision.get("reason"),
         "confidence": decision.get("confidence", 0.0),
         "selected_action": selected,
         "safety_report": safety_report,

@@ -17,6 +17,7 @@ class VlmStackPolicyTests(unittest.TestCase):
                     "full_stack_order": [1, 2],
                     "stack_order": [2],
                     "structure_plan": {},
+                    "object_bindings": _bindings(_state(), [1, 2]),
                     "reason": "blue base red top",
                     "confidence": 0.9,
                 },
@@ -38,6 +39,28 @@ class VlmStackPolicyTests(unittest.TestCase):
                         "base_object_id": 1,
                         "full_stack_order": [1, 99],
                         "stack_order": [99],
+                    },
+                },
+                _state(),
+            )
+
+    def test_stack_binding_label_mismatch_rejected(self):
+        with self.assertRaises(ValueError):
+            validate_vlm_stack_decision(
+                {
+                    "call_status": "parsed",
+                    "decision": {
+                        "task_type": "stack_blocks",
+                        "base_object_id": 1,
+                        "full_stack_order": [1, 2],
+                        "stack_order": [2],
+                        "structure_plan": {},
+                        "object_bindings": [
+                            {"object_id": 1, "observed_label": "red block", "geometry_center_base_m": [0.0, 0.0, 0.02]},
+                            {"object_id": 2, "observed_label": "red block", "geometry_center_base_m": [0.08, 0.0, 0.02]},
+                        ],
+                        "reason": "mismatched id and label",
+                        "confidence": 0.5,
                     },
                 },
                 _state(),
@@ -68,6 +91,7 @@ class VlmStackPolicyTests(unittest.TestCase):
                     "full_stack_order": [1],
                     "stack_order": [],
                     "structure_plan": {},
+                    "object_bindings": _bindings(_state(), [1]),
                     "reason": "VLM chose no placement",
                     "confidence": 0.4,
                 },
@@ -97,6 +121,7 @@ class VlmStackPolicyTests(unittest.TestCase):
                     "full_stack_order": [0, 1, 2, 3],
                     "stack_order": [1, 2, 3],
                     "structure_plan": {},
+                    "object_bindings": _bindings(state, [0, 1, 2, 3]),
                     "reason": "VLM owns task interpretation",
                     "confidence": 0.7,
                 },
@@ -174,6 +199,18 @@ def _state():
             },
         ],
     }
+
+
+def _bindings(state, object_ids):
+    object_map = {obj["id"]: obj for obj in state["objects"]}
+    return [
+        {
+            "object_id": object_id,
+            "observed_label": object_map[object_id]["label"],
+            "geometry_center_base_m": object_map[object_id]["geometry_center_m"],
+        }
+        for object_id in object_ids
+    ]
 
 
 if __name__ == "__main__":

@@ -31,6 +31,11 @@ Initial stack decision output:
   "base_object_id": 1,
   "full_stack_order": [1, 2, 3],
   "stack_order": [2, 3],
+  "object_bindings": [
+    {"object_id": 1, "observed_label": "square red", "geometry_center_base_m": [0.30, 0.18, 0.02]},
+    {"object_id": 2, "observed_label": "square green", "geometry_center_base_m": [0.36, 0.06, 0.02]},
+    {"object_id": 3, "observed_label": "square blue", "geometry_center_base_m": [0.40, 0.09, 0.02]}
+  ],
   "structure_plan": {},
   "reason": "...",
   "confidence": 0.8
@@ -44,7 +49,11 @@ Per-step action output:
   "scene_problem": "...",
   "action_type": "pick|nudge|pick_away|reobserve|stop",
   "object_id": 2,
+  "object_label": "square yellow",
+  "object_center_base_m": [0.30, 0.10, 0.02],
   "target_object_id": 1,
+  "target_object_label": "square green",
+  "target_object_center_base_m": [0.30, 0.05, 0.02],
   "push_direction_base": [1.0, 0.0, 0.0],
   "push_distance_m": 0.025,
   "safe_place_center_base_m": [0.20, -0.10, 0.02],
@@ -65,6 +74,10 @@ recommended directions, or raw robot control commands.
 plan. Code does not require a pick to use that object. `target_object_id` is the
 task object the VLM predicts will benefit from the action; code checks that it
 exists but does not replace it with a code-selected target.
+Executable decisions must echo the exact detector label and base-link center
+for both ids. This grounding check rejects an id that points to a different
+color/instance than the VLM claims. Initial stack decisions use the same rule
+through `object_bindings`.
 
 ## Code Safety Gates
 
@@ -80,6 +93,9 @@ Code validates VLM intent before any motion:
 - `nudge` direction must be a base-link unit XY vector and distance must be
   `0.01..0.05 m`;
 - `nudge` end and swept path must avoid protected structure;
+- nudge contact is generated on the side opposite the VLM direction; code
+  aligns the closed tool to the push direction plus calibrated yaw offset and
+  checks the complete tool swept volume before MoveIt;
 - `pick_away` must have a VLM-proposed `safe_place_center_base_m` that avoids
   visible objects, protected structure, future stack regions, and table bounds;
 - hardware clearing actions must pass existing MoveIt preflight before motion.
@@ -124,3 +140,5 @@ python3 tools/workflows/stack_demo_pipeline.py \
 
 `--max-vlm-action-attempts` limits repeated `reobserve`/clearance decisions in
 one pick cycle and stops fail-safe when the limit is reached.
+Use `--push-tool-yaw-offset-deg` for the calibrated closed-gripper pushing-face
+axis and `--push-tool-finger-length-m` for conservative swept-volume checks.
