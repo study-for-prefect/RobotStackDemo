@@ -40,6 +40,11 @@ def validate_vlm_action_decision(
         safety["reason"] = "policy_requested_{}".format(action_type)
         return None, safety
     objects = [obj for obj in current_state.get("objects", []) if isinstance(obj, dict)]
+    duplicate_ids = _duplicate_object_ids(objects)
+    _record(safety, "scene_object_ids_unique", not duplicate_ids, {"duplicate_object_ids": duplicate_ids})
+    if duplicate_ids:
+        safety["reason"] = "scene_object_ids_not_unique"
+        return None, safety
     object_map = {str(obj.get("id")): obj for obj in objects if obj.get("id") is not None}
     obj = object_map.get(str(decision.get("object_id"))) if decision.get("object_id") is not None else None
     target_matches = str(decision.get("target_object_id")) == str(target_object.get("id"))
@@ -248,6 +253,18 @@ def _object_can_move(obj: ObjectDict, protected_ids: Iterable[Any]) -> bool:
     if obj.get("state") in ("locked", "placed", "protected"):
         return False
     return obj.get("pushable") is not False
+
+
+def _duplicate_object_ids(objects: Iterable[ObjectDict]) -> List[Any]:
+    seen = set()
+    duplicates = []
+    for obj in objects:
+        object_id = obj.get("id")
+        key = str(object_id)
+        if key in seen and object_id not in duplicates:
+            duplicates.append(object_id)
+        seen.add(key)
+    return duplicates
 
 
 def _valid_push_distance(value: Any) -> Tuple[bool, Optional[float]]:

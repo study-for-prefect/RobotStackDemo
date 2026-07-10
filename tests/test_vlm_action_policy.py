@@ -103,6 +103,21 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertFalse(safety["accepted"])
         self.assertIn("object_not_base_placed_locked_protected", safety["failed_fields"])
 
+    def test_duplicate_scene_object_ids_rejected(self):
+        scene = _scene()
+        scene["objects"][1]["id"] = 1
+
+        selected, safety = vlm_action_policy.validate_vlm_action_decision(
+            _decision(),
+            scene,
+            _target(),
+            protected_ids=[3],
+        )
+
+        self.assertIsNone(selected)
+        self.assertEqual(safety["reason"], "scene_object_ids_not_unique")
+        self.assertIn("scene_object_ids_unique", safety["failed_fields"])
+
     def test_push_distance_too_large_rejected(self):
         selected, safety = vlm_action_policy.validate_vlm_action_decision(
             _decision(push_distance_m=0.08),
@@ -212,6 +227,34 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertEqual(payload["current_task_target_object_id"], 1)
         self.assertIn("not target_object_id", payload["stack_reference"]["note"])
         self.assertIn("target_object_id 永远表示当前循环的 target_object.id", prompt)
+
+    def test_action_input_lists_same_label_instances_for_id_based_choice(self):
+        scene = _scene()
+        scene["objects"].append(
+            {
+                "id": 4,
+                "label": "red_block",
+                "geometry_center_m": [0.2, 0.0, 0.02],
+                "dimensions_m": [0.03, 0.03, 0.04],
+            }
+        )
+
+        payload = vlm_action_policy.build_vlm_action_decision_input(
+            "/tmp/scene.png",
+            "/tmp/overlay.png",
+            scene,
+            _target(),
+            {"grasp_feasible": False},
+            protected_ids=[3],
+            base_id=3,
+            memory={},
+            step_index=1,
+        )
+
+        groups = payload["scene_integrity"]["same_label_instance_groups"]
+        self.assertFalse(payload["scene_integrity"]["duplicate_object_ids"])
+        self.assertEqual(groups[0]["label"], "red_block")
+        self.assertEqual([item["id"] for item in groups[0]["instances"]], [2, 4])
 
 
 def _scene():

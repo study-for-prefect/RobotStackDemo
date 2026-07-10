@@ -60,6 +60,11 @@ control commands.
 Code validates VLM intent before any motion:
 
 - object ids must exist in the current observation;
+- object ids must be unique inside the current snapshot before VLM action
+  validation; if duplicate ids are found before action planning, the workflow
+  writes `scene_state_unique_object_ids.json` and gives VLM the reassigned ids;
+- same-label objects must be selected by numbered id, bbox, and `base_link`
+  center, not by color/label alone;
 - base, locked, placed, protected, or `pushable=false` objects cannot be moved;
 - `nudge` direction must be a base-link unit XY vector and distance must be
   `0.01..0.05 m`;
@@ -68,7 +73,8 @@ Code validates VLM intent before any motion:
   visible objects, protected structure, future stack regions, and table bounds;
 - hardware clearing actions must pass existing MoveIt preflight before motion.
 
-Invalid JSON, unknown ids, unsafe intent, or MoveIt failure stops fail-safe.
+Invalid JSON, unknown ids, explicit stack-order conflict, unsafe intent, or
+MoveIt failure stops fail-safe.
 The workflow does not fall back to geometry scores or generated candidates.
 
 ## Logs

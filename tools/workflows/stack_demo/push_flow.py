@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
 from typing import Any, Dict, Iterable, Optional, Tuple
 
@@ -64,6 +65,93 @@ def _apply_selected_grasp_to_target(held_object: dict, analysis: dict) -> dict:
     held_object["blocked_yaw_intervals_deg"] = analysis.get("blocked_yaw_intervals_deg", [])
     held_object["grasp_yaw_source"] = analysis.get("selected_grasp_source") or "adaptive_grasp_yaw_search"
     return held_object
+
+
+def _center_xyz(obj: dict) -> Optional[list]:
+    value = obj.get("geometry_center_m")
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    try:
+        center = [float(value[0]), float(value[1]), float(value[2])]
+    except (TypeError, ValueError):
+        return None
+    return center if all(math.isfinite(item) for item in center) else None
+
+
+def _label_center_distance(first: dict, second: dict) -> float:
+    if first.get("label") != second.get("label"):
+        return math.inf
+    first_center = _center_xyz(first)
+    second_center = _center_xyz(second)
+    if first_center is None or second_center is None:
+        return math.inf
+    return math.sqrt(sum((first_center[index] - second_center[index]) ** 2 for index in range(3)))
+
+
+def _nearest_same_label_object(objects: Iterable[dict], template: dict) -> Optional[dict]:
+    matches = [obj for obj in objects if isinstance(obj, dict) and obj.get("label") == template.get("label")]
+    if not matches:
+        return None
+    matches.sort(key=lambda obj: _label_center_distance(obj, template))
+    return matches[0]
+
+
+def _ensure_unique_scene_object_ids(current_state: dict, held_object: dict, cycle_dir: str) -> Tuple[dict, dict]:
+    objects = [obj for obj in current_state.get("objects", []) if isinstance(obj, dict)]
+    seen = set()
+    numeric_ids = []
+    for obj in objects:
+        try:
+            numeric_ids.append(int(obj.get("id")))
+        except (TypeError, ValueError):
+            continue
+    next_id = max(numeric_ids or [-1]) + 1
+    output = []
+    remapped = []
+    for index, obj in enumerate(objects):
+        item = copy.deepcopy(obj)
+        old_id = item.get("id")
+        old_key = str(old_id)
+        if old_id is None or old_key in seen:
+            while str(next_id) in seen:
+                next_id += 1
+            item["id"] = next_id
+            item["original_detection_id"] = old_id
+            item["snapshot_id_reassigned"] = True
+            remapped.append(
+                {
+                    "object_index": index,
+                    "label": item.get("label"),
+                    "old_id": old_id,
+                    "new_id": next_id,
+                    "geometry_center_m": item.get("geometry_center_m"),
+                }
+            )
+            seen.add(str(next_id))
+            next_id += 1
+        else:
+            seen.add(old_key)
+        output.append(item)
+    if not remapped:
+        return current_state, held_object
+    unique_state = copy.deepcopy(current_state)
+    unique_state["objects"] = output
+    unique_state["snapshot_id_reassignment"] = {
+        "schema_version": "snapshot_id_reassignment_v1",
+        "reason": "duplicate_or_missing_snapshot_object_ids",
+        "remapped_objects": remapped,
+    }
+    unique_target = _nearest_same_label_object(output, held_object) or held_object
+    write_json(
+        os.path.join(cycle_dir, "scene_state_unique_object_ids.json"),
+        {
+            "schema_version": "scene_state_unique_object_ids_v1",
+            "remapped_objects": remapped,
+            "state": unique_state,
+            "target_after_reassignment": unique_target,
+        },
+    )
+    return unique_state, copy.deepcopy(unique_target)
 
 
 def _merge_scene_duplicates(current_state: dict, held_object: dict, cycle_dir: str) -> Tuple[dict, dict]:
@@ -207,6 +295,7 @@ def handle_push_clearing_before_pick(
     if step_index > max_attempts:
         raise RuntimeError("VLM action loop exceeded max attempts before picking target {}.".format(held_object.get("id")))
 
+    current_state, held_object = _ensure_unique_scene_object_ids(current_state, held_object, cycle_dir)
     current_state, held_object = _merge_scene_duplicates(current_state, held_object, cycle_dir)
     write_json(os.path.join(cycle_dir, "scene_state_before_action.json"), current_state)
     relations = _relations_for_target(

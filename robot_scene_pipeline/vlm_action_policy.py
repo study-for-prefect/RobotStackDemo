@@ -48,6 +48,9 @@ def build_vlm_action_decision_input(
 ) -> dict:
     """Build the high-level action-intent prompt payload."""
     structure = (memory or {}).get("structure") or {}
+    objects = [obj for obj in current_state.get("objects", []) if isinstance(obj, dict)]
+    duplicate_ids = _duplicate_object_ids(objects)
+    label_groups = _label_instance_groups(objects)
     return {
         "schema_version": "vlm_action_decision_input_v1",
         "scene_rgb": scene_rgb_path,
@@ -59,10 +62,20 @@ def build_vlm_action_decision_input(
         "target_object_id_rule": "Must equal current_task_target_object_id. It is not the destination/base/stack-top id.",
         "objects": [
             compact_object_for_action_policy(obj)
-            for obj in current_state.get("objects", [])
-            if isinstance(obj, dict)
+            for obj in objects
         ],
         "target_object": compact_object_for_action_policy(target_object),
+        "target_identity_rule": {
+            "current_task_target_object_id": target_object.get("id"),
+            "target_label": target_object.get("label"),
+            "target_center_base_m": target_object.get("geometry_center_m") or target_object.get("center_3d_base_m"),
+            "rule": "Select by object id and base_link center, never by color/label alone.",
+        },
+        "scene_integrity": {
+            "object_ids_unique": not duplicate_ids,
+            "duplicate_object_ids": duplicate_ids,
+            "same_label_instance_groups": label_groups,
+        },
         "target_grasp_state": {
             "action": analysis.get("action"),
             "grasp_feasible": bool(analysis.get("grasp_feasible")),
@@ -165,7 +178,10 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         "约束：不移动 base、placed、locked、protected 物体；优先最小扰动和保护已堆叠结构。\n"
         "target_object_id 永远表示当前循环的 target_object.id，不是放置参考物、底座、红色基座或 current_top。\n"
         "如果 action_type=pick，则 object_id 和 target_object_id 都必须等于输入里的 current_task_target_object_id。\n"
+        "如果 target_grasp_state.grasp_feasible=true 且你选择 pick，只能抓 target_object，不能抓 stack_memory.current_top 或 protected_object_ids。\n"
         "如果 action_type=nudge 或 pick_away，则 object_id 是要推/抓走的障碍物，target_object_id 仍然必须等于 current_task_target_object_id。\n"
+        "如果同一种颜色/label 有多个实例，必须用 objects 中的 id、bbox、base_link 中心和 target_identity_rule 区分；禁止只按颜色猜。\n"
+        "如果 scene_integrity.object_ids_unique=false，输出 stop 并说明检测 id 不唯一，不能执行。\n"
         "代码会独立验证物理可行性、安全和 MoveIt，不安全会停止。\n\n"
         "只输出严格 JSON：\n"
         "{\n"
@@ -201,6 +217,42 @@ def parse_vlm_action_decision_text(text: str) -> ActionDict:
         "confidence": _clamp_float(decision.get("confidence"), 0.0, 1.0),
         "raw_decision": decision,
     }
+
+
+def _duplicate_object_ids(objects: Iterable[ObjectDict]) -> List[Any]:
+    seen = set()
+    duplicates = []
+    for obj in objects:
+        object_id = obj.get("id")
+        key = str(object_id)
+        if key in seen and object_id not in duplicates:
+            duplicates.append(object_id)
+        seen.add(key)
+    return duplicates
+
+
+def _label_instance_groups(objects: Iterable[ObjectDict]) -> List[dict]:
+    groups: Dict[str, List[ObjectDict]] = {}
+    for obj in objects:
+        label = str(obj.get("label"))
+        groups.setdefault(label, []).append(obj)
+    output = []
+    for label, items in sorted(groups.items()):
+        if len(items) <= 1:
+            continue
+        output.append({
+            "label": label,
+            "instances": [
+                {
+                    "id": obj.get("id"),
+                    "bbox_xyxy_px": obj.get("bbox_xyxy_px"),
+                    "geometry_center_base_m": obj.get("geometry_center_m") or obj.get("center_3d_base_m"),
+                }
+                for obj in items
+            ],
+            "rule": "Use id and geometry_center_base_m to distinguish these same-label objects.",
+        })
+    return output
 
 
 def _image_payloads(policy_input: dict, include_images: bool) -> List[str]:

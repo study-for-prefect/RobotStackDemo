@@ -81,12 +81,16 @@ python3 tools/workflows/stack_demo_pipeline.py \
 
 VLM 输入不会包含相机内参；相机内参只在感知模块里用于像素和深度到三维坐标转换。
 大模型输入使用快照图、带编号图、已经计算好的 `base_link` 坐标、物体尺寸、
-bbox、任务状态和记忆。
+bbox、任务状态和记忆。同色/同 label 物体会以实例组形式列出，VLM 必须用
+object id、bbox 和 `base_link` 中心区分，不能只按颜色猜。
 
 VLM 输出后，代码会校验 object id、base/placed/locked/protected 状态、推动距离
 范围、`base_link` 单位方向、`pick_away` 临时放置点、保护结构终点区域、
 保护结构扫掠碰撞和 MoveIt 预检。非法 JSON、未知 object id、不安全方向/距离、
-保护结构碰撞或 MoveIt 不可行都会 fail-safe 停止，不会自动回退到代码评分最高动作。
+初始堆叠顺序与显式指令冲突、保护结构碰撞或 MoveIt 不可行都会 fail-safe 停止，
+不会自动回退到代码评分最高动作。每轮动作决策前，代码会先保证当前 snapshot
+内 object id 唯一；若检测结果出现重复 id，会写 `scene_state_unique_object_ids.json`
+记录重分配。
 
 VLM 决策日志：
 

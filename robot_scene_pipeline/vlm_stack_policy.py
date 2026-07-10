@@ -32,6 +32,12 @@ def compact_stack_object(obj: ObjectDict) -> ObjectDict:
 
 
 def build_vlm_stack_decision_input(state: dict, instruction: str) -> dict:
+    objects = [
+        obj for obj in state.get("objects", [])
+        if isinstance(obj, dict)
+        and not obj.get("is_workspace")
+        and str(obj.get("label", "")).lower() != "workspace"
+    ]
     return {
         "schema_version": "vlm_stack_decision_input_v1",
         "instruction": instruction,
@@ -40,11 +46,14 @@ def build_vlm_stack_decision_input(state: dict, instruction: str) -> dict:
         "base_frame": state.get("base_frame", "base_link"),
         "objects": [
             compact_stack_object(obj)
-            for obj in state.get("objects", [])
-            if isinstance(obj, dict)
-            and not obj.get("is_workspace")
-            and str(obj.get("label", "")).lower() != "workspace"
+            for obj in objects
         ],
+        "scene_integrity": {
+            "object_ids_unique": not _duplicate_object_ids(objects),
+            "duplicate_object_ids": _duplicate_object_ids(objects),
+            "same_label_instance_groups": _label_instance_groups(objects),
+            "same_label_rule": "If several objects share a label/color, choose by object id, bbox, and base_link center; never by color alone.",
+        },
         "output_schema": {
             "base_object_id": "int",
             "stack_order": "list[int], place order excluding base_object_id",
@@ -104,6 +113,9 @@ def validate_vlm_stack_decision(raw_output: dict, state: dict, instruction: str)
     decision = raw_output.get("decision")
     if not isinstance(decision, dict):
         raise ValueError("VLM stack decision must be a JSON object.")
+    duplicate_ids = _duplicate_object_ids(state.get("objects", []))
+    if duplicate_ids:
+        raise ValueError("Scene object ids must be unique before VLM stack decision: {}".format(duplicate_ids))
     base_id = int(decision.get("base_object_id"))
     stack_order = [int(value) for value in decision.get("stack_order", [])]
     full_stack_order = [int(value) for value in decision.get("full_stack_order", [])]
@@ -133,14 +145,35 @@ def validate_vlm_stack_decision(raw_output: dict, state: dict, instruction: str)
 
 
 def _validate_explicit_rule_coverage(validated: dict, rule_diagnostic: dict) -> None:
-    """Reject VLM stack decisions that omit explicit instruction objects."""
-    expected_ids = {int(value) for value in rule_diagnostic.get("full_stack_order", [])}
-    actual_ids = {int(value) for value in validated.get("full_stack_order", [])}
+    """Reject VLM stack decisions that conflict with explicit instruction objects."""
+    if not _explicit_rule_ids_unambiguous(rule_diagnostic):
+        return
+    expected_order = [int(value) for value in rule_diagnostic.get("full_stack_order", [])]
+    actual_order = [int(value) for value in validated.get("full_stack_order", [])]
+    expected_ids = set(expected_order)
+    actual_ids = set(actual_order)
     if int(validated.get("base_object_id")) != int(rule_diagnostic.get("base_object_id")):
         raise ValueError("VLM base_object_id conflicts with explicit instruction target.")
     missing_ids = expected_ids - actual_ids
     if missing_ids:
         raise ValueError("VLM stack decision omits explicit instruction object ids: {}".format(sorted(missing_ids)))
+    if actual_order[:len(expected_order)] != expected_order:
+        raise ValueError(
+            "VLM stack order conflicts with explicit instruction order: expected_prefix={} actual={}".format(
+                expected_order,
+                actual_order,
+            )
+        )
+
+
+def _explicit_rule_ids_unambiguous(rule_diagnostic: dict) -> bool:
+    for selection in rule_diagnostic.get("color_candidate_selections", []) or []:
+        ids = selection.get("eligible_ids")
+        if ids is None:
+            ids = selection.get("candidate_ids", [])
+        if len(ids or []) > 1:
+            return False
+    return True
 
 
 def build_vlm_stack_prompt(policy_input: dict) -> str:
@@ -150,6 +183,8 @@ def build_vlm_stack_prompt(policy_input: dict) -> str:
         "你必须根据用户指令、快照图和检测后的精简 JSON 决定底座和堆叠顺序。\n"
         "只能选择 objects 中已有的 object id；不要编造物体。不要输出相机内参、关节角、轨迹、速度或 ROS 命令。\n"
         "stack_order 必须是不含 base_object_id 的放置顺序，full_stack_order 必须以 base_object_id 开头。\n\n"
+        "JSON 里的 full_stack_order/stack_order 必须和用户文字顺序一致；reason 写对但数组顺序写错会被拒绝。\n\n"
+        "如果同一种颜色/label 有多个实例，必须用编号图、object id、bbox 和 base_link 坐标区分；不要只按颜色猜。\n\n"
         "只输出严格 JSON：\n"
         "{\n"
         '  "task_type": "stack_blocks",\n'
@@ -175,3 +210,41 @@ def _image_payloads(policy_input: dict, include_images: bool) -> List[str]:
         if path:
             images.append(image_to_base64(path))
     return images
+
+
+def _duplicate_object_ids(objects: Iterable[ObjectDict]) -> List[Any]:
+    seen = set()
+    duplicates = []
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        object_id = obj.get("id")
+        key = str(object_id)
+        if key in seen and object_id not in duplicates:
+            duplicates.append(object_id)
+        seen.add(key)
+    return duplicates
+
+
+def _label_instance_groups(objects: Iterable[ObjectDict]) -> List[dict]:
+    groups: Dict[str, List[ObjectDict]] = {}
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        groups.setdefault(str(obj.get("label")), []).append(obj)
+    output = []
+    for label, items in sorted(groups.items()):
+        if len(items) <= 1:
+            continue
+        output.append({
+            "label": label,
+            "instances": [
+                {
+                    "id": obj.get("id"),
+                    "bbox_xyxy_px": obj.get("bbox_xyxy_px"),
+                    "geometry_center_base_m": obj.get("geometry_center_m") or obj.get("center_3d_base_m"),
+                }
+                for obj in items
+            ],
+        })
+    return output
