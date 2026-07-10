@@ -5,10 +5,6 @@ import math
 import os
 import time
 
-from robot_scene_pipeline.llm_scene_reasoner import (
-    stack_color_requirement_report,
-    validate_stack_blocks_decision,
-)
 from robot_scene_pipeline.vlm_stack_policy import (
     build_vlm_stack_decision_input,
     call_vlm_stack_policy,
@@ -53,38 +49,23 @@ def _initial_decision_valid(args, state):
     return False, "not enough detected blocks for VLM stack planning"
 
 
-def _write_initial_required_objects_report(args, output_dir, state, decision_error=None):
-    report = stack_color_requirement_report(args.instruction, state.get("objects", []))
-    report["snapshot_image"] = state.get("snapshot_image")
-    report["annotated_image"] = state.get("annotated_image")
-    report["decision_error"] = decision_error
-    write_json(os.path.join(output_dir, "initial_required_objects_report.json"), report)
+def _write_initial_observation_report(args, output_dir, state, decision_error=None):
+    objects = [obj for obj in state.get("objects", []) if isinstance(obj, dict) and not obj.get("is_workspace")]
+    report = {
+        "schema_version": "initial_vlm_observation_report_v2",
+        "instruction": args.instruction,
+        "object_count": len(objects),
+        "object_ids": [obj.get("id") for obj in objects],
+        "objects_with_base_geometry": [
+            obj.get("id") for obj in objects
+            if obj.get("geometry_center_m") is not None and obj.get("dimensions_m") is not None
+        ],
+        "snapshot_image": state.get("snapshot_image"),
+        "annotated_image": state.get("annotated_image"),
+        "decision_error": decision_error,
+    }
+    write_json(os.path.join(output_dir, "initial_vlm_observation_report.json"), report)
     return report
-
-
-def write_stack_object_selection_debug(output_dir: str, decision: dict) -> None:
-    selections = decision.get("color_candidate_selections") if isinstance(decision, dict) else None
-    if not selections:
-        return
-    write_json(
-        os.path.join(output_dir, "stack_object_selection_debug.json"),
-        {
-            "schema_version": "stack_object_selection_debug_v1",
-            "base_object_id": decision.get("base_object_id"),
-            "stack_order": decision.get("stack_order"),
-            "full_stack_order": decision.get("full_stack_order"),
-            "selections": selections,
-        },
-    )
-
-
-def _raise_initial_required_objects_missing(args, state, decision_error):
-    report = _write_initial_required_objects_report(
-        args,
-        args.output_dir,
-        state,
-        decision_error=decision_error,
-    )
 
 
 def _call_initial_vlm_stack_decision(args, state, output_dir):
@@ -92,19 +73,9 @@ def _call_initial_vlm_stack_decision(args, state, output_dir):
     raw_output = call_vlm_stack_policy(args, policy_input)
     write_json(os.path.join(output_dir, "vlm_stack_decision_input.json"), policy_input)
     write_json(os.path.join(output_dir, "vlm_stack_decision_raw.json"), raw_output)
-    decision = validate_vlm_stack_decision(raw_output, state, args.instruction)
+    decision = validate_vlm_stack_decision(raw_output, state)
     write_json(os.path.join(output_dir, "vlm_stack_decision_validated.json"), decision)
     return decision
-    missing = report.get("missing_colors", [])
-    raise RuntimeError(
-        "Initial required objects are still missing after recovery observation: "
-        "missing_colors={} error={}. See initial_required_objects_report.json. "
-        "Object id is a per-snapshot instance id; label is the detector class name; "
-        "label_id/class_id are YOLO class ids and are not unique object ids.".format(
-            missing,
-            decision_error,
-        )
-    )
 
 def object_by_id(state, object_id):
     for obj in state.get("objects", []):
@@ -135,7 +106,6 @@ def load_or_capture_initial(args):
             }
         else:
             raise RuntimeError("Offline mode requires --stack-decision-json or --base-object-id with --stack-order.")
-        write_stack_object_selection_debug(args.output_dir, decision)
         return state, decision
 
     state = None
@@ -148,11 +118,11 @@ def load_or_capture_initial(args):
             if float(args.initial_observation_stable_wait_s) > 0.0:
                 time.sleep(float(args.initial_observation_stable_wait_s))
             _move_to_initial_recovery_offset(args, attempt)
-        capture_scene_observation(args, initial_dir, stack_reasoning=False)
+        capture_scene_observation(args, initial_dir)
         state = load_json(os.path.join(initial_dir, "private_scene_state.json"))
         objects = [obj for obj in state.get("objects", []) if not obj.get("is_workspace")]
         decision_ok, decision_error = _initial_decision_valid(args, state)
-        _write_initial_required_objects_report(args, initial_dir, state, decision_error=decision_error)
+        _write_initial_observation_report(args, initial_dir, state, decision_error=decision_error)
         if objects and decision_ok:
             break
         if attempt + 1 >= initial_attempts:
@@ -167,27 +137,25 @@ def load_or_capture_initial(args):
             flush=True,
         )
     reasoning_dir = os.path.join(args.output_dir, "initial_order_vlm")
-    capture_scene_observation(args, reasoning_dir, stack_reasoning=False)
+    capture_scene_observation(args, reasoning_dir)
     state = load_json(os.path.join(reasoning_dir, "private_scene_state.json"))
-    _write_initial_required_objects_report(args, reasoning_dir, state, decision_error=None)
+    _write_initial_observation_report(args, reasoning_dir, state, decision_error=None)
     try:
         decision = _call_initial_vlm_stack_decision(args, state, reasoning_dir)
     except Exception as exc:
-        _write_initial_required_objects_report(args, reasoning_dir, state, decision_error=str(exc))
+        _write_initial_observation_report(args, reasoning_dir, state, decision_error=str(exc))
         raise
-    write_stack_object_selection_debug(args.output_dir, decision)
     return state, decision
 
 
-def validate_decision(decision, initial_state, instruction="", prefer_explicit_rule=False):
-    validated = validate_stack_blocks_decision(
-        decision,
-        initial_state.get("objects", []),
-        instruction,
-        prefer_explicit_rule=False,
-    )
+def validate_decision(decision, initial_state):
+    validated = dict(decision)
+    if validated.get("decision_source") != "vlm_stack_policy" and not validated.get("reason"):
+        validated["reason"] = "Explicit offline stack order."
     base_id = int(validated["base_object_id"])
     order = [int(value) for value in validated["stack_order"]]
+    if base_id in order or len(order) != len(set(order)):
+        raise RuntimeError("Stack order must contain unique ids and exclude the base object.")
     require_geometry_object(object_by_id(initial_state, base_id))
     for object_id in order:
         require_geometry_object(object_by_id(initial_state, object_id))
@@ -232,20 +200,6 @@ def print_decision_summary(initial_state, decision):
         ),
         flush=True,
     )
-    for selection in decision.get("color_candidate_selections", []):
-        if len(selection.get("candidate_ids", [])) > 1:
-            print(
-                "Color candidate selection: color={} candidates={} eligible={} selected={} "
-                "xy={} strategy={}".format(
-                    selection.get("color"),
-                    selection.get("candidate_ids"),
-                    selection.get("eligible_ids"),
-                    selection.get("selected_id"),
-                    selection.get("selected_xy_base_m"),
-                    selection.get("strategy"),
-                ),
-                flush=True,
-            )
     for role in structure_plan.get("roles", []) if isinstance(structure_plan.get("roles"), list) else []:
         print(
             "Structure role: role={} object_id={} reason={}".format(

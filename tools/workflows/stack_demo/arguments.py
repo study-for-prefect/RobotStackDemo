@@ -13,11 +13,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--instruction", default="把积木按指定顺序叠起来")
     parser.add_argument("--output-dir", default=os.path.join(PROJECT_ROOT, "runtime"))
     parser.add_argument("--stack-decision-json", default="")
-    parser.add_argument(
-        "--force-llm-decision",
-        action="store_true",
-        help="Deprecated compatibility flag; stack order is always VLM-first in online mode.",
-    )
     parser.add_argument("--offline-scene-state", default="")
     parser.add_argument("--base-object-id", type=int, default=None)
     parser.add_argument("--stack-order", nargs="+", type=int, default=None)
@@ -25,21 +20,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--execute-push-clearing",
         action="store_true",
-        help="Execute geometry-based obstacle push clearing before pick when should_push_away is detected.",
+        help="Allow execution of VLM-selected nudge or pick-away actions after physical and MoveIt validation.",
     )
     parser.add_argument(
         "--use-vlm-action-policy",
         action="store_true",
         help=(
-            "Deprecated compatibility flag; high-level action intent is always VLM-first. "
-            "Code validates object ids, push direction/distance, protected structure safety, and MoveIt preflight."
+            "Deprecated compatibility flag; autonomous scene/action decisions are always VLM-first. "
+            "Code only validates ids, physical safety, grasp/place feasibility, and MoveIt preflight."
         ),
-    )
-    parser.add_argument(
-        "--push-clearing-distance-m",
-        type=float,
-        default=0.05,
-        help="Default push distance for obstacle clearing.",
     )
     parser.add_argument(
         "--push-clearing-lift-m",
@@ -56,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--push-tool-width-m", type=float, default=0.035)
     parser.add_argument("--push-tool-safety-margin-m", type=float, default=0.005)
     parser.add_argument("--grasp-gripper-side-clearance-m", type=float, default=0.006)
-    parser.add_argument("--max-automatic-push-clearing-attempts", type=int, default=4)
+    parser.add_argument("--max-vlm-action-attempts", type=int, default=4)
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--conda-env", default="yolo")
     parser.add_argument("--ros-python", default="/usr/bin/python3")

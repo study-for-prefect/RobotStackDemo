@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
@@ -39,75 +40,67 @@ def build_vlm_action_decision_input(
     scene_rgb_path: Optional[str],
     minimal_overlay_path: Optional[str],
     current_state: dict,
-    target_object: ObjectDict,
-    analysis: dict,
+    task_focus_object: ObjectDict,
     protected_ids: Iterable[Any],
     base_id: Any,
     memory: Optional[dict],
     step_index: int,
 ) -> dict:
-    """Build the high-level action-intent prompt payload."""
+    """Build VLM input from images, objective scene facts, and task state."""
     structure = (memory or {}).get("structure") or {}
     objects = [obj for obj in current_state.get("objects", []) if isinstance(obj, dict)]
     duplicate_ids = _duplicate_object_ids(objects)
     label_groups = _label_instance_groups(objects)
     return {
-        "schema_version": "vlm_action_decision_input_v1",
+        "schema_version": "vlm_autonomous_action_input_v2",
         "scene_rgb": scene_rgb_path,
         "minimal_overlay": minimal_overlay_path,
         "base_frame": current_state.get("base_frame", "base_link"),
-        "instruction": current_state.get("instruction"),
-        "clearance_step_index": int(step_index),
-        "current_task_target_object_id": target_object.get("id"),
-        "target_object_id_rule": "Must equal current_task_target_object_id. It is not the destination/base/stack-top id.",
+        "task_goal": {
+            "instruction": current_state.get("instruction"),
+            "action_step_index": int(step_index),
+            "current_plan_focus": compact_object_for_action_policy(task_focus_object),
+            "current_plan_focus_is_advisory": True,
+            "structure_plan": (memory or {}).get("task_plan") or structure.get("plan"),
+            "stack_progress": {
+                "base": structure.get("base"),
+                "placed_order": structure.get("placed_order", []),
+                "current_top": structure.get("current_top"),
+            },
+            "rule": (
+                "Decide the next useful action from the whole scene. The current plan focus is context, "
+                "not a forced object choice."
+            ),
+        },
         "objects": [
             compact_object_for_action_policy(obj)
             for obj in objects
         ],
-        "target_object": compact_object_for_action_policy(target_object),
-        "target_identity_rule": {
-            "current_task_target_object_id": target_object.get("id"),
-            "target_label": target_object.get("label"),
-            "target_center_base_m": target_object.get("geometry_center_m") or target_object.get("center_3d_base_m"),
-            "rule": "Select by object id and base_link center, never by color/label alone.",
-        },
         "scene_integrity": {
             "object_ids_unique": not duplicate_ids,
             "duplicate_object_ids": duplicate_ids,
             "same_label_instance_groups": label_groups,
         },
-        "target_grasp_state": {
-            "action": analysis.get("action"),
-            "grasp_feasible": bool(analysis.get("grasp_feasible")),
-            "all_grasps_blocked": bool(analysis.get("all_grasps_blocked")),
-            "selected_grasp_yaw_deg": analysis.get("selected_grasp_yaw_deg"),
-            "blocking_objects": analysis.get("blocking_objects", []),
-            "blocking_objects_by_interval": analysis.get("blocking_objects_by_interval", []),
-        },
-        "base_object_id": base_id,
-        "protected_object_ids": [value for value in protected_ids or []],
-        "stack_memory": {
-            "base": structure.get("base"),
-            "placed_order": structure.get("placed_order", []),
-            "current_top": structure.get("current_top"),
-        },
-        "stack_reference": {
+        "physical_context": {
             "base_object_id": base_id,
             "protected_object_ids": [value for value in protected_ids or []],
-            "note": "These are placement/protection references, not target_object_id for the action JSON.",
+            "note": "These identify the physical structure that must not be moved.",
         },
         "policy_role_split": {
-            "vlm": "high_level_action_intent_only",
-            "code": "physical_feasibility_safety_validation_and_execution",
+            "vlm": "scene_diagnosis_object_action_direction_distance_and_benefit_prediction",
+            "code": "collision_grasp_and_execution_feasibility_validation_only",
             "moveit": "ik_collision_and_trajectory_preflight",
         },
         "output_schema": {
+            "scene_problem": "string; VLM diagnosis of the current scene",
             "action_type": "pick|nudge|pick_away|reobserve|stop",
             "object_id": "int|string|null",
-            "target_object_id": "must equal current_task_target_object_id; never use base/current_top/destination id here",
+            "target_object_id": "int|string|null; task object this action is intended to advance, chosen by VLM",
             "push_direction_base": "[x,y,z] unit vector in base_link, required for nudge",
             "push_distance_m": "0.01..0.05, required for nudge",
             "safe_place_center_base_m": "[x,y,z] in base_link, required for pick_away",
+            "predicted_scene_benefit": "string; expected observable scene change and task gain",
+            "risk_assessment": "string; main uncertainty or downside",
             "reason": "string",
             "confidence": "0.0..1.0",
         },
@@ -150,12 +143,15 @@ def call_vlm_action_policy(args: Any, policy_input: dict) -> dict:
             "raw_content": locals().get("raw_content", ""),
             "error": str(exc),
             "decision": {
+                "scene_problem": "VLM response could not be parsed or obtained.",
                 "action_type": "stop",
                 "object_id": None,
                 "target_object_id": None,
                 "push_direction_base": None,
                 "push_distance_m": None,
                 "safe_place_center_base_m": None,
+                "predicted_scene_benefit": "No motion; preserve the current scene fail-safe.",
+                "risk_assessment": str(exc),
                 "reason": "vlm_json_or_call_failed: {}".format(exc),
                 "confidence": 0.0,
                 "raw_decision": None,
@@ -166,31 +162,35 @@ def call_vlm_action_policy(args: Any, policy_input: dict) -> dict:
 def build_vlm_action_prompt(policy_input: dict) -> str:
     text_input = {key: value for key, value in policy_input.items() if key not in ("scene_rgb", "minimal_overlay")}
     return (
-        "你是 UR5 桌面积木堆叠任务的 VLM 高层动作意图决策模块。\n"
-        "图片只用于核对带编号物体；结构化输入中的 base_link 坐标、尺寸、bbox 和任务状态是决策依据。\n"
+        "你是 UR5 桌面积木任务的自主视觉动作决策模块。\n"
+        "你直接根据原始快照、带编号图、base_link 场景几何和任务目标判断当前问题并提出下一步动作。\n"
         "不要输出关节角、轨迹、速度、ROS 控制命令或相机内参。\n\n"
-        "你必须自己决定动作意图：\n"
-        "- pick: 当前任务目标已经适合抓取；object_id 必须是 target_object.id。\n"
-        "- nudge: 推开某个松散物体；你必须给出 base_link 下的单位方向向量和 0.01 到 0.05 m 的距离。\n"
-        "- pick_away: 抓走某个松散物体，并给出 base_link 下的安全临时放置中心 safe_place_center_base_m。\n"
+        "必须独立完成五项判断：当前问题、抓还是推、操作哪个物体、推的方向和距离、操作后的场景收益。\n"
+        "输入中没有代码生成的候选动作、阻挡物结论、抓取可行性结论或推荐方向。\n\n"
+        "动作语义：\n"
+        "- pick: 抓取你自主选择、最能推进任务的物体。\n"
+        "- nudge: 推动你自主选择的松散物体；给出 base_link 下单位方向和 0.01 到 0.05 m 距离。\n"
+        "- pick_away: 抓走你自主选择的松散物体，并给出 base_link 下临时放置中心。\n"
         "- reobserve: 视觉信息不足，需要重新观察。\n"
         "- stop: 没有安全/合理动作。\n\n"
-        "约束：不移动 base、placed、locked、protected 物体；优先最小扰动和保护已堆叠结构。\n"
-        "target_object_id 永远表示当前循环的 target_object.id，不是放置参考物、底座、红色基座或 current_top。\n"
-        "如果 action_type=pick，则 object_id 和 target_object_id 都必须等于输入里的 current_task_target_object_id。\n"
-        "如果 target_grasp_state.grasp_feasible=true 且你选择 pick，只能抓 target_object，不能抓 stack_memory.current_top 或 protected_object_ids。\n"
-        "如果 action_type=nudge 或 pick_away，则 object_id 是要推/抓走的障碍物，target_object_id 仍然必须等于 current_task_target_object_id。\n"
-        "如果同一种颜色/label 有多个实例，必须用 objects 中的 id、bbox、base_link 中心和 target_identity_rule 区分；禁止只按颜色猜。\n"
+        "物理约束：不移动 base、placed、locked、protected 物体；保护已堆叠结构。\n"
+        "object_id 是实际被抓/推的物体；target_object_id 是此动作要推进的任务对象，也由你根据任务和场景选择。\n"
+        "pick 时两者通常相同；nudge/pick_away 时 object_id 可是障碍物，target_object_id 可是受益对象。\n"
+        "不要因为 current_plan_focus 存在就机械选择它；先看全图和全部几何，再说明你的判断。\n"
+        "同颜色/label 多实例必须用 id、bbox 和 base_link 中心区分，禁止只按颜色猜。\n"
         "如果 scene_integrity.object_ids_unique=false，输出 stop 并说明检测 id 不唯一，不能执行。\n"
-        "代码会独立验证物理可行性、安全和 MoveIt，不安全会停止。\n\n"
+        "代码只会验证碰撞、抓取/放置几何和 MoveIt 可行性，不会替你选择另一个动作。\n\n"
         "只输出严格 JSON：\n"
         "{\n"
+        '  "scene_problem": "...",\n'
         '  "action_type": "pick|nudge|pick_away|reobserve|stop",\n'
         '  "object_id": 0,\n'
         '  "target_object_id": 0,\n'
         '  "push_direction_base": [1.0, 0.0, 0.0],\n'
         '  "push_distance_m": 0.025,\n'
         '  "safe_place_center_base_m": [0.0, 0.0, 0.0],\n'
+        '  "predicted_scene_benefit": "...",\n'
+        '  "risk_assessment": "...",\n'
         '  "reason": "...",\n'
         '  "confidence": 0.0\n'
         "}\n\n"
@@ -206,15 +206,22 @@ def parse_vlm_action_decision_text(text: str) -> ActionDict:
     action_type = str(decision.get("action_type") or "").strip()
     if action_type not in ACTION_TYPES:
         raise ValueError("Unsupported action_type: {}".format(action_type))
+    scene_problem = _required_text(decision, "scene_problem")
+    predicted_benefit = _required_text(decision, "predicted_scene_benefit")
+    risk_assessment = _required_text(decision, "risk_assessment")
+    reason = _required_text(decision, "reason")
     return {
+        "scene_problem": scene_problem,
         "action_type": action_type,
         "object_id": decision.get("object_id"),
         "target_object_id": decision.get("target_object_id"),
         "push_direction_base": decision.get("push_direction_base"),
         "push_distance_m": decision.get("push_distance_m"),
         "safe_place_center_base_m": decision.get("safe_place_center_base_m"),
-        "reason": str(decision.get("reason") or ""),
-        "confidence": _clamp_float(decision.get("confidence"), 0.0, 1.0),
+        "predicted_scene_benefit": predicted_benefit,
+        "risk_assessment": risk_assessment,
+        "reason": reason,
+        "confidence": _strict_confidence(decision.get("confidence")),
         "raw_decision": decision,
     }
 
@@ -266,9 +273,18 @@ def _image_payloads(policy_input: dict, include_images: bool) -> List[str]:
     return images
 
 
-def _clamp_float(value: Any, low: float, high: float) -> float:
+def _required_text(decision: ActionDict, key: str) -> str:
+    value = str(decision.get(key) or "").strip()
+    if not value:
+        raise ValueError("VLM action output requires non-empty {}.".format(key))
+    return value
+
+
+def _strict_confidence(value: Any) -> float:
     try:
-        numeric = float(value)
+        confidence = float(value)
     except (TypeError, ValueError):
-        return float(low)
-    return max(float(low), min(float(high), numeric))
+        raise ValueError("VLM action output confidence must be numeric.")
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        raise ValueError("VLM action output confidence must be within 0.0..1.0.")
+    return confidence

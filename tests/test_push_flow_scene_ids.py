@@ -2,10 +2,31 @@ import os
 import tempfile
 import unittest
 
-from tools.workflows.stack_demo.push_flow import _ensure_unique_scene_object_ids
+from tools.workflows.stack_demo.push_flow import _ensure_unique_scene_object_ids, _selected_pick_object
 
 
 class PushFlowSceneIdTests(unittest.TestCase):
+    def test_vlm_selected_pick_object_replaces_advisory_plan_focus(self):
+        state = {
+            "objects": [
+                {"id": 1, "label": "green", "geometry_center_m": [0.1, 0.0, 0.02]},
+                {"id": 2, "label": "blue", "geometry_center_m": [0.2, 0.0, 0.02]},
+            ]
+        }
+
+        selected = _selected_pick_object(
+            state,
+            {
+                "action_type": "pick",
+                "object_id": 2,
+                "selected_grasp_yaw_deg": 30.0,
+                "grasp_validation": {"grasp_feasible": True, "selected_grasp_source": "test"},
+            },
+        )
+
+        self.assertEqual(selected["id"], 2)
+        self.assertEqual(selected["selected_grasp_yaw_deg"], 30.0)
+
     def test_duplicate_snapshot_ids_are_reassigned_before_vlm_action(self):
         state = {
             "objects": [

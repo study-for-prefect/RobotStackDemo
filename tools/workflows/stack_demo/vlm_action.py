@@ -15,14 +15,14 @@ from robot_scene_pipeline.vlm_action_policy import (
 from tools.planning.decision_to_execution import write_json
 
 from .clearance_execution import preflight_nudge_action, preflight_pick_away_action
+from .pick_preflight import preflight_pick_action
 
 
-def select_clearance_with_vlm_action_policy(
+def select_autonomous_vlm_action(
     args: Any,
     cycle_dir: str,
     current_state: dict,
-    held_object: dict,
-    analysis: dict,
+    task_focus_object: dict,
     protected_ids: Iterable[Any],
     base_id: Any,
     memory: dict,
@@ -35,8 +35,7 @@ def select_clearance_with_vlm_action_policy(
         scene_rgb_path,
         minimal_overlay_path,
         current_state,
-        held_object,
-        analysis,
+        task_focus_object,
         protected_ids,
         base_id,
         memory,
@@ -47,9 +46,13 @@ def select_clearance_with_vlm_action_policy(
     selected, safety_report = validate_vlm_action_decision(
         decision,
         current_state,
-        held_object,
         protected_ids,
-        analysis=analysis,
+        grasp_options={
+            "gripper_outer_width_m": getattr(args, "grasp_gripper_outer_width_m", 0.112),
+            "gripper_inner_width_m": getattr(args, "grasp_gripper_inner_width_m", 0.048),
+            "side_clearance_m": getattr(args, "grasp_gripper_side_clearance_m", 0.006),
+            "approach_length_m": getattr(args, "grasp_approach_length_m", 0.02),
+        },
         protection_margin_m=float(getattr(args, "push_tool_safety_margin_m", 0.005)),
         future_place_regions=future_place_regions or [],
     )
@@ -58,15 +61,15 @@ def select_clearance_with_vlm_action_policy(
         "run_moveit_preflight": False,
         "failures": [],
     }
-    run_moveit_preflight = bool(
+    run_clearance_preflight = bool(
         getattr(args, "execute", False)
         and getattr(args, "execute_push_clearing", False)
     )
     if selected is not None and selected.get("action_type") in ("nudge", "pick_away"):
-        preflight_report["run_moveit_preflight"] = run_moveit_preflight
-        if run_moveit_preflight:
+        preflight_report["run_moveit_preflight"] = run_clearance_preflight
+        if run_clearance_preflight:
             checked = (
-                preflight_nudge_action(args, cycle_dir, current_state, held_object, selected, step_index)
+                preflight_nudge_action(args, cycle_dir, current_state, task_focus_object, selected, step_index)
                 if selected.get("action_type") == "nudge"
                 else preflight_pick_away_action(args, cycle_dir, current_state, selected, step_index)
             )
@@ -76,7 +79,15 @@ def select_clearance_with_vlm_action_policy(
             selected["executable_safe"] = False
             safety_report["reason"] = "accepted_without_moveit_preflight_dry_run"
     elif selected is not None and selected.get("action_type") == "pick":
-        safety_report = mark_moveit_result(selected, safety_report, True)
+        run_pick_preflight = bool(getattr(args, "execute", False))
+        preflight_report["run_moveit_preflight"] = run_pick_preflight
+        if run_pick_preflight:
+            checked = preflight_pick_action(args, cycle_dir, current_state, selected, step_index)
+            selected, safety_report = _apply_preflight_result(checked, decision, safety_report, preflight_report)
+        else:
+            selected["moveit_feasible"] = False
+            selected["executable_safe"] = False
+            safety_report["reason"] = "accepted_without_moveit_preflight_dry_run"
 
     validated_output = _validated_output(raw_output, selected, safety_report)
     write_vlm_action_artifacts(cycle_dir, policy_input, raw_output, validated_output, safety_report)
@@ -144,12 +155,15 @@ def _validated_output(raw_output: dict, selected: Optional[dict], safety_report:
         "schema_version": "vlm_action_decision_validated_v1",
         "selection_source": "vlm_action_policy",
         "selection_status": "selected" if safety_report.get("accepted") else "fail_safe_stop",
+        "scene_problem": decision.get("scene_problem"),
         "action_type": decision.get("action_type", "stop"),
         "object_id": decision.get("object_id"),
         "target_object_id": decision.get("target_object_id"),
         "push_direction_base": decision.get("push_direction_base"),
         "push_distance_m": decision.get("push_distance_m"),
         "safe_place_center_base_m": decision.get("safe_place_center_base_m"),
+        "predicted_scene_benefit": decision.get("predicted_scene_benefit"),
+        "risk_assessment": decision.get("risk_assessment"),
         "reason": decision.get("reason") or safety_report.get("reason"),
         "confidence": decision.get("confidence", 0.0),
         "selected_action": selected,

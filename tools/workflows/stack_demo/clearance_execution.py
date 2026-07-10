@@ -27,10 +27,9 @@ def _action_summary(action: dict) -> dict:
     keys = (
         "action_id", "action", "action_type", "object_id", "obstacle_id", "target_object_id",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
-        "collision_free", "sweep_collision_free", "workspace_feasible", "gripper_feasible",
-        "selected_grasp_yaw_deg", "predicted_selected_grasp_yaw_deg", "safe_place_center_m", "geometry_feasible",
-        "approach_path_safe", "push_swept_safe", "push_end_safe", "protected_structure_safe", "task_effective",
-        "automatic_execution_allowed", "clearance_preflight_allowed", "reason", "confidence",
+        "collision_free", "sweep_collision_free", "selected_grasp_yaw_deg", "safe_place_center_m",
+        "protected_structure_safe", "scene_problem", "predicted_scene_benefit", "risk_assessment",
+        "reason", "confidence",
     )
     return {key: action.get(key) for key in keys if key in action}
 
@@ -69,7 +68,6 @@ def _build_nudge_execution_plan(args: Any, current_state: dict, held_object: dic
         held_object,
         selected_push,
         args,
-        direction_evaluations=[selected_action.get("push_evaluation", {})],
     )
     push_execution_plan["action_type"] = "nudge"
     push_execution_plan["action_id"] = selected_action.get("action_id")
@@ -333,24 +331,13 @@ def execute_pick_away_and_reobserve(
 
 
 def _selected_push_from_vlm_action(selected_action: dict) -> dict:
-    push_evaluation = selected_action.get("push_evaluation") or {}
     return {
-        "type": "should_push_away",
         "subject": selected_action.get("obstacle_id"),
-        "object": selected_action.get("blocks", [selected_action.get("target_object_id")])[0],
         "source": "vlm_action_policy",
         "reason": selected_action.get("reason"),
         "action_id": selected_action.get("action_id"),
         "direction_base": selected_action.get("direction_base"),
         "distance_m": selected_action.get("distance_m"),
-        "direction_source": selected_action.get("direction_source"),
-        "direction_score": selected_action.get("score"),
-        "selected_grasp_yaw_deg": selected_action.get("selected_grasp_yaw_deg"),
-        "predicted_selected_grasp_yaw_deg": (
-            selected_action.get("predicted_selected_grasp_yaw_deg")
-            if selected_action.get("predicted_selected_grasp_yaw_deg") is not None
-            else push_evaluation.get("predicted_selected_grasp_yaw_deg")
-        ),
     }
 
 
@@ -471,7 +458,7 @@ def execute_nudge_and_reobserve(
             memory,
             obstacle_memory_id,
             selected_push["direction_base"],
-            selected_push.get("distance_m", args.push_clearing_distance_m),
+            float(selected_push["distance_m"]),
             reason=selected_push.get("reason") or "vlm_action_nudge",
             result="success",
             observed_delta_m=observed_delta_m,

@@ -9,9 +9,10 @@ This directory contains the split single-frame robot scene pipeline:
 - `depth_geometry.py`: depth-to-3D and scene state helpers.
 - `tf_transform.py`: TF lookup and camera-to-base point transform.
 - `grasp_yaw_search.py`: 连续抓取 yaw 搜索，输出可行/阻塞 yaw 区间。
-- `grasp_obstruction_decision.py`: 根据 yaw 搜索结果生成 pick、push 或 replan 决策字段。
+- `grasp_obstruction_decision.py`: 单帧场景关系诊断兼容层；不参与 stack demo 的 VLM 动作选择。
 - `vlm_stack_policy.py`: VLM-first 初始结构和堆叠顺序决策输入、调用与验证。
-- `vlm_action_policy.py`: VLM-first 抓/推/抓走/重观察/停止动作意图输入、解析与安全验证。
+- `vlm_action_policy.py`: 从原图、客观场景几何和任务目标构建自主 VLM 动作输入并解析输出。
+- `vlm_action_validation.py`: 在 VLM 选定动作后验证碰撞、抓取/放置几何和执行可行性。
 - `llm_scene_reasoner.py`: LLM prompt and Ollama call.
 
 For hover/TCP offset and XY-bias calibration, see

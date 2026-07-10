@@ -134,7 +134,7 @@ def capture_empty_observation(args, output_dir, held_object_id):
     init_ready_pose(args)
     if args.offline_scene_state:
         return None
-    capture_scene_observation(args, output_dir, stack_reasoning=False)
+    capture_scene_observation(args, output_dir)
     return load_json(os.path.join(output_dir, "private_scene_state.json"))
 
 
@@ -147,7 +147,7 @@ def capture_empty_current_pose(args, output_dir, held_object_id, allow_holding=F
         time.sleep(float(args.second_snapshot_stable_wait_s))
     if refresh_tf:
         run(tf_lookup_command(args))
-    capture_scene_observation(args, output_dir, stack_reasoning=False)
+    capture_scene_observation(args, output_dir)
     return load_json(os.path.join(output_dir, "private_scene_state.json"))
 
 
@@ -170,7 +170,7 @@ def perception_server_snapshot(args, output_dir):
     return payload
 
 
-def capture_scene_observation(args, output_dir, stack_reasoning=False):
+def capture_scene_observation(args, output_dir):
     try:
         payload = perception_server_snapshot(args, output_dir)
         print(
@@ -189,7 +189,7 @@ def capture_scene_observation(args, output_dir, stack_reasoning=False):
             )
         print("Perception server failed; using legacy snapshot subprocess: {}".format(exc), flush=True)
     run(tf_lookup_command(args))
-    run(snapshot_command(args, output_dir, stack_reasoning=stack_reasoning))
+    run(snapshot_command(args, output_dir))
 
 
 def relative_translate_command(args, offset_base):
@@ -304,7 +304,7 @@ def retry_close_observation(
     raise RuntimeError("{} detection failed after {} attempts: {}".format(description, attempts, last_error))
 
 
-def snapshot_command(args, output_dir, stack_reasoning=False):
+def snapshot_command(args, output_dir):
     command = [
         "conda", "run", "-n", args.conda_env, "python", "-m",
         "robot_scene_pipeline.snapshot_pipeline",
@@ -320,21 +320,5 @@ def snapshot_command(args, output_dir, stack_reasoning=False):
         "--detector-iou", str(args.detector_iou),
         "--detector-device", args.detector_device,
     ]
-    if stack_reasoning:
-        command.extend(
-            [
-                "--llm-task", "stack_blocks",
-                "--instruction", args.instruction,
-                "--model", args.model,
-                "--ollama-url", args.ollama_url,
-                "--timeout", str(args.timeout),
-                "--num-predict", str(args.num_predict),
-            ]
-        )
-        if args.no_image:
-            command.append("--no-image")
-        if args.force_llm_decision:
-            command.append("--force-llm-stack-decision")
-    else:
-        command.append("--skip-llm")
+    command.append("--skip-llm")
     return command

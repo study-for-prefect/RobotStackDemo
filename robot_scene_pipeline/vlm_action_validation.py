@@ -20,13 +20,12 @@ DIRECTION_TOLERANCE = 1e-3
 def validate_vlm_action_decision(
     decision: ActionDict,
     current_state: dict,
-    target_object: ObjectDict,
     protected_ids: Iterable[Any],
-    analysis: Optional[dict] = None,
+    grasp_options: Optional[dict] = None,
     protection_margin_m: float = 0.01,
     future_place_regions: Optional[Iterable[dict]] = None,
 ) -> Tuple[Optional[dict], dict]:
-    """Validate VLM intent before MoveIt preflight."""
+    """Validate only physical safety and executability of a VLM-selected intent."""
     safety = {
         "schema_version": "vlm_action_safety_report_v1",
         "accepted": False,
@@ -47,45 +46,44 @@ def validate_vlm_action_decision(
         return None, safety
     object_map = {str(obj.get("id")): obj for obj in objects if obj.get("id") is not None}
     obj = object_map.get(str(decision.get("object_id"))) if decision.get("object_id") is not None else None
-    target_matches = str(decision.get("target_object_id")) == str(target_object.get("id"))
+    target = object_map.get(str(decision.get("target_object_id"))) if decision.get("target_object_id") is not None else None
     _record(safety, "object_id_exists", obj is not None, {"object_id": decision.get("object_id")})
     _record(
         safety,
-        "target_object_id_matches_current_target",
-        target_matches,
+        "target_object_id_exists",
+        target is not None,
         {
-            "expected_current_target_object_id": target_object.get("id"),
-            "actual_target_object_id": decision.get("target_object_id"),
-            "selected_object_id": decision.get("object_id"),
-            "note": "target_object_id is the current loop target, not the placement base/current_top.",
+            "target_object_id": decision.get("target_object_id"),
+            "note": "The VLM chooses the task object advanced by this action; code only verifies that it exists.",
         },
     )
-    if obj is None or not target_matches:
+    if obj is None or target is None:
         safety["reason"] = "object_or_target_validation_failed"
         return None, safety
-    movable_ok = _object_can_move(obj, protected_ids)
+    movable_ok = _object_can_move(obj, protected_ids, require_pushable=action_type == "nudge")
     _record(safety, "object_not_base_placed_locked_protected", movable_ok)
     if not movable_ok:
         safety["reason"] = "object_is_not_movable"
         return None, safety
     if action_type == "pick":
-        return _validate_pick(decision, obj, target_object, analysis or {}, safety)
+        return _validate_pick(decision, current_state, obj, target, grasp_options or {}, safety)
     if action_type == "pick_away":
         return _validate_pick_away(
             decision,
             current_state,
             obj,
-            target_object,
+            target,
             protected_ids,
             safety,
             protection_margin_m,
             future_place_regions or [],
+            grasp_options or {},
         )
     if action_type != "nudge":
         _record(safety, "action_type_supported", False)
         safety["reason"] = "unsupported_action_type"
         return None, safety
-    return _validate_nudge(decision, current_state, obj, target_object, protected_ids, safety, protection_margin_m)
+    return _validate_nudge(decision, current_state, obj, target, protected_ids, safety, protection_margin_m)
 
 
 def mark_moveit_result(action: Optional[dict], safety: dict, feasible: bool, error: Optional[str] = None) -> dict:
@@ -104,19 +102,26 @@ def mark_moveit_result(action: Optional[dict], safety: dict, feasible: bool, err
     return output
 
 
-def _validate_pick(decision: dict, obj: dict, target: dict, analysis: dict, safety: dict) -> Tuple[Optional[dict], dict]:
-    object_is_target = str(obj.get("id")) == str(target.get("id"))
-    grasp_feasible = bool(analysis.get("grasp_feasible"))
-    _record(safety, "pick_object_is_current_target", object_is_target)
-    _record(safety, "target_grasp_feasible", grasp_feasible)
-    if not object_is_target or not grasp_feasible:
-        safety["reason"] = "pick_intent_not_safe_for_current_target"
+def _validate_pick(
+    decision: dict,
+    current_state: dict,
+    obj: dict,
+    target: dict,
+    grasp_options: dict,
+    safety: dict,
+) -> Tuple[Optional[dict], dict]:
+    grasp = _select_grasp(obj, current_state.get("objects", []), grasp_options)
+    grasp_feasible = bool(grasp.get("grasp_feasible"))
+    _record(safety, "selected_object_grasp_feasible", grasp_feasible, _compact_grasp_report(grasp))
+    if not grasp_feasible:
+        safety["reason"] = "selected_pick_not_grasp_feasible"
         return None, safety
     action = _base_action(decision, "pick", obj, target)
-    action["selected_grasp_yaw_deg"] = analysis.get("selected_grasp_yaw_deg")
-    action["executable_safe"] = True
+    action["selected_grasp_yaw_deg"] = grasp.get("selected_grasp_yaw_deg")
+    action["grasp_validation"] = _compact_grasp_report(grasp)
+    action["executable_safe"] = False
     safety["accepted"] = True
-    safety["reason"] = "accepted_pick_intent"
+    safety["reason"] = "accepted_pending_moveit_preflight"
     return action, safety
 
 
@@ -129,9 +134,10 @@ def _validate_pick_away(
     safety: dict,
     protection_margin_m: float,
     future_place_regions: Iterable[dict],
+    grasp_options: dict,
 ) -> Tuple[Optional[dict], dict]:
     objects = [item for item in current_state.get("objects", []) if isinstance(item, dict)]
-    grasp = select_best_grasp(obj, objects)
+    grasp = _select_grasp(obj, objects, grasp_options)
     grasp_ok = bool(grasp.get("grasp_feasible"))
     place_ok, safe_place = _valid_safe_place(decision.get("safe_place_center_base_m"))
     _record(safety, "pick_away_grasp_feasible", grasp_ok, {"selected_grasp_yaw_deg": grasp.get("selected_grasp_yaw_deg")})
@@ -163,19 +169,9 @@ def _validate_pick_away(
         "action_id": "vlm_action_pick_away_obj_{}".format(obj.get("id")),
         "obstacle_id": obj.get("id"),
         "selected_grasp_yaw_deg": grasp.get("selected_grasp_yaw_deg"),
+        "grasp_validation": _compact_grasp_report(grasp),
         "safe_place_center_m": safe_place,
-        "geometry_feasible": True,
-        "approach_path_safe": True,
-        "push_swept_safe": True,
-        "push_end_safe": True,
-        "protected_structure_safe": True,
-        "task_effective": True,
-        "automatic_execution_allowed": True,
-        "clearance_preflight_allowed": True,
         "collision_free": True,
-        "sweep_collision_free": True,
-        "workspace_feasible": True,
-        "gripper_feasible": True,
         "executable_safe": False,
     })
     safety["accepted"] = True
@@ -213,18 +209,8 @@ def _validate_nudge(
         "obstacle_id": obj.get("id"),
         "direction_base": direction,
         "distance_m": distance,
-        "geometry_feasible": True,
-        "approach_path_safe": True,
-        "push_swept_safe": True,
-        "push_end_safe": True,
         "protected_structure_safe": True,
-        "task_effective": True,
-        "automatic_execution_allowed": True,
-        "clearance_preflight_allowed": True,
-        "collision_free": True,
         "sweep_collision_free": True,
-        "workspace_feasible": True,
-        "gripper_feasible": True,
         "executable_safe": False,
     })
     safety["accepted"] = True
@@ -238,13 +224,16 @@ def _base_action(decision: dict, action_type: str, obj: dict, target: dict) -> d
         "action_type": action_type,
         "object_id": obj.get("id"),
         "target_object_id": target.get("id"),
+        "scene_problem": decision.get("scene_problem"),
+        "predicted_scene_benefit": decision.get("predicted_scene_benefit"),
+        "risk_assessment": decision.get("risk_assessment"),
         "reason": decision.get("reason"),
         "confidence": decision.get("confidence"),
         "selection_source": "vlm_action_policy",
     }
 
 
-def _object_can_move(obj: ObjectDict, protected_ids: Iterable[Any]) -> bool:
+def _object_can_move(obj: ObjectDict, protected_ids: Iterable[Any], require_pushable: bool) -> bool:
     protected = {str(value) for value in protected_ids or []}
     if str(obj.get("id")) in protected:
         return False
@@ -252,7 +241,28 @@ def _object_can_move(obj: ObjectDict, protected_ids: Iterable[Any]) -> bool:
         return False
     if obj.get("state") in ("locked", "placed", "protected"):
         return False
-    return obj.get("pushable") is not False
+    return not require_pushable or obj.get("pushable") is not False
+
+
+def _select_grasp(obj: ObjectDict, objects: Iterable[ObjectDict], options: dict) -> dict:
+    keys = {
+        "yaw_step_deg", "local_refine_step_deg", "gripper_outer_width_m",
+        "gripper_inner_width_m", "current_wrist_yaw_deg", "approach_length_m",
+        "z_tolerance_m", "side_clearance_m",
+    }
+    kwargs = {key: options[key] for key in keys if options.get(key) is not None}
+    return select_best_grasp(obj, objects, **kwargs)
+
+
+def _compact_grasp_report(grasp: dict) -> dict:
+    return {
+        key: grasp.get(key)
+        for key in (
+            "grasp_feasible", "selected_grasp_yaw_deg", "selected_grasp_axis_delta_deg",
+            "selected_grasp_source", "feasible_yaw_intervals_deg", "blocked_yaw_intervals_deg",
+            "all_grasps_blocked", "blocking_objects", "parameters",
+        )
+    }
 
 
 def _duplicate_object_ids(objects: Iterable[ObjectDict]) -> List[Any]:

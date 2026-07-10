@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
 from .io_utils import image_to_base64, parse_json_or_embedded
-from .llm_stack_blocks import rule_stack_blocks_decision, validate_stack_blocks_decision
 
 
 ObjectDict = Dict[str, Any]
@@ -107,12 +107,15 @@ def call_vlm_stack_policy(args: Any, policy_input: dict) -> dict:
         }
 
 
-def validate_vlm_stack_decision(raw_output: dict, state: dict, instruction: str) -> dict:
+def validate_vlm_stack_decision(raw_output: dict, state: dict) -> dict:
+    """Validate stack JSON shape and referenced scene ids without task-rule repair."""
     if raw_output.get("call_status") != "parsed":
         raise RuntimeError("VLM stack decision failed: {}".format(raw_output.get("error")))
     decision = raw_output.get("decision")
     if not isinstance(decision, dict):
         raise ValueError("VLM stack decision must be a JSON object.")
+    if decision.get("task_type") not in ("stack_blocks", "structure_plan"):
+        raise ValueError("VLM stack decision task_type must be stack_blocks.")
     duplicate_ids = _duplicate_object_ids(state.get("objects", []))
     if duplicate_ids:
         raise ValueError("Scene object ids must be unique before VLM stack decision: {}".format(duplicate_ids))
@@ -125,55 +128,29 @@ def validate_vlm_stack_decision(raw_output: dict, state: dict, instruction: str)
         raise ValueError("VLM full_stack_order must start with base_object_id.")
     if len(stack_order) != len(set(stack_order)) or len(full_stack_order) != len(set(full_stack_order)):
         raise ValueError("VLM stack decision ids must be unique.")
-    validated = validate_stack_blocks_decision(
-        decision,
-        state.get("objects", []),
-        instruction,
-        prefer_explicit_rule=False,
-    )
-    if decision and decision.get("confidence") is not None:
-        try:
-            validated["confidence"] = max(0.0, min(1.0, float(decision.get("confidence"))))
-        except (TypeError, ValueError):
-            validated["confidence"] = 0.0
-    rule_diagnostic = rule_stack_blocks_decision(instruction, state.get("objects", [])) if instruction else None
-    if rule_diagnostic is not None:
-        _validate_explicit_rule_coverage(validated, rule_diagnostic)
-        validated["explicit_rule_diagnostic"] = rule_diagnostic
+    if full_stack_order != [base_id] + stack_order:
+        raise ValueError("VLM full_stack_order must equal [base_object_id] + stack_order.")
+    if not isinstance(decision.get("structure_plan"), dict):
+        raise ValueError("VLM stack decision requires structure_plan object.")
+    if not str(decision.get("reason") or "").strip():
+        raise ValueError("VLM stack decision requires non-empty reason.")
+    valid_ids = {
+        int(obj["id"])
+        for obj in state.get("objects", [])
+        if isinstance(obj, dict) and obj.get("id") is not None and not obj.get("is_workspace")
+    }
+    unknown_ids = set(full_stack_order) - valid_ids
+    if unknown_ids:
+        raise ValueError("VLM stack decision references unknown object ids: {}".format(sorted(unknown_ids)))
+    validated = dict(decision)
+    validated["task_type"] = "stack_blocks"
+    validated["base_object_id"] = base_id
+    validated["stack_order"] = stack_order
+    validated["full_stack_order"] = full_stack_order
+    validated["stack_order_semantics"] = "place_order_excludes_base"
+    validated["confidence"] = _strict_confidence(decision.get("confidence"))
     validated["decision_source"] = "vlm_stack_policy"
     return validated
-
-
-def _validate_explicit_rule_coverage(validated: dict, rule_diagnostic: dict) -> None:
-    """Reject VLM stack decisions that conflict with explicit instruction objects."""
-    if not _explicit_rule_ids_unambiguous(rule_diagnostic):
-        return
-    expected_order = [int(value) for value in rule_diagnostic.get("full_stack_order", [])]
-    actual_order = [int(value) for value in validated.get("full_stack_order", [])]
-    expected_ids = set(expected_order)
-    actual_ids = set(actual_order)
-    if int(validated.get("base_object_id")) != int(rule_diagnostic.get("base_object_id")):
-        raise ValueError("VLM base_object_id conflicts with explicit instruction target.")
-    missing_ids = expected_ids - actual_ids
-    if missing_ids:
-        raise ValueError("VLM stack decision omits explicit instruction object ids: {}".format(sorted(missing_ids)))
-    if actual_order[:len(expected_order)] != expected_order:
-        raise ValueError(
-            "VLM stack order conflicts with explicit instruction order: expected_prefix={} actual={}".format(
-                expected_order,
-                actual_order,
-            )
-        )
-
-
-def _explicit_rule_ids_unambiguous(rule_diagnostic: dict) -> bool:
-    for selection in rule_diagnostic.get("color_candidate_selections", []) or []:
-        ids = selection.get("eligible_ids")
-        if ids is None:
-            ids = selection.get("candidate_ids", [])
-        if len(ids or []) > 1:
-            return False
-    return True
 
 
 def build_vlm_stack_prompt(policy_input: dict) -> str:
@@ -183,7 +160,7 @@ def build_vlm_stack_prompt(policy_input: dict) -> str:
         "你必须根据用户指令、快照图和检测后的精简 JSON 决定底座和堆叠顺序。\n"
         "只能选择 objects 中已有的 object id；不要编造物体。不要输出相机内参、关节角、轨迹、速度或 ROS 命令。\n"
         "stack_order 必须是不含 base_object_id 的放置顺序，full_stack_order 必须以 base_object_id 开头。\n\n"
-        "JSON 里的 full_stack_order/stack_order 必须和用户文字顺序一致；reason 写对但数组顺序写错会被拒绝。\n\n"
+        "你负责理解用户任务语义并保证 JSON 顺序与目标一致；代码只检查 JSON 结构、物体 id 和几何是否可执行。\n\n"
         "如果同一种颜色/label 有多个实例，必须用编号图、object id、bbox 和 base_link 坐标区分；不要只按颜色猜。\n\n"
         "只输出严格 JSON：\n"
         "{\n"
@@ -248,3 +225,13 @@ def _label_instance_groups(objects: Iterable[ObjectDict]) -> List[dict]:
             ],
         })
     return output
+
+
+def _strict_confidence(value: Any) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("VLM stack confidence must be numeric.")
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        raise ValueError("VLM stack confidence must be within 0.0..1.0.")
+    return confidence

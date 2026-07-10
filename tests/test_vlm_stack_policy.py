@@ -16,12 +16,12 @@ class VlmStackPolicyTests(unittest.TestCase):
                     "base_object_id": 1,
                     "full_stack_order": [1, 2],
                     "stack_order": [2],
+                    "structure_plan": {},
                     "reason": "blue base red top",
                     "confidence": 0.9,
                 },
             },
             _state(),
-            "把红色积木放到蓝色积木上",
         )
 
         self.assertEqual(validated["base_object_id"], 1)
@@ -41,7 +41,6 @@ class VlmStackPolicyTests(unittest.TestCase):
                     },
                 },
                 _state(),
-                "stack blocks",
             )
 
     def test_base_repeated_in_stack_order_rejected(self):
@@ -57,27 +56,29 @@ class VlmStackPolicyTests(unittest.TestCase):
                     },
                 },
                 _state(),
-                "stack blocks",
             )
 
-    def test_missing_explicit_target_rejected(self):
-        with self.assertRaises(ValueError):
-            validate_vlm_stack_decision(
-                {
-                    "call_status": "parsed",
-                    "decision": {
-                        "task_type": "stack_blocks",
-                        "base_object_id": 1,
-                        "full_stack_order": [1],
-                        "stack_order": [],
-                        "reason": "forgot red target",
-                    },
+    def test_code_does_not_repair_vlm_plan_from_instruction_rules(self):
+        validated = validate_vlm_stack_decision(
+            {
+                "call_status": "parsed",
+                "decision": {
+                    "task_type": "stack_blocks",
+                    "base_object_id": 1,
+                    "full_stack_order": [1],
+                    "stack_order": [],
+                    "structure_plan": {},
+                    "reason": "VLM chose no placement",
+                    "confidence": 0.4,
                 },
-                _state(),
-                "把红色积木放到蓝色积木上",
-            )
+            },
+            _state(),
+        )
 
-    def test_explicit_instruction_order_conflict_rejected(self):
+        self.assertEqual(validated["full_stack_order"], [1])
+        self.assertNotIn("explicit_rule_repair", validated)
+
+    def test_code_does_not_override_vlm_order_with_color_parser(self):
         state = {
             "objects": [
                 {"id": 0, "label": "square red", "geometry_center_m": [0, 0, 0], "dimensions_m": [0.03, 0.03, 0.03]},
@@ -87,21 +88,24 @@ class VlmStackPolicyTests(unittest.TestCase):
             ],
         }
 
-        with self.assertRaises(ValueError):
-            validate_vlm_stack_decision(
-                {
-                    "call_status": "parsed",
-                    "decision": {
-                        "task_type": "stack_blocks",
-                        "base_object_id": 0,
-                        "full_stack_order": [0, 1, 2, 3],
-                        "stack_order": [1, 2, 3],
-                        "reason": "text says green blue yellow but array is green yellow blue",
-                    },
+        validated = validate_vlm_stack_decision(
+            {
+                "call_status": "parsed",
+                "decision": {
+                    "task_type": "stack_blocks",
+                    "base_object_id": 0,
+                    "full_stack_order": [0, 1, 2, 3],
+                    "stack_order": [1, 2, 3],
+                    "structure_plan": {},
+                    "reason": "VLM owns task interpretation",
+                    "confidence": 0.7,
                 },
-                state,
-                "以红色积木为底，把绿色积木放到红色上面，再把蓝色积木放到绿色上面，再把黄色积木放到蓝色上面",
-            )
+            },
+            state,
+        )
+
+        self.assertEqual(validated["full_stack_order"], [0, 1, 2, 3])
+        self.assertNotIn("explicit_rule_diagnostic", validated)
 
     def test_stack_input_does_not_include_camera_intrinsics(self):
         payload = build_vlm_stack_decision_input(_state(), "stack blocks")
@@ -144,7 +148,6 @@ class VlmStackPolicyTests(unittest.TestCase):
                     },
                 },
                 state,
-                "stack blocks",
             )
 
 

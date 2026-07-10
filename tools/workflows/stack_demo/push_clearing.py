@@ -20,15 +20,6 @@ def object_by_string_id(objects: Iterable[ObjectDict], object_id: Any) -> Object
     raise RuntimeError("Object id {} is absent from current_state.".format(object_id))
 
 
-def locked_stack_object_ids(base_id: Any, previous_locked_stack: Optional[dict]) -> set:
-    locked_ids = {str(base_id)}
-    if previous_locked_stack:
-        for obj in previous_locked_stack.get("stack_objects", []):
-            if obj.get("id") is not None:
-                locked_ids.add(str(obj["id"]))
-    return locked_ids
-
-
 def _xy_distance(first: ObjectDict, second: ObjectDict) -> float:
     first_center = get_center(first)
     second_center = get_center(second)
@@ -99,19 +90,12 @@ def build_push_execution_plan(
     held_object: ObjectDict,
     selected_push: RelationDict,
     args: Any,
-    direction_evaluations: Optional[List[dict]] = None,
 ) -> dict:
     obstacle = copy.deepcopy(
         object_by_string_id(current_state.get("objects", []), selected_push.get("subject"))
     )
-    reference_yaw = selected_push.get("selected_grasp_yaw_deg")
-    reference_yaw_source = "selected_clearance_grasp_yaw"
-    if reference_yaw is None:
-        reference_yaw = selected_push.get("predicted_selected_grasp_yaw_deg")
-        reference_yaw_source = "predicted_post_push_grasp_yaw"
-    if reference_yaw is None:
-        reference_yaw = held_object.get("selected_grasp_yaw_deg")
-        reference_yaw_source = held_object.get("grasp_yaw_source") or "target_selected_grasp_yaw"
+    reference_yaw = held_object.get("selected_grasp_yaw_deg")
+    reference_yaw_source = held_object.get("grasp_yaw_source") or "target_selected_grasp_yaw"
     if reference_yaw is None:
         reference_yaw = held_object.get("table_yaw_deg")
         reference_yaw_source = held_object.get("table_yaw_source") or "target_table_yaw"
@@ -124,7 +108,7 @@ def build_push_execution_plan(
         "obstacle_object_id": selected_push["subject"],
         "action_id": selected_push.get("action_id"),
         "direction_base": selected_push["direction_base"],
-        "distance_m": selected_push.get("distance_m", args.push_clearing_distance_m),
+        "distance_m": float(selected_push["distance_m"]),
         "lift_m": args.push_clearing_lift_m,
         "contact_z_offset_m": args.push_clearing_contact_z_offset_m,
         "push_orientation_policy": selected_push.get("push_orientation_policy") or "preserve_current_tool_orientation",
@@ -139,5 +123,4 @@ def build_push_execution_plan(
         "target": copy.deepcopy(held_object),
         "obstacle": obstacle,
         "reason": selected_push.get("reason"),
-        "direction_evaluations": direction_evaluations or [],
     }

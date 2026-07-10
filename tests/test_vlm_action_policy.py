@@ -21,7 +21,6 @@ class VlmActionPolicyTests(unittest.TestCase):
         selected, safety = vlm_action_policy.validate_vlm_action_decision(
             _decision(),
             _scene(),
-            _target(),
             protected_ids=[3],
         )
 
@@ -31,7 +30,7 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertEqual(selected["obstacle_id"], 2)
         self.assertEqual(selected["direction_base"], [1.0, 0.0, 0.0])
 
-    def test_legal_pick_decision_validates_for_current_target(self):
+    def test_legal_pick_decision_runs_grasp_validation_after_vlm_choice(self):
         selected, safety = vlm_action_policy.validate_vlm_action_decision(
             {
                 "action_type": "pick",
@@ -42,9 +41,7 @@ class VlmActionPolicyTests(unittest.TestCase):
                 "raw_decision": {},
             },
             _scene(),
-            _target(),
             protected_ids=[3],
-            analysis={"grasp_feasible": True, "selected_grasp_yaw_deg": 0.0},
         )
 
         self.assertIsNotNone(selected)
@@ -58,7 +55,6 @@ class VlmActionPolicyTests(unittest.TestCase):
         selected, safety = vlm_action_policy.validate_vlm_action_decision(
             decision,
             _scene(),
-            _target(),
             protected_ids=[3],
         )
 
@@ -66,27 +62,23 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertFalse(safety["accepted"])
         self.assertIn("object_id_exists", safety["failed_fields"])
 
-    def test_target_object_id_must_be_current_target_not_base(self):
+    def test_target_object_id_is_vlm_chosen_and_only_checked_for_existence(self):
         selected, safety = vlm_action_policy.validate_vlm_action_decision(
             {
                 "action_type": "pick",
                 "object_id": 1,
                 "target_object_id": 3,
-                "reason": "wrongly used placement base as target",
+                "reason": "VLM declares which task object the action advances",
                 "confidence": 0.9,
                 "raw_decision": {},
             },
             _scene(),
-            _target(),
             protected_ids=[3],
-            analysis={"grasp_feasible": True, "selected_grasp_yaw_deg": 0.0},
         )
 
-        detail = safety["checks"]["target_object_id_matches_current_target"]["detail"]
-        self.assertIsNone(selected)
-        self.assertIn("target_object_id_matches_current_target", safety["failed_fields"])
-        self.assertEqual(detail["expected_current_target_object_id"], 1)
-        self.assertEqual(detail["actual_target_object_id"], 3)
+        self.assertIsNotNone(selected)
+        self.assertTrue(safety["checks"]["target_object_id_exists"]["ok"])
+        self.assertEqual(selected["target_object_id"], 3)
 
     def test_locked_or_protected_object_rejected(self):
         scene = _scene()
@@ -95,7 +87,6 @@ class VlmActionPolicyTests(unittest.TestCase):
         selected, safety = vlm_action_policy.validate_vlm_action_decision(
             _decision(),
             scene,
-            _target(),
             protected_ids=[2, 3],
         )
 
@@ -110,7 +101,6 @@ class VlmActionPolicyTests(unittest.TestCase):
         selected, safety = vlm_action_policy.validate_vlm_action_decision(
             _decision(),
             scene,
-            _target(),
             protected_ids=[3],
         )
 
@@ -122,7 +112,6 @@ class VlmActionPolicyTests(unittest.TestCase):
         selected, safety = vlm_action_policy.validate_vlm_action_decision(
             _decision(push_distance_m=0.08),
             _scene(),
-            _target(),
             protected_ids=[3],
         )
 
@@ -133,7 +122,6 @@ class VlmActionPolicyTests(unittest.TestCase):
         selected, safety = vlm_action_policy.validate_vlm_action_decision(
             _decision(push_direction_base=[2.0, 0.0, 0.0]),
             _scene(),
-            _target(),
             protected_ids=[3],
         )
 
@@ -144,7 +132,6 @@ class VlmActionPolicyTests(unittest.TestCase):
         selected, safety = vlm_action_policy.validate_vlm_action_decision(
             _decision(),
             _scene(),
-            _target(),
             protected_ids=[3],
         )
 
@@ -167,7 +154,6 @@ class VlmActionPolicyTests(unittest.TestCase):
                 "raw_decision": {},
             },
             _scene(),
-            _target(),
             protected_ids=[3],
         )
 
@@ -188,7 +174,6 @@ class VlmActionPolicyTests(unittest.TestCase):
                 "raw_decision": {},
             },
             _scene(),
-            _target(),
             protected_ids=[3],
         )
 
@@ -210,13 +195,58 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertEqual(raw["decision"]["action_type"], "stop")
         self.assertIn("vlm_json_or_call_failed", raw["decision"]["reason"])
 
-    def test_action_input_disambiguates_target_id_from_stack_reference(self):
+    def test_autonomous_action_parser_requires_problem_and_benefit(self):
+        with self.assertRaises(ValueError):
+            vlm_action_policy.parse_vlm_action_decision_text(
+                json.dumps({
+                    "action_type": "pick",
+                    "object_id": 1,
+                    "target_object_id": 1,
+                    "reason": "pick it",
+                    "confidence": 0.8,
+                })
+            )
+
+    def test_autonomous_action_parser_rejects_out_of_range_confidence(self):
+        with self.assertRaises(ValueError):
+            vlm_action_policy.parse_vlm_action_decision_text(
+                json.dumps({
+                    "scene_problem": "clear scene",
+                    "action_type": "pick",
+                    "object_id": 1,
+                    "target_object_id": 1,
+                    "predicted_scene_benefit": "advance the stack",
+                    "risk_assessment": "low",
+                    "reason": "target is isolated",
+                    "confidence": 1.4,
+                })
+            )
+
+    def test_autonomous_action_parser_keeps_scene_diagnosis_and_prediction(self):
+        decision = vlm_action_policy.parse_vlm_action_decision_text(
+            json.dumps({
+                "scene_problem": "object 2 blocks access to object 1",
+                "action_type": "nudge",
+                "object_id": 2,
+                "target_object_id": 1,
+                "push_direction_base": [1.0, 0.0, 0.0],
+                "push_distance_m": 0.02,
+                "predicted_scene_benefit": "open a grasp corridor around object 1",
+                "risk_assessment": "object 2 may rotate",
+                "reason": "minimal displacement",
+                "confidence": 0.82,
+            })
+        )
+
+        self.assertEqual(decision["scene_problem"], "object 2 blocks access to object 1")
+        self.assertIn("grasp corridor", decision["predicted_scene_benefit"])
+
+    def test_action_input_contains_objective_scene_and_advisory_task_focus(self):
         payload = vlm_action_policy.build_vlm_action_decision_input(
             "/tmp/scene.png",
             "/tmp/overlay.png",
             _scene(),
             _target(),
-            {"grasp_feasible": True, "selected_grasp_yaw_deg": 0.0},
             protected_ids=[3],
             base_id=3,
             memory={"structure": {"base": "base_block", "current_top": "base_block", "placed_order": ["base_block"]}},
@@ -224,9 +254,15 @@ class VlmActionPolicyTests(unittest.TestCase):
         )
         prompt = vlm_action_policy.build_vlm_action_prompt(payload)
 
-        self.assertEqual(payload["current_task_target_object_id"], 1)
-        self.assertIn("not target_object_id", payload["stack_reference"]["note"])
-        self.assertIn("target_object_id 永远表示当前循环的 target_object.id", prompt)
+        self.assertEqual(payload["task_goal"]["current_plan_focus"]["id"], 1)
+        self.assertTrue(payload["task_goal"]["current_plan_focus_is_advisory"])
+        self.assertNotIn("target_grasp_state", payload)
+        encoded = json.dumps(payload)
+        self.assertNotIn("grasp_feasible", encoded)
+        self.assertNotIn("blocking_objects", encoded)
+        self.assertNotIn("action_candidates", encoded)
+        self.assertNotIn("recommended_direction", encoded)
+        self.assertIn("没有代码生成的候选动作", prompt)
 
     def test_action_input_lists_same_label_instances_for_id_based_choice(self):
         scene = _scene()
@@ -244,7 +280,6 @@ class VlmActionPolicyTests(unittest.TestCase):
             "/tmp/overlay.png",
             scene,
             _target(),
-            {"grasp_feasible": False},
             protected_ids=[3],
             base_id=3,
             memory={},
@@ -303,11 +338,14 @@ def _decision(
     push_distance_m=0.02,
 ):
     return {
+        "scene_problem": "the intended task object is obstructed",
         "action_type": "nudge",
         "object_id": object_id,
         "target_object_id": target_object_id,
         "push_direction_base": push_direction_base or [1.0, 0.0, 0.0],
         "push_distance_m": push_distance_m,
+        "predicted_scene_benefit": "increase free space around the task object",
+        "risk_assessment": "the obstacle may rotate",
         "reason": "clear target grasp corridor",
         "confidence": 0.8,
         "raw_decision": {},

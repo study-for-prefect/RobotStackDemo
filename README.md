@@ -56,10 +56,10 @@ python3 tools/workflows/stack_demo_pipeline.py --help
 python3 -m unittest discover -s tests
 ```
 
-闭环堆叠的自动清障抓取策略见
+闭环堆叠的自主 VLM 动作策略见
 [`tools/workflows/stack_demo/README.md`](tools/workflows/stack_demo/README.md)：
 真实推障仍必须显式 `--execute --execute-push-clearing`，短距离 nudge
-候选会先进入 MoveIt 预检，预检通过后才会执行。
+动作会先进入代码碰撞检查与 MoveIt 预检，预检通过后才会执行。
 
 本分支的闭环堆叠是 VLM-first 决策：
 
@@ -71,26 +71,32 @@ python3 tools/workflows/stack_demo_pipeline.py \
 
 `--use-vlm-action-policy` 现在只是兼容开关；在线堆叠主流程默认就是 VLM-first：
 
-- VLM = 初始结构/堆叠顺序决策，以及每轮动作意图决策。
-- 每轮动作输出 `action_type`、`object_id`、`target_object_id`、
+- VLM = 初始结构/堆叠顺序，以及每轮场景问题、动作类型、操作物体、方向、距离和预期收益。
+- 每轮动作输出 `scene_problem`、`action_type`、`object_id`、`target_object_id`、
   `push_direction_base`、`push_distance_m`、`safe_place_center_base_m`、
-  `reason`、`confidence`。
+  `predicted_scene_benefit`、`risk_assessment`、`reason`、`confidence`。
 - Code = YOLO + D435i 感知、TF 坐标转换、object state、base_link 坐标、
-  物理可行性、安全验证和执行。
+  碰撞/抓取/放置可行性、安全验证和执行，不生成动作候选或任务语义结论。
 - MoveIt = IK、碰撞检测、轨迹规划、关节跳变检查。
 
 VLM 输入不会包含相机内参；相机内参只在感知模块里用于像素和深度到三维坐标转换。
 大模型输入使用快照图、带编号图、已经计算好的 `base_link` 坐标、物体尺寸、
-bbox、任务状态和记忆。同色/同 label 物体会以实例组形式列出，VLM 必须用
+bbox、任务目标、堆叠进度和记忆。同色/同 label 物体会以实例组形式列出，VLM 必须用
 object id、bbox 和 `base_link` 中心区分，不能只按颜色猜。
+
+每轮输入不包含代码计算的 `grasp_feasible`、`blocking_objects`、候选动作、候选评分、
+推荐推向或推荐距离。`current_plan_focus` 只是先前 VLM 堆叠计划的上下文，不会在验证器中
+强制 `pick.object_id` 与它相等。VLM 选定 `pick`/`pick_away` 物体后，代码才搜索抓取 yaw；
+VLM 选定 `nudge` 后，代码才检查终点和扫掠路径。
 
 VLM 输出后，代码会校验 object id、base/placed/locked/protected 状态、推动距离
 范围、`base_link` 单位方向、`pick_away` 临时放置点、保护结构终点区域、
-保护结构扫掠碰撞和 MoveIt 预检。非法 JSON、未知 object id、不安全方向/距离、
-初始堆叠顺序与显式指令冲突、保护结构碰撞或 MoveIt 不可行都会 fail-safe 停止，
+保护结构扫掠碰撞和 MoveIt 预检。普通 `pick` 也必须在真实执行前通过 plan-only 预检。
+非法 JSON、未知 object id、不安全方向/距离、保护结构碰撞或 MoveIt 不可行都会 fail-safe 停止，
 不会自动回退到代码评分最高动作。每轮动作决策前，代码会先保证当前 snapshot
 内 object id 唯一；若检测结果出现重复 id，会写 `scene_state_unique_object_ids.json`
 记录重分配。
+单轮重复观察或清障动作由 `--max-vlm-action-attempts` 限制，超过后 fail-safe 停止。
 
 VLM 决策日志：
 
@@ -101,6 +107,9 @@ VLM 决策日志：
 - `vlm_action_decision_raw.json`
 - `vlm_action_decision_validated.json`
 - `vlm_action_safety_report.json`
+
+旧的代码侧动作发现/评分路径不再进入堆叠 workflow；初始堆叠 JSON 也不再由颜色规则
+解析器覆盖或修复。代码只检查 schema、引用 id 和执行所需几何，任务理解由 VLM 负责。
 
 涉及真实机械臂运动的命令默认只规划或采集；确认 UR5、MoveIt、TF、相机和夹爪状态后，再显式添加 `--execute`。yaw 角误差检测不要手动转动末端，使用 `yaw_rotation_probe.py --record-mode auto --execute` 让代码只改变目标 yaw 后自动记录。检验位姿的 `tool0` XYZ 写在 `config/yaw_rotation_probe_pose.json`，姿态由代码固定为 tool0 `+Z` 对准 base_link `-Z`，只允许 yaw 变化。
 

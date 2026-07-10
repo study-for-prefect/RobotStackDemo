@@ -3,6 +3,7 @@
 import copy
 import math
 import os
+from typing import Any, List, Optional
 
 from robot_scene_pipeline.grasp_yaw_search import equivalent_yaw_delta_deg
 from robot_scene_pipeline.xy_correction import apply_step_xyz_correction, load_xy_correction
@@ -14,6 +15,25 @@ from .scene import (
     require_geometry_object,
     selected_stack_yaw,
 )
+
+
+def future_stack_place_regions(
+    base_object: dict,
+    previous_stack_xy: Optional[List[float]],
+    args: Any,
+) -> list:
+    """Return the reserved physical region for upcoming stack placements."""
+    center = previous_stack_xy or base_object.get("geometry_center_m")
+    size = base_object.get("dimensions_m") or [0.04, 0.04, 0.03]
+    if not isinstance(center, list) or len(center) < 2:
+        return []
+    radius = 0.5 * max(float(size[0]), float(size[1])) + float(args.min_pick_place_xy_distance_m)
+    return [{
+        "id": "stack_future_place_region",
+        "center_base_m": [float(center[0]), float(center[1]), 0.0],
+        "radius_m": radius,
+        "source": "current_stack_or_base_center",
+    }]
 
 def stack_yaw_object(current_state, stack_state, base_template, held_object, args, placement_base=None):
     if args.place_yaw_strategy == "held":

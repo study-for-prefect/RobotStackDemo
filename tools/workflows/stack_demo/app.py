@@ -39,12 +39,13 @@ from .pick import (
 )
 from .placement import (
     build_frozen_place_step,
+    future_stack_place_regions,
     reject_held_observation_and_keep_locked,
     validate_pick_place_separation,
     validate_place_second_snapshot,
 )
 from .post_place_observation import handle_post_place_observation
-from .push_flow import handle_push_clearing_before_pick
+from .push_flow import handle_vlm_action_before_pick
 from .scene import (
     estimate_current_stack,
     held_object_exclusion,
@@ -57,7 +58,6 @@ from .scene import (
     reacquire_target,
     target_exclusion_for_pre_pick,
     validate_decision,
-    write_stack_object_selection_debug,
 )
 from .target_recovery import recover_or_lock_missing_target
 
@@ -107,22 +107,6 @@ def _write_second_snapshot_hover_plan(first_pick_plan_path: str, output_path: st
     step["second_snapshot_hover_above_object_m"] = float(hover_above_object_m)
     step["coordinate_source"] = "{}.second_snapshot_hover".format(step.get("coordinate_source", "locked_first"))
     write_json(output_path, plan)
-
-def _future_place_regions(base_object, previous_stack_xy, args):
-    center = previous_stack_xy or base_object.get("geometry_center_m")
-    size = base_object.get("dimensions_m") or [0.04, 0.04, 0.03]
-    if not isinstance(center, list) or len(center) < 2:
-        return []
-    radius = 0.5 * max(float(size[0]), float(size[1])) + float(args.min_pick_place_xy_distance_m)
-    return [
-        {
-            "id": "stack_future_place_region",
-            "center_base_m": [float(center[0]), float(center[1]), 0.0],
-            "radius_m": radius,
-            "source": "current_stack_or_base_center",
-        }
-    ]
-
 
 def main() -> int:
     args = parse_args()
@@ -176,18 +160,20 @@ def main() -> int:
 
         runtime["current_stage"] = "initial_snapshot_and_decision"
         initial_state, raw_decision = load_or_capture_initial(args)
-        decision, base_id, order = validate_decision(
-            raw_decision,
-            initial_state,
-            args.instruction,
-            prefer_explicit_rule=False,
-        )
+        decision, base_id, order = validate_decision(raw_decision, initial_state)
         print_decision_summary(initial_state, decision)
         write_json(os.path.join(args.output_dir, "stack_blocks_decision.json"), decision)
-        write_stack_object_selection_debug(args.output_dir, decision)
         write_json(os.path.join(args.output_dir, "initial_scene_state.json"), initial_state)
 
         memory = update_from_detections(memory, initial_state.get("objects", []))
+        memory["task_plan"] = {
+            "instruction": args.instruction,
+            "base_object_id": base_id,
+            "full_stack_order": decision.get("full_stack_order", [base_id] + list(order)),
+            "stack_order": list(order),
+            "structure_plan": decision.get("structure_plan"),
+            "decision_source": "vlm_stack_policy",
+        }
 
         base_object = copy.deepcopy(object_by_id(initial_state, base_id))
         base_mem_id = memory_id_for_scene_object(memory, base_object)
@@ -252,7 +238,7 @@ def main() -> int:
                         else []
                     ),
                 )
-            current_state, memory, held_object = handle_push_clearing_before_pick(
+            current_state, memory, held_object = handle_vlm_action_before_pick(
                 args,
                 cycle_dir,
                 runtime,
@@ -263,8 +249,9 @@ def main() -> int:
                 base_id,
                 protected_locked_stack or previous_locked_stack,
                 base_template=base_object,
-                future_place_regions=_future_place_regions(base_object, previous_stack_xy, args),
+                future_place_regions=future_stack_place_regions(base_object, previous_stack_xy, args),
             )
+            selected_pick_template = copy.deepcopy(held_object)
             pre_pick_excluded_ids, pre_pick_excluded_xy = target_exclusion_for_pre_pick(held_object)
             current_base_object, stack_state = estimate_current_stack(
                 current_state,
@@ -293,7 +280,7 @@ def main() -> int:
                         current_state = recheck_state
                         memory = update_from_detections(memory, current_state.get("objects", []))
                         save_memory(memory, args.memory_json)
-                        held_object = copy.deepcopy(reacquire_target(current_state, held_templates[object_id]))
+                        held_object = copy.deepcopy(reacquire_target(current_state, selected_pick_template))
                         pre_pick_excluded_ids, pre_pick_excluded_xy = target_exclusion_for_pre_pick(held_object)
                         current_base_object, stack_state = estimate_current_stack(
                             current_state,
@@ -502,10 +489,10 @@ def main() -> int:
                 "chosen_grasp_yaw_deg": pick_step.get("chosen_grasp_yaw_deg"),
             }
             if args.execute:
-                runtime["held_object_id"] = object_id
+                runtime["held_object_id"] = held_object.get("id")
                 run(pick_command(args, pick_plan_path))
             else:
-                runtime["held_object_id"] = object_id
+                runtime["held_object_id"] = held_object.get("id")
 
             runtime["current_stage"] = "holding_object_move_above_locked_base"
             if args.execute:
@@ -636,7 +623,7 @@ def main() -> int:
                 )
                 save_memory(memory, args.memory_json)
             else:
-                held_state = simulate_held_state(current_state, object_id)
+                held_state = simulate_held_state(current_state, held_object.get("id"))
                 current_state = simulate_placed_state(held_state, held_object, place_step)
                 write_json(os.path.join(cycle_dir, "after_place_scene_state.json"), current_state)
                 memory = update_from_detections(memory, current_state.get("objects", []))
@@ -688,7 +675,8 @@ def main() -> int:
             "structure_plan": decision.get("structure_plan"),
             "cycles_completed": len(order),
             "final_stack_state": final_stack_state,
-            "geometry_relations_enabled": True,
+            "pre_vlm_geometry_action_analysis_enabled": False,
+            "post_vlm_physical_validation_enabled": True,
             "push_clearing_enabled": args.execute_push_clearing,
             "scene_memory_json": args.memory_json,
         }
