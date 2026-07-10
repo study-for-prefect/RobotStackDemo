@@ -29,6 +29,7 @@ def _action_summary(action: dict) -> dict:
         "action_id", "action", "action_type", "object_id", "object_label", "obstacle_id",
         "target_object_id", "target_object_label",
         "direction_base", "distance_m", "moveit_feasible", "executable_safe",
+        "contact_side", "gripper_yaw_rad", "recoverable_contacts",
         "collision_free", "sweep_collision_free", "selected_grasp_yaw_deg", "safe_place_center_m",
         "protected_structure_safe", "scene_problem", "predicted_scene_benefit", "risk_assessment",
         "reason", "confidence",
@@ -94,9 +95,13 @@ def preflight_nudge_action(
         push_execution_plan,
         current_state.get("objects", []),
         ignore_object_ids=[selected_action.get("obstacle_id")],
+        protected_object_ids=selected_action.get("protected_object_ids", []),
         gripper_outer_width_m=float(getattr(args, "grasp_gripper_outer_width_m", 0.112)),
         finger_length_m=float(getattr(args, "push_tool_finger_length_m", 0.12)),
+        tool_depth_m=float(getattr(args, "push_tool_depth_m", 0.04)),
+        fingertip_thickness_m=float(getattr(args, "push_tool_fingertip_thickness_m", 0.01)),
         safety_margin_m=float(getattr(args, "push_tool_safety_margin_m", 0.005)),
+        tcp_offset_tool_m=getattr(args, "tcp_offset_tool", [0.0, 0.0, 0.0]),
     )
     output = dict(selected_action)
     output["push_execution_plan_path"] = plan_path
@@ -354,6 +359,8 @@ def _selected_push_from_vlm_action(selected_action: dict) -> dict:
         "action_id": selected_action.get("action_id"),
         "direction_base": selected_action.get("direction_base"),
         "distance_m": selected_action.get("distance_m"),
+        "contact_side": selected_action.get("contact_side"),
+        "gripper_yaw_rad": selected_action.get("gripper_yaw_rad"),
     }
 
 

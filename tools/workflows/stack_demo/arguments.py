@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
         default=0.12,
         help="Conservative closed-gripper finger length used by nudge swept-volume validation.",
     )
+    parser.add_argument("--push-tool-depth-m", type=float, default=0.04)
+    parser.add_argument("--push-tool-fingertip-thickness-m", type=float, default=0.01)
     parser.add_argument(
         "--push-tool-yaw-offset-deg",
         type=float,
@@ -56,7 +58,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--push-tool-safety-margin-m", type=float, default=0.005)
     parser.add_argument("--grasp-gripper-side-clearance-m", type=float, default=0.006)
-    parser.add_argument("--max-vlm-action-attempts", type=int, default=4)
+    parser.add_argument("--max-vlm-action-attempts", type=int, default=5)
+    parser.add_argument("--max-vlm-stack-attempts", type=int, default=5)
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--conda-env", default="yolo")
     parser.add_argument("--ros-python", default="/usr/bin/python3")

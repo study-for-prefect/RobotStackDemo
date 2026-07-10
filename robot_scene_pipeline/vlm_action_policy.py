@@ -26,6 +26,7 @@ def compact_object_for_action_policy(obj: ObjectDict) -> ObjectDict:
         "confidence": obj.get("confidence"),
         "bbox_xyxy_px": obj.get("bbox_xyxy_px"),
         "center_px": obj.get("center_px"),
+        "depth_m": obj.get("depth_m"),
         "geometry_center_base_m": obj.get("geometry_center_m") or obj.get("center_3d_base_m"),
         "dimensions_m": obj.get("dimensions_m"),
         "top_z_base_m": obj.get("top_z_base_m"),
@@ -46,6 +47,9 @@ def build_vlm_action_decision_input(
     memory: Optional[dict],
     step_index: int,
     manipulator_geometry: Optional[dict] = None,
+    failure_history: Optional[List[dict]] = None,
+    scene_revision: int = 1,
+    depth_visualization_path: Optional[str] = None,
 ) -> dict:
     """Build VLM input from images, objective scene facts, and task state."""
     structure = (memory or {}).get("structure") or {}
@@ -55,8 +59,15 @@ def build_vlm_action_decision_input(
     return {
         "schema_version": "vlm_autonomous_action_input_v2",
         "scene_rgb": scene_rgb_path,
+        "depth_visualization": depth_visualization_path,
         "minimal_overlay": minimal_overlay_path,
         "base_frame": current_state.get("base_frame", "base_link"),
+        "camera_frame": current_state.get("camera_frame", "camera_color_optical_frame"),
+        "frame_convention": {
+            "base_link": "+X forward, +Y left, +Z up; all action vectors use this frame",
+            "camera_optical": "+X right, +Y down, +Z forward; image/depth observations use this frame",
+        },
+        "scene_revision": int(scene_revision),
         "task_goal": {
             "instruction": current_state.get("instruction"),
             "action_step_index": int(step_index),
@@ -86,11 +97,12 @@ def build_vlm_action_decision_input(
             "base_object_id": base_id,
             "protected_object_ids": [value for value in protected_ids or []],
             "note": "These identify the physical structure that must not be moved.",
+            "workspace_bounds": current_state.get("table_bounds") or current_state.get("workspace_bounds"),
         },
         "manipulator_geometry": manipulator_geometry or {
             "closed_gripper_outer_width_m": 0.112,
             "finger_length_m": 0.12,
-            "contact_rule": "For nudge, contact starts on the side opposite push_direction_base and approaches vertically.",
+            "contact_rule": "For nudge, contact_side opposes direction_base and the tool approaches vertically.",
         },
         "policy_role_split": {
             "vlm": "scene_diagnosis_object_action_direction_distance_and_benefit_prediction",
@@ -106,14 +118,17 @@ def build_vlm_action_decision_input(
             "target_object_id": "int|string|null; task object this action is intended to advance, chosen by VLM",
             "target_object_label": "exact objects[].label for target_object_id",
             "target_object_center_base_m": "exact objects[].geometry_center_base_m for target_object_id",
-            "push_direction_base": "[x,y,z] unit vector in base_link, required for nudge",
-            "push_distance_m": "0.01..0.05, required for nudge",
+            "contact_side": "+x|-x|+y|-y on the operated object, required for nudge",
+            "direction_base": "[x,y,z] unit vector in base_link, required for nudge",
+            "distance_m": "0.01..0.05, required for nudge",
+            "gripper_yaw_rad": "finite yaw in base_link, required for nudge",
             "safe_place_center_base_m": "[x,y,z] in base_link, required for pick_away",
             "predicted_scene_benefit": "string; expected observable scene change and task gain",
             "risk_assessment": "string; main uncertainty or downside",
             "reason": "string",
             "confidence": "0.0..1.0",
         },
+        "failure_history": list(failure_history or []),
     }
 
 
@@ -161,8 +176,10 @@ def call_vlm_action_policy(args: Any, policy_input: dict) -> dict:
                 "target_object_id": None,
                 "target_object_label": None,
                 "target_object_center_base_m": None,
-                "push_direction_base": None,
-                "push_distance_m": None,
+                "contact_side": None,
+                "direction_base": None,
+                "distance_m": None,
+                "gripper_yaw_rad": None,
                 "safe_place_center_base_m": None,
                 "predicted_scene_benefit": "No motion; preserve the current scene fail-safe.",
                 "risk_assessment": str(exc),
@@ -174,7 +191,10 @@ def call_vlm_action_policy(args: Any, policy_input: dict) -> dict:
 
 
 def build_vlm_action_prompt(policy_input: dict) -> str:
-    text_input = {key: value for key, value in policy_input.items() if key not in ("scene_rgb", "minimal_overlay")}
+    text_input = {
+        key: value for key, value in policy_input.items()
+        if key not in ("scene_rgb", "depth_visualization", "minimal_overlay")
+    }
     return (
         "你是 UR5 桌面积木任务的自主视觉动作决策模块。\n"
         "你直接根据原始快照、带编号图、base_link 场景几何和任务目标判断当前问题并提出下一步动作。\n"
@@ -194,8 +214,10 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         "同颜色/label 多实例必须用 id、bbox 和 base_link 中心区分，禁止只按颜色猜。\n"
         "对于可执行动作，object_label/object_center_base_m 和 target_object_label/target_object_center_base_m "
         "必须从 objects 对应 id 原样复制；id、label、中心不一致会被拒绝。\n"
-        "nudge 的夹爪从 push_direction_base 反方向一侧接触并垂直接近；必须根据 manipulator_geometry "
+        "nudge 必须自主给出 contact_side、direction_base、distance_m 和 gripper_yaw_rad。"
+        "接触侧应位于 direction_base 反方向，并垂直接近；必须根据 manipulator_geometry "
         "确认该接触侧和工具扫掠走廊没有其他物体。不要把推动当成精确堆叠手段。\n"
+        "failure_history 是同一 scene_revision 已被代码拒绝的方案和具体原因；新方案必须至少改变其中要求的一项。\n"
         "如果 scene_integrity.object_ids_unique=false，输出 stop 并说明检测 id 不唯一，不能执行。\n"
         "代码只会验证碰撞、抓取/放置几何和 MoveIt 可行性，不会替你选择另一个动作。\n\n"
         "只输出严格 JSON：\n"
@@ -208,8 +230,10 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         '  "target_object_id": 0,\n'
         '  "target_object_label": "exact detector label",\n'
         '  "target_object_center_base_m": [0.0, 0.0, 0.0],\n'
-        '  "push_direction_base": [1.0, 0.0, 0.0],\n'
-        '  "push_distance_m": 0.025,\n'
+        '  "contact_side": "-x",\n'
+        '  "direction_base": [1.0, 0.0, 0.0],\n'
+        '  "distance_m": 0.025,\n'
+        '  "gripper_yaw_rad": 0.0,\n'
         '  "safe_place_center_base_m": [0.0, 0.0, 0.0],\n'
         '  "predicted_scene_benefit": "...",\n'
         '  "risk_assessment": "...",\n'
@@ -249,8 +273,10 @@ def parse_vlm_action_decision_text(text: str) -> ActionDict:
             _required_text(decision, "target_object_label") if executable else decision.get("target_object_label")
         ),
         "target_object_center_base_m": target_center,
-        "push_direction_base": decision.get("push_direction_base"),
-        "push_distance_m": decision.get("push_distance_m"),
+        "contact_side": decision.get("contact_side"),
+        "direction_base": decision.get("direction_base", decision.get("push_direction_base")),
+        "distance_m": decision.get("distance_m", decision.get("push_distance_m")),
+        "gripper_yaw_rad": decision.get("gripper_yaw_rad"),
         "safe_place_center_base_m": decision.get("safe_place_center_base_m"),
         "predicted_scene_benefit": predicted_benefit,
         "risk_assessment": risk_assessment,
@@ -300,7 +326,7 @@ def _image_payloads(policy_input: dict, include_images: bool) -> List[str]:
     if not include_images:
         return []
     images = []
-    for key in ("scene_rgb", "minimal_overlay"):
+    for key in ("scene_rgb", "depth_visualization", "minimal_overlay"):
         path = policy_input.get(key)
         if path:
             images.append(image_to_base64(path))

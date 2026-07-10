@@ -13,9 +13,7 @@ class VlmStackPolicyTests(unittest.TestCase):
                 "call_status": "parsed",
                 "decision": {
                     "task_type": "stack_blocks",
-                    "base_object_id": 1,
                     "full_stack_order": [1, 2],
-                    "stack_order": [2],
                     "structure_plan": {},
                     "object_bindings": _bindings(_state(), [1, 2]),
                     "reason": "blue base red top",
@@ -66,20 +64,77 @@ class VlmStackPolicyTests(unittest.TestCase):
                 _state(),
             )
 
-    def test_base_repeated_in_stack_order_rejected(self):
-        with self.assertRaises(ValueError):
+    def test_conflicting_legacy_fields_are_ignored_and_derived(self):
+        validated = validate_vlm_stack_decision(
+            {
+                "call_status": "parsed",
+                "decision": {
+                    "task_type": "stack_blocks",
+                    "base_object_id": 99,
+                    "full_stack_order": [1, 2],
+                    "stack_order": [1, 99],
+                    "structure_plan": {},
+                    "object_bindings": _bindings(_state(), [1, 2]),
+                    "reason": "full order is authoritative",
+                    "confidence": 0.8,
+                },
+            },
+            _state(),
+        )
+
+        self.assertEqual(validated["base_object_id"], 1)
+        self.assertEqual(validated["stack_order"], [2])
+
+    def test_missing_required_blue_returns_structured_feedback(self):
+        state = {
+            "objects": [
+                {"id": 0, "label": "square red", "geometry_center_m": [0, 0, 0]},
+                {"id": 1, "label": "square green", "geometry_center_m": [0.1, 0, 0]},
+                {"id": 2, "label": "square yellow", "geometry_center_m": [0.2, 0, 0]},
+                {"id": 3, "label": "square blue", "geometry_center_m": [0.3, 0, 0]},
+                {"id": 4, "label": "square yellow", "geometry_center_m": [0.4, 0, 0]},
+            ]
+        }
+        with self.assertRaises(ValueError) as raised:
             validate_vlm_stack_decision(
                 {
                     "call_status": "parsed",
                     "decision": {
                         "task_type": "stack_blocks",
-                        "base_object_id": 1,
-                        "full_stack_order": [1, 2],
-                        "stack_order": [1, 2],
+                        "full_stack_order": [0, 1, 2, 4],
+                        "structure_plan": {},
+                        "object_bindings": _bindings(state, [0, 1, 2, 4]),
+                        "reason": "incorrect order",
+                        "confidence": 0.7,
+                    },
+                },
+                state,
+                "以红色为底，再放绿色、蓝色、黄色",
+            )
+
+        feedback = raised.exception.feedback
+        error_types = {item["type"] for item in feedback["errors"]}
+        self.assertIn("missing_required_label", error_types)
+        self.assertIn("duplicate_label", error_types)
+
+    def test_repeated_base_in_authoritative_order_returns_feedback(self):
+        with self.assertRaises(ValueError) as raised:
+            validate_vlm_stack_decision(
+                {
+                    "call_status": "parsed",
+                    "decision": {
+                        "task_type": "stack_blocks",
+                        "full_stack_order": [1, 2, 1],
+                        "structure_plan": {},
+                        "object_bindings": _bindings(_state(), [1, 2]),
+                        "reason": "base repeated",
+                        "confidence": 0.5,
                     },
                 },
                 _state(),
             )
+
+        self.assertEqual(raised.exception.feedback["errors"][0]["type"], "duplicate_object_id")
 
     def test_code_does_not_repair_vlm_plan_from_instruction_rules(self):
         validated = validate_vlm_stack_decision(
@@ -139,6 +194,8 @@ class VlmStackPolicyTests(unittest.TestCase):
         self.assertNotIn("camera_profile", encoded)
         self.assertNotIn("fx", encoded)
         self.assertIn("geometry_center_base_m", encoded)
+        self.assertNotIn("base_object_id", payload["output_schema"])
+        self.assertNotIn("stack_order", payload["output_schema"])
 
     def test_stack_input_lists_same_label_instances(self):
         state = _state()

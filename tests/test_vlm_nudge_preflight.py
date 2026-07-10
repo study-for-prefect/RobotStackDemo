@@ -24,6 +24,8 @@ class VlmNudgePreflightTests(unittest.TestCase):
                         "target_object_id": 1,
                         "direction_base": [1.0, 0.0, 0.0],
                         "distance_m": 0.02,
+                        "contact_side": "-x",
+                        "gripper_yaw_rad": 0.0,
                         "reason": "clear target",
                     },
                     1,
@@ -58,6 +60,8 @@ class VlmNudgePreflightTests(unittest.TestCase):
                 "target_object_id": 1,
                 "direction_base": [0.0, 1.0, 0.0],
                 "distance_m": 0.02,
+                "contact_side": "-y",
+                "gripper_yaw_rad": 1.5707963267948966,
                 "reason": "clear target",
             },
         )

@@ -9,6 +9,8 @@ from typing import Any, Dict, Iterable, List, Optional
 import requests
 
 from .io_utils import image_to_base64, parse_json_or_embedded
+from .llm_stack_blocks import color_mentions, object_label_contains
+from .vlm_replanning import StackSemanticValidationError, stack_feedback
 
 
 ObjectDict = Dict[str, Any]
@@ -31,7 +33,11 @@ def compact_stack_object(obj: ObjectDict) -> ObjectDict:
     }
 
 
-def build_vlm_stack_decision_input(state: dict, instruction: str) -> dict:
+def build_vlm_stack_decision_input(
+    state: dict,
+    instruction: str,
+    failure_history: Optional[List[dict]] = None,
+) -> dict:
     objects = [
         obj for obj in state.get("objects", [])
         if isinstance(obj, dict)
@@ -55,9 +61,7 @@ def build_vlm_stack_decision_input(state: dict, instruction: str) -> dict:
             "same_label_rule": "If several objects share a label/color, choose by object id, bbox, and base_link center; never by color alone.",
         },
         "output_schema": {
-            "base_object_id": "int",
-            "stack_order": "list[int], place order excluding base_object_id",
-            "full_stack_order": "list[int], starts with base_object_id",
+            "full_stack_order": "the only authoritative list[int], bottom to top; first id is the base",
             "object_bindings": "list of selected id + exact observed label + base_link center",
             "structure_plan": "object",
             "reason": "string",
@@ -67,6 +71,7 @@ def build_vlm_stack_decision_input(state: dict, instruction: str) -> dict:
             "vlm": "structure_and_stack_order_decision",
             "code": "id_geometry_validation_and_execution",
         },
+        "failure_history": list(failure_history or []),
     }
 
 
@@ -108,7 +113,7 @@ def call_vlm_stack_policy(args: Any, policy_input: dict) -> dict:
         }
 
 
-def validate_vlm_stack_decision(raw_output: dict, state: dict) -> dict:
+def validate_vlm_stack_decision(raw_output: dict, state: dict, instruction: str = "") -> dict:
     """Validate stack JSON shape and referenced scene ids without task-rule repair."""
     if raw_output.get("call_status") != "parsed":
         raise RuntimeError("VLM stack decision failed: {}".format(raw_output.get("error")))
@@ -120,17 +125,22 @@ def validate_vlm_stack_decision(raw_output: dict, state: dict) -> dict:
     duplicate_ids = _duplicate_object_ids(state.get("objects", []))
     if duplicate_ids:
         raise ValueError("Scene object ids must be unique before VLM stack decision: {}".format(duplicate_ids))
-    base_id = int(decision.get("base_object_id"))
-    stack_order = [int(value) for value in decision.get("stack_order", [])]
-    full_stack_order = [int(value) for value in decision.get("full_stack_order", [])]
-    if base_id in stack_order:
-        raise ValueError("VLM stack_order must exclude base_object_id.")
-    if not full_stack_order or full_stack_order[0] != base_id:
-        raise ValueError("VLM full_stack_order must start with base_object_id.")
-    if len(stack_order) != len(set(stack_order)) or len(full_stack_order) != len(set(full_stack_order)):
-        raise ValueError("VLM stack decision ids must be unique.")
-    if full_stack_order != [base_id] + stack_order:
-        raise ValueError("VLM full_stack_order must equal [base_object_id] + stack_order.")
+    try:
+        full_stack_order = [int(value) for value in decision.get("full_stack_order", [])]
+    except (TypeError, ValueError):
+        _raise_stack_error("VLM full_stack_order must contain integer ids.", [{"type": "invalid_id"}], instruction, state)
+    if not full_stack_order:
+        _raise_stack_error("VLM full_stack_order must not be empty.", [{"type": "empty_full_stack_order"}], instruction, state)
+    if len(full_stack_order) != len(set(full_stack_order)):
+        duplicates = sorted({value for value in full_stack_order if full_stack_order.count(value) > 1})
+        _raise_stack_error(
+            "VLM full_stack_order ids must be unique.",
+            [{"type": "duplicate_object_id", "object_id": value} for value in duplicates],
+            instruction,
+            state,
+        )
+    base_id = full_stack_order[0]
+    stack_order = full_stack_order[1:]
     if not isinstance(decision.get("structure_plan"), dict):
         raise ValueError("VLM stack decision requires structure_plan object.")
     if not str(decision.get("reason") or "").strip():
@@ -142,7 +152,13 @@ def validate_vlm_stack_decision(raw_output: dict, state: dict) -> dict:
     }
     unknown_ids = set(full_stack_order) - valid_ids
     if unknown_ids:
-        raise ValueError("VLM stack decision references unknown object ids: {}".format(sorted(unknown_ids)))
+        _raise_stack_error(
+            "VLM stack decision references unknown object ids: {}".format(sorted(unknown_ids)),
+            [{"type": "unknown_object_id", "object_id": value} for value in sorted(unknown_ids)],
+            instruction,
+            state,
+        )
+    _validate_instruction_label_order(full_stack_order, state, instruction)
     object_bindings = _validate_object_bindings(decision.get("object_bindings"), full_stack_order, state)
     validated = dict(decision)
     validated["task_type"] = "stack_blocks"
@@ -162,7 +178,8 @@ def build_vlm_stack_prompt(policy_input: dict) -> str:
         "你是 UR5 桌面积木堆叠任务的 VLM 结构决策模块。\n"
         "你必须根据用户指令、快照图和检测后的精简 JSON 决定底座和堆叠顺序。\n"
         "只能选择 objects 中已有的 object id；不要编造物体。不要输出相机内参、关节角、轨迹、速度或 ROS 命令。\n"
-        "stack_order 必须是不含 base_object_id 的放置顺序，full_stack_order 必须以 base_object_id 开头。\n\n"
+        "只输出一个权威顺序 full_stack_order；它是从底到顶的完整顺序，第一个 id 自动成为底座。\n"
+        "禁止另外输出 base_object_id 或 stack_order，代码会从 full_stack_order 自动派生。\n\n"
         "你负责理解用户任务语义并保证 JSON 顺序与目标一致；代码只检查 JSON 结构、物体 id 和几何是否可执行。\n\n"
         "如果同一种颜色/label 有多个实例，必须用编号图、object id、bbox 和 base_link 坐标区分；不要只按颜色猜。\n\n"
         "先为 full_stack_order 中每个 id 输出 object_bindings，并从 objects 原样复制 observed_label 和 "
@@ -171,19 +188,59 @@ def build_vlm_stack_prompt(policy_input: dict) -> str:
         "{\n"
         '  "task_type": "stack_blocks",\n'
         '  "structure_plan": {"structure_type": "tower", "roles": [], "assembly_steps": [], "limitations": []},\n'
-        '  "base_object_id": 0,\n'
         '  "full_stack_order": [0, 1, 2],\n'
-        '  "stack_order": [1, 2],\n'
         '  "object_bindings": [\n'
         '    {"object_id": 0, "observed_label": "exact detector label", "geometry_center_base_m": [0.0, 0.0, 0.0]}\n'
         '  ],\n'
-        '  "stack_order_semantics": "place_order_excludes_base",\n'
         '  "reason": "...",\n'
         '  "confidence": 0.0\n'
         "}\n\n"
         "输入：\n"
         + json.dumps(text_input, ensure_ascii=False, indent=2)
     )
+
+
+def _raise_stack_error(message: str, errors: List[dict], instruction: str, state: dict) -> None:
+    raise StackSemanticValidationError(message, stack_feedback(errors, instruction, state))
+
+
+def _validate_instruction_label_order(full_order: List[int], state: dict, instruction: str) -> None:
+    required_colors = color_mentions(instruction or "")
+    if not required_colors:
+        return
+    object_map = {
+        int(obj["id"]): obj
+        for obj in state.get("objects", [])
+        if isinstance(obj, dict) and obj.get("id") is not None
+    }
+    selected_colors = []
+    for object_id in full_order:
+        obj = object_map[object_id]
+        color = next((item for item in required_colors if object_label_contains(obj, item)), None)
+        selected_colors.append(color or str(obj.get("label") or ""))
+    errors = []
+    for color in required_colors:
+        required_label = next(
+            (
+                str(obj.get("label"))
+                for obj in object_map.values()
+                if object_label_contains(obj, color)
+            ),
+            color,
+        )
+        count = selected_colors.count(color)
+        if count == 0:
+            errors.append({"type": "missing_required_label", "label": required_label})
+        elif count > 1:
+            errors.append({"type": "duplicate_label", "label": required_label})
+    if selected_colors != required_colors:
+        errors.append({
+            "type": "label_order_mismatch",
+            "required_label_order": required_colors,
+            "proposed_label_order": selected_colors,
+        })
+    if errors:
+        _raise_stack_error("VLM full_stack_order does not match the requested label order.", errors, instruction, state)
 
 
 def _image_payloads(policy_input: dict, include_images: bool) -> List[str]:

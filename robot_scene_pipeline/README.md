@@ -13,6 +13,9 @@ This directory contains the split single-frame robot scene pipeline:
 - `vlm_stack_policy.py`: VLM-first 初始结构和堆叠顺序决策输入、调用与验证。
 - `vlm_action_policy.py`: 从原图、客观场景几何和任务目标构建自主 VLM 动作输入并解析输出。
 - `vlm_action_validation.py`: 在 VLM 选定动作后验证碰撞、抓取/放置几何和执行可行性。
+- `nudge_safety.py`: 推动参数、工作区和普通可移动物体接触分级。
+- `vlm_replanning.py`: 结构化失败反馈、同场景动作指纹和 `scene_revision` 更新。
+- `tool_swept_volume.py`: 基于 VLM 末端 yaw 与 TCP 锚点的 GF225 OBB 保守扫掠粗筛。
 - `llm_scene_reasoner.py`: LLM prompt and Ollama call.
 
 For hover/TCP offset and XY-bias calibration, see

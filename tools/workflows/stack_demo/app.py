@@ -14,6 +14,7 @@ from robot_scene_pipeline.scene_memory import (
 )
 from robot_scene_pipeline.stack_state import verify_stack_growth
 from robot_scene_pipeline.xy_correction import load_xy_correction
+from robot_scene_pipeline.vlm_replanning import advance_scene_revision
 from tools.planning.decision_to_execution import write_json
 from tools.workflows.two_stage_visual_pick import build_tcp_error_corrected_plan
 
@@ -148,6 +149,7 @@ def main() -> int:
         "held_object_id": None,
         "last_pick_pose": None,
         "last_place_pose": None,
+        "scene_revision": 1,
     }
     try:
         if args.execute and args.execute_push_clearing and args.offline_scene_state:
@@ -217,6 +219,7 @@ def main() -> int:
                 )
                 if observed is not None:
                     current_state = observed
+                    advance_scene_revision(runtime, current_state)
                     memory = update_from_detections(memory, current_state.get("objects", []))
                     save_memory(memory, args.memory_json)
 
@@ -694,6 +697,9 @@ def main() -> int:
                 "held_object_id_at_failure": held_at_failure,
             }
         )
+        exception_history = getattr(exc, "failure_history", None)
+        if exception_history:
+            failure["vlm_failure_history"] = exception_history
         write_json(failure_state_path(args), failure)
         print(
             "\nSTACK DEMO FAILED at stage {}: {}\nSaved failure state: {}".format(

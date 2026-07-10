@@ -10,6 +10,7 @@ from robot_scene_pipeline.vlm_stack_policy import (
     call_vlm_stack_policy,
     validate_vlm_stack_decision,
 )
+from robot_scene_pipeline.vlm_replanning import VlmReplanningExhausted
 from tools.planning.decision_to_execution import write_json
 from robot_scene_pipeline.stack_state import estimate_stack_state
 from tools.planning.build_geometry_pick_plan import find_object, set_stack_demo_yaw
@@ -69,13 +70,46 @@ def _write_initial_observation_report(args, output_dir, state, decision_error=No
 
 
 def _call_initial_vlm_stack_decision(args, state, output_dir):
-    policy_input = build_vlm_stack_decision_input(state, args.instruction)
-    raw_output = call_vlm_stack_policy(args, policy_input)
-    write_json(os.path.join(output_dir, "vlm_stack_decision_input.json"), policy_input)
-    write_json(os.path.join(output_dir, "vlm_stack_decision_raw.json"), raw_output)
-    decision = validate_vlm_stack_decision(raw_output, state)
-    write_json(os.path.join(output_dir, "vlm_stack_decision_validated.json"), decision)
-    return decision
+    failure_history = []
+    max_attempts = max(1, int(getattr(args, "max_vlm_stack_attempts", 5)))
+    for attempt in range(1, max_attempts + 1):
+        policy_input = build_vlm_stack_decision_input(state, args.instruction, failure_history)
+        raw_output = call_vlm_stack_policy(args, policy_input)
+        prefix = "vlm_stack_attempt_{:02d}".format(attempt)
+        write_json(os.path.join(output_dir, "{}_input.json".format(prefix)), policy_input)
+        write_json(os.path.join(output_dir, "{}_output.json".format(prefix)), raw_output)
+        if attempt == 1:
+            write_json(os.path.join(output_dir, "vlm_stack_decision_input.json"), policy_input)
+            write_json(os.path.join(output_dir, "vlm_stack_decision_raw.json"), raw_output)
+        try:
+            decision = validate_vlm_stack_decision(raw_output, state, args.instruction)
+        except Exception as exc:
+            feedback = getattr(exc, "feedback", None) or {
+                "validation_stage": "stack_semantic_validation",
+                "passed": False,
+                "errors": [{"type": "stack_proposal_rejected", "message": str(exc)}],
+            }
+            feedback["attempt"] = attempt
+            failure_history.append(feedback)
+            write_json(os.path.join(output_dir, "{}_validation.json".format(prefix)), feedback)
+            continue
+        validation = {"validation_stage": "stack_semantic_validation", "passed": True, "attempt": attempt}
+        write_json(os.path.join(output_dir, "{}_validation.json".format(prefix)), validation)
+        write_json(os.path.join(output_dir, "vlm_stack_decision_validated.json"), decision)
+        write_json(os.path.join(output_dir, "vlm_stack_decision_history.json"), {
+            "attempts": failure_history,
+            "selected_decision": decision,
+        })
+        return decision
+    write_json(os.path.join(output_dir, "vlm_stack_decision_history.json"), {
+        "attempts": failure_history,
+        "selected_decision": None,
+        "stop_reason": "no_valid_vlm_stack_order_after_replanning",
+    })
+    raise VlmReplanningExhausted(
+        "No valid VLM stack order after {} attempts.".format(max_attempts),
+        failure_history,
+    )
 
 def object_by_id(state, object_id):
     for obj in state.get("objects", []):

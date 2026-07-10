@@ -8,13 +8,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .geometry_relations import get_center, get_size, object_xy_aabb, xy_aabb_overlap
 from .grasp_yaw_search import select_best_grasp
+from .nudge_safety import push_stays_in_workspace, recoverable_push_contacts, validate_nudge_parameters
 
 
 ObjectDict = Dict[str, Any]
 ActionDict = Dict[str, Any]
-MIN_PUSH_DISTANCE_M = 0.01
-MAX_PUSH_DISTANCE_M = 0.05
-DIRECTION_TOLERANCE = 1e-3
 GROUNDING_CENTER_TOLERANCE_M = 0.005
 
 
@@ -204,18 +202,29 @@ def _validate_nudge(
     safety: dict,
     protection_margin_m: float,
 ) -> Tuple[Optional[dict], dict]:
-    distance_ok, distance = _valid_push_distance(decision.get("push_distance_m"))
-    direction_ok, direction = _valid_push_direction(decision.get("push_direction_base"))
-    _record(safety, "push_distance_in_range", distance_ok)
-    _record(safety, "push_direction_base_unit_xy_vector", direction_ok)
-    if not distance_ok or not direction_ok:
-        safety["reason"] = "push_direction_or_distance_invalid"
+    parameters = validate_nudge_parameters(decision)
+    direction, distance = parameters["direction_base"], parameters["distance_m"]
+    _record(safety, "push_distance_in_range", parameters["distance_ok"])
+    _record(safety, "push_direction_base_unit_xy_vector", parameters["direction_ok"])
+    _record(safety, "contact_side_matches_push_direction", parameters["contact_ok"], {"contact_side": decision.get("contact_side")})
+    _record(safety, "gripper_yaw_rad_finite", parameters["yaw_ok"], {"gripper_yaw_rad": decision.get("gripper_yaw_rad")})
+    if not parameters["passed"]:
+        safety["reason"] = "push_parameters_invalid"
         return None, safety
     protected_objects = _protected_objects(current_state.get("objects", []), protected_ids)
     end_ok, end_report = _push_end_outside_protected_zone(obj, protected_objects, direction, distance, protection_margin_m)
     sweep_ok, sweep_report = _push_sweep_avoids_protected_structure(obj, protected_objects, direction, distance, protection_margin_m)
+    workspace_ok, workspace_report = push_stays_in_workspace(obj, current_state, direction, distance)
+    recoverable_contacts = recoverable_push_contacts(
+        obj, current_state.get("objects", []), protected_ids, direction, distance,
+    )
     _record(safety, "push_end_outside_protected_structure", end_ok, end_report)
     _record(safety, "push_swept_path_avoids_protected_structure", sweep_ok, sweep_report)
+    _record(safety, "push_stays_inside_workspace", workspace_ok, workspace_report)
+    safety["recoverable_contacts"] = recoverable_contacts
+    if not workspace_ok:
+        safety["reason"] = "push_outside_workspace"
+        return None, safety
     if not end_ok or not sweep_ok:
         safety["reason"] = "push_collides_with_protected_structure"
         return None, safety
@@ -225,6 +234,10 @@ def _validate_nudge(
         "obstacle_id": obj.get("id"),
         "direction_base": direction,
         "distance_m": distance,
+        "contact_side": parameters["contact_side"],
+        "gripper_yaw_rad": parameters["gripper_yaw_rad"],
+        "recoverable_contacts": recoverable_contacts,
+        "protected_object_ids": [value for value in protected_ids or []],
         "protected_structure_safe": True,
         "sweep_collision_free": True,
         "executable_safe": False,
@@ -316,31 +329,6 @@ def _duplicate_object_ids(objects: Iterable[ObjectDict]) -> List[Any]:
             duplicates.append(object_id)
         seen.add(key)
     return duplicates
-
-
-def _valid_push_distance(value: Any) -> Tuple[bool, Optional[float]]:
-    try:
-        distance = float(value)
-    except (TypeError, ValueError):
-        return False, None
-    if not math.isfinite(distance):
-        return False, None
-    return MIN_PUSH_DISTANCE_M <= distance <= MAX_PUSH_DISTANCE_M, distance
-
-
-def _valid_push_direction(value: Any) -> Tuple[bool, Optional[List[float]]]:
-    if not isinstance(value, (list, tuple)) or len(value) != 3:
-        return False, None
-    try:
-        direction = [float(item) for item in value]
-    except (TypeError, ValueError):
-        return False, None
-    if not all(math.isfinite(item) for item in direction):
-        return False, None
-    norm = math.sqrt(sum(item * item for item in direction))
-    xy_norm = math.hypot(direction[0], direction[1])
-    ok = abs(norm - 1.0) <= DIRECTION_TOLERANCE and abs(direction[2]) <= DIRECTION_TOLERANCE and xy_norm > 1e-6
-    return ok, [direction[0], direction[1], 0.0] if ok else None
 
 
 def _valid_safe_place(value: Any) -> Tuple[bool, Optional[List[float]]]:

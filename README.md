@@ -72,10 +72,13 @@ python3 tools/workflows/stack_demo_pipeline.py \
 `--use-vlm-action-policy` 现在只是兼容开关；在线堆叠主流程默认就是 VLM-first：
 
 - VLM = 初始结构/堆叠顺序，以及每轮场景问题、动作类型、操作物体、方向、距离和预期收益。
+- 初始结构只输出一个权威字段 `full_stack_order`；代码自动派生底座和后续放置顺序，
+  不再比较三个等价字段。
 - 每轮动作输出 `scene_problem`、`action_type`、`object_id`、`object_label`、
   `object_center_base_m`、`target_object_id`、`target_object_label`、
   `target_object_center_base_m`、
-  `push_direction_base`、`push_distance_m`、`safe_place_center_base_m`、
+  `contact_side`、`direction_base`、`distance_m`、`gripper_yaw_rad`、
+  `safe_place_center_base_m`、
   `predicted_scene_benefit`、`risk_assessment`、`reason`、`confidence`。
 - Code = YOLO + D435i 感知、TF 坐标转换、object state、base_link 坐标、
   碰撞/抓取/放置可行性、安全验证和执行，不生成动作候选或任务语义结论。
@@ -98,14 +101,16 @@ VLM 必须把所选 id 对应的检测 label 和 `base_link` 中心原样回填�
 VLM 输出后，代码会校验 object id、base/placed/locked/protected 状态、推动距离
 范围、`base_link` 单位方向、`pick_away` 临时放置点、保护结构终点区域、
 保护结构扫掠碰撞和 MoveIt 预检。普通 `pick` 也必须在真实执行前通过 plan-only 预检。
-`nudge` 会先从推动反方向计算接触点，按推动方向加 `--push-tool-yaw-offset-deg` 设置闭合夹爪
-yaw，并用夹爪外宽、`--push-tool-finger-length-m` 和安全余量检查预推、下降、接触、推动、
-撤离五段工具扫掠体；工具走廊有物体时不会调用 MoveIt。
-非法 JSON、未知 object id、不安全方向/距离、保护结构碰撞或 MoveIt 不可行都会 fail-safe 停止，
-不会自动回退到代码评分最高动作。每轮动作决策前，代码会先保证当前 snapshot
+`nudge` 的接触侧、方向、距离和夹爪 yaw 均由 VLM 决定。代码使用考虑
+`tool0→TCP`、夹爪外宽/深度、指长和末端 yaw 的 OBB 做保守粗筛，最终仍以 MoveIt 为准。
+GF225 工具碰物体、桌面或受保护结构是硬拒绝；被推物体碰普通可移动物体只记录为可恢复接触。
+非法 JSON、未知 object id、不安全方向/距离、保护结构碰撞或 MoveIt 不可行会生成结构化反馈，
+连同原场景再次发送给 VLM；代码不会生成替代动作。每轮动作决策前，代码会先保证当前 snapshot
 内 object id 唯一；若检测结果出现重复 id，会写 `scene_state_unique_object_ids.json`
 记录重分配。
-单轮重复观察或清障动作由 `--max-vlm-action-attempts` 限制，超过后 fail-safe 停止。
+同一 `scene_revision` 的近似重复失败动作会被拒绝；通过校验并执行后必须重新获取 RGB-D、
+更新检测与记忆并递增场景版本。`--max-vlm-action-attempts` 和
+`--max-vlm-stack-attempts` 达到上限后才 fail-safe 停止。
 
 VLM 决策日志：
 
@@ -116,6 +121,8 @@ VLM 决策日志：
 - `vlm_action_decision_raw.json`
 - `vlm_action_decision_validated.json`
 - `vlm_action_safety_report.json`
+- `vlm_action_attempt_XX_input.json` / `output.json` / `validation.json`
+- `autonomous_action_history.json`
 
 旧的代码侧动作发现/评分路径不再进入堆叠 workflow；初始堆叠 JSON 也不再由颜色规则
 解析器覆盖或修复。代码只检查 schema、引用 id 和执行所需几何，任务理解由 VLM 负责。

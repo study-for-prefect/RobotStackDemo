@@ -102,7 +102,8 @@ def build_push_execution_plan(
         reference_yaw_source = held_object.get("table_yaw_source") or "target_table_yaw"
     reference_yaw_valid = reference_yaw is not None
     direction = [float(value) for value in selected_push["direction_base"][:2]]
-    push_yaw_deg = math.degrees(math.atan2(direction[1], direction[0])) + float(args.push_tool_yaw_offset_deg)
+    gripper_yaw_rad = float(selected_push["gripper_yaw_rad"])
+    push_yaw_deg = math.degrees(gripper_yaw_rad)
     plan = {
         "schema_version": "push_execution_plan_v1",
         "frame_id": "base_link",
@@ -112,12 +113,14 @@ def build_push_execution_plan(
         "action_id": selected_push.get("action_id"),
         "direction_base": selected_push["direction_base"],
         "distance_m": float(selected_push["distance_m"]),
+        "contact_side": selected_push.get("contact_side"),
+        "gripper_yaw_rad": gripper_yaw_rad,
         "lift_m": args.push_clearing_lift_m,
         "contact_z_offset_m": args.push_clearing_contact_z_offset_m,
         "push_orientation_policy": "align_to_target_yaw",
         "target_yaw_deg": round(push_yaw_deg, 3),
         "target_yaw_valid": True,
-        "target_yaw_source": "push_direction_base_plus_calibrated_tool_offset",
+        "target_yaw_source": "vlm_gripper_yaw_rad",
         "push_tool_yaw_offset_deg": float(args.push_tool_yaw_offset_deg),
         "reference_target_yaw_deg": None if reference_yaw is None else float(reference_yaw),
         "reference_target_yaw_valid": bool(reference_yaw_valid),

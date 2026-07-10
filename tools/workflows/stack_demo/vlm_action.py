@@ -12,13 +12,17 @@ from robot_scene_pipeline.vlm_action_policy import (
     mark_moveit_result,
     validate_vlm_action_decision,
 )
+from robot_scene_pipeline.vlm_replanning import (
+    duplicate_proposal_feedback,
+    find_duplicate_failed_proposal,
+)
 from tools.planning.decision_to_execution import write_json
 
 from .clearance_execution import preflight_nudge_action, preflight_pick_away_action
 from .pick_preflight import preflight_pick_action
 
 
-def select_autonomous_vlm_action(
+def evaluate_autonomous_vlm_action_attempt(
     args: Any,
     cycle_dir: str,
     current_state: dict,
@@ -28,9 +32,12 @@ def select_autonomous_vlm_action(
     memory: dict,
     step_index: int,
     future_place_regions: Optional[Iterable[dict]] = None,
+    failure_history: Optional[list] = None,
+    scene_revision: int = 1,
+    attempt_index: int = 1,
 ) -> Tuple[Optional[dict], dict, dict, dict]:
-    """Select a VLM-proposed action intent after code safety validation."""
-    scene_rgb_path, minimal_overlay_path = materialize_vlm_images(cycle_dir, current_state)
+    """Evaluate one VLM-proposed action without choosing a replacement in code."""
+    scene_rgb_path, depth_path, minimal_overlay_path = materialize_vlm_images(cycle_dir, current_state)
     policy_input = build_vlm_action_decision_input(
         scene_rgb_path,
         minimal_overlay_path,
@@ -47,13 +54,26 @@ def select_autonomous_vlm_action(
             "contact_z_offset_m": float(getattr(args, "push_clearing_contact_z_offset_m", 0.015)),
             "push_tool_yaw_offset_deg": float(getattr(args, "push_tool_yaw_offset_deg", 0.0)),
             "contact_rule": (
-                "The closed gripper approaches vertically at the object side opposite push_direction_base, "
-                "then moves along push_direction_base. The full tool corridor must be clear."
+                "The VLM selects contact_side and gripper_yaw_rad. The gripper approaches vertically, "
+                "then moves along direction_base. The full tool corridor must be clear."
             ),
+            "tool0_to_tcp_offset_m": list(getattr(args, "tcp_offset_tool", [0.0, 0.0, 0.0])),
+            "tool_depth_m": float(getattr(args, "push_tool_depth_m", 0.04)),
+            "fingertip_thickness_m": float(getattr(args, "push_tool_fingertip_thickness_m", 0.01)),
         },
+        failure_history=failure_history,
+        scene_revision=scene_revision,
+        depth_visualization_path=depth_path,
     )
     raw_output = call_vlm_action_policy(args, policy_input)
     decision = raw_output.get("decision") or {}
+    if find_duplicate_failed_proposal(decision, scene_revision, failure_history or []):
+        safety_report = duplicate_proposal_feedback(decision, scene_revision, attempt_index)
+        validated_output = _validated_output(raw_output, None, safety_report)
+        write_vlm_action_artifacts(
+            cycle_dir, policy_input, raw_output, validated_output, safety_report, attempt_index,
+        )
+        return None, validated_output, safety_report, {"run_moveit_preflight": False, "failures": []}
     selected, safety_report = validate_vlm_action_decision(
         decision,
         current_state,
@@ -101,7 +121,9 @@ def select_autonomous_vlm_action(
             safety_report["reason"] = "accepted_without_moveit_preflight_dry_run"
 
     validated_output = _validated_output(raw_output, selected, safety_report)
-    write_vlm_action_artifacts(cycle_dir, policy_input, raw_output, validated_output, safety_report)
+    write_vlm_action_artifacts(
+        cycle_dir, policy_input, raw_output, validated_output, safety_report, attempt_index,
+    )
     return selected if safety_report.get("accepted") else None, validated_output, safety_report, preflight_report
 
 
@@ -111,14 +133,22 @@ def write_vlm_action_artifacts(
     raw_output: dict,
     validated_output: dict,
     safety_report: dict,
+    attempt_index: int = 1,
 ) -> None:
-    write_json(os.path.join(cycle_dir, "vlm_action_decision_input.json"), policy_input)
-    write_json(os.path.join(cycle_dir, "vlm_action_decision_raw.json"), raw_output)
+    prefix = "vlm_action_attempt_{:02d}".format(attempt_index)
+    write_json(os.path.join(cycle_dir, "{}_input.json".format(prefix)), policy_input)
+    write_json(os.path.join(cycle_dir, "{}_output.json".format(prefix)), raw_output)
+    write_json(os.path.join(cycle_dir, "{}_validation.json".format(prefix)), safety_report)
+    if attempt_index == 1:
+        write_json(os.path.join(cycle_dir, "vlm_action_decision_input.json"), policy_input)
+        write_json(os.path.join(cycle_dir, "vlm_action_decision_raw.json"), raw_output)
     write_json(os.path.join(cycle_dir, "vlm_action_decision_validated.json"), validated_output)
     write_json(os.path.join(cycle_dir, "vlm_action_safety_report.json"), safety_report)
 
 
-def materialize_vlm_images(cycle_dir: str, current_state: dict) -> Tuple[Optional[str], Optional[str]]:
+def materialize_vlm_images(
+    cycle_dir: str, current_state: dict,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     scene_path = _resolve_image_path(
         current_state.get("snapshot_image"),
         cycle_dir,
@@ -131,7 +161,13 @@ def materialize_vlm_images(cycle_dir: str, current_state: dict) -> Tuple[Optiona
     )
     scene_output = _copy_image_if_available(scene_path, os.path.join(cycle_dir, "scene_rgb.png"))
     overlay_output = _copy_image_if_available(overlay_path, os.path.join(cycle_dir, "minimal_overlay.png"))
-    return scene_output, overlay_output
+    depth_path = _resolve_image_path(
+        current_state.get("depth_visualization") or current_state.get("depth_visualization_image"),
+        cycle_dir,
+        fallback_names=("depth_visualization.png", "depth_colormap.png"),
+    )
+    depth_output = _copy_image_if_available(depth_path, os.path.join(cycle_dir, "depth_visualization.png"))
+    return scene_output, depth_output, overlay_output
 
 
 def _apply_preflight_result(
@@ -197,8 +233,10 @@ def _validated_output(raw_output: dict, selected: Optional[dict], safety_report:
         "target_object_id": decision.get("target_object_id"),
         "target_object_label": decision.get("target_object_label"),
         "target_object_center_base_m": decision.get("target_object_center_base_m"),
-        "push_direction_base": decision.get("push_direction_base"),
-        "push_distance_m": decision.get("push_distance_m"),
+        "contact_side": decision.get("contact_side"),
+        "direction_base": decision.get("direction_base", decision.get("push_direction_base")),
+        "distance_m": decision.get("distance_m", decision.get("push_distance_m")),
+        "gripper_yaw_rad": decision.get("gripper_yaw_rad"),
         "safe_place_center_base_m": decision.get("safe_place_center_base_m"),
         "predicted_scene_benefit": decision.get("predicted_scene_benefit"),
         "risk_assessment": decision.get("risk_assessment"),

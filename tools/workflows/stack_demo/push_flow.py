@@ -9,13 +9,14 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 from robot_scene_pipeline.detection_merge import merge_duplicate_objects_3d
 from robot_scene_pipeline.scene_memory import save_memory, update_from_detections
+from robot_scene_pipeline.vlm_replanning import advance_scene_revision
 from tools.planning.decision_to_execution import write_json
 
 from .commands import capture_empty_observation, failure_state_path
 from .clearance_execution import execute_nudge_and_reobserve, execute_pick_away_and_reobserve
 from .push_clearing import current_protected_structure_ids, object_by_string_id
 from .scene import reacquire_target
-from .vlm_action import select_autonomous_vlm_action
+from .vlm_action_loop import mark_autonomous_execution_result, select_autonomous_vlm_action
 
 
 def _selected_pick_object(current_state: dict, selected_action: dict) -> dict:
@@ -156,6 +157,7 @@ def _action_summary(action: dict) -> dict:
         "action_id", "action", "action_type", "object_id", "object_label", "obstacle_id",
         "target_object_id", "target_object_label",
         "direction_base", "distance_m", "safe_place_center_m", "moveit_feasible", "executable_safe",
+        "contact_side", "gripper_yaw_rad", "recoverable_contacts",
         "collision_free", "sweep_collision_free", "selected_grasp_yaw_deg",
         "protected_structure_safe", "reason", "confidence",
         "scene_problem", "predicted_scene_benefit", "risk_assessment",
@@ -182,6 +184,11 @@ def _write_blocked_failure(
         "clearance_step_index": step_index,
         "required_next_step": "reobserve_after_manual_or_replan_before_any_pick",
         "blocked_pick_policy": "do_not_generate_pick_plan_after_rejected_vlm_action",
+        "vlm_failure_history": (
+            action_report.get("failure_history")
+            or safety_report.get("failure_history")
+            or []
+        ),
     }
     runtime.update(failure)
     write_json(os.path.join(cycle_dir, "failure_state.json"), failure)
@@ -221,6 +228,7 @@ def _reobserve_and_retry(
     )
     if observed_state is None:
         raise RuntimeError("VLM requested reobserve, but no live observation was produced.")
+    advance_scene_revision(runtime, observed_state)
     memory = update_from_detections(memory, observed_state.get("objects", []))
     save_memory(memory, args.memory_json)
     held_object = copy.deepcopy(reacquire_target(observed_state, held_template))
@@ -262,6 +270,7 @@ def handle_vlm_action_before_pick(
     current_state, held_object = _ensure_unique_scene_object_ids(current_state, held_object, cycle_dir)
     current_state, held_object = _merge_scene_duplicates(current_state, held_object, cycle_dir)
     current_state["instruction"] = getattr(args, "instruction", current_state.get("instruction"))
+    current_state["scene_revision"] = int(runtime.get("scene_revision", current_state.get("scene_revision", 1)))
     write_json(os.path.join(cycle_dir, "scene_state_before_action.json"), current_state)
     protected_ids = current_protected_structure_ids(
         current_state.get("objects", []),
@@ -279,6 +288,7 @@ def handle_vlm_action_before_pick(
         memory,
         step_index,
         future_place_regions=future_place_regions,
+        scene_revision=current_state["scene_revision"],
     )
     action_type = action_report.get("action_type")
     if action_type == "reobserve":
@@ -381,6 +391,13 @@ def handle_vlm_action_before_pick(
             base_template,
             step_index,
         )
+    if args.execute and args.execute_push_clearing:
+        advance_scene_revision(runtime, next_state)
+        mark_autonomous_execution_result(cycle_dir, {
+            "status": "executed_and_reobserved",
+            "action_type": selected_action.get("action_type"),
+            "next_scene_revision": runtime["scene_revision"],
+        })
     if not (args.execute and args.execute_push_clearing):
         return next_state, memory, next_held
     return handle_vlm_action_before_pick(
