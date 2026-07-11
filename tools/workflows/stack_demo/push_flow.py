@@ -314,6 +314,26 @@ def handle_vlm_action_before_pick(
             future_place_regions,
             action_attempt,
         )
+    if action_type == "stop":
+        write_json(
+            os.path.join(cycle_dir, "selected_action.json"),
+            {
+                "action": "stop",
+                "reason": action_report.get("reason"),
+                "selection_source": "vlm_action_policy",
+                "status": "policy_requested_safe_stop",
+            },
+        )
+        mark_autonomous_execution_result(
+            cycle_dir,
+            {
+                "status": "policy_requested_safe_stop",
+                "reason": action_report.get("reason"),
+            },
+        )
+        raise RuntimeError(
+            "VLM requested safe stop: {}".format(action_report.get("reason") or "unspecified")
+        )
     if selected_action is None:
         reason = action_report.get("reason") or safety_report.get("reason") or "vlm_action_policy_rejected"
         _write_blocked_failure(

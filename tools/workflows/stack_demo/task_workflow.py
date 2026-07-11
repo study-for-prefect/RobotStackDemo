@@ -1,0 +1,194 @@
+"""Shared semantic workflow for build_house and organize_blocks tasks."""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Any, Dict, List, Optional, Tuple
+
+from robot_scene_pipeline.task_action_validation import validate_task_action
+from robot_scene_pipeline.task_goal_evaluator import evaluate_task_goal_progress
+from robot_scene_pipeline.task_semantic_validation import TaskSemanticValidationError, validate_grounded_task_plan, validate_task_contract
+from robot_scene_pipeline.vlm_replanning import action_validation_feedback, advance_scene_revision
+from robot_scene_pipeline.vlm_task_policy import build_grounded_task_plan_input, build_task_action_input, build_task_contract_input, call_vlm_task_policy
+from robot_scene_pipeline.scene_memory import default_memory, save_memory, update_from_detections
+from robot_scene_pipeline.vlm_action_validation import validate_vlm_action_decision
+from tools.planning.decision_to_execution import write_json
+
+from .commands import capture_scene_observation, init_ready_pose, load_json
+from .task_execution import execute_pick_place_and_reobserve, preflight_pick_place_action
+from .clearance_execution import (
+    execute_nudge_and_reobserve,
+    execute_pick_away_and_reobserve,
+    preflight_nudge_action,
+    preflight_pick_away_action,
+)
+from .push_clearing import object_by_string_id
+
+
+def run_semantic_task_workflow(args: Any) -> int:
+    """Run contract -> temporary binding -> predicate progress -> action loop."""
+    os.makedirs(args.output_dir, exist_ok=True)
+    config = _load_semantics_config(args)
+    runtime = {"current_stage": "semantic_task_startup", "scene_revision": 1}
+    try:
+        if getattr(args, "memory_json", None) is None:
+            args.memory_json = os.path.join(args.output_dir, "scene_memory.json")
+        init_ready_pose(args)
+        state = _initial_state(args)
+        state["scene_revision"] = runtime["scene_revision"]
+        contract = _obtain_contract(args, state, config)
+        memory = update_from_detections(default_memory(task=contract["task_type"]), state.get("objects", []))
+        save_memory(memory, args.memory_json)
+        write_json(os.path.join(args.output_dir, "task_contract_validated.json"), contract)
+        for step_index in range(1, max(1, int(getattr(args, "max_task_steps", 12))) + 1):
+            cycle_dir = os.path.join(args.output_dir, "task_cycle_{:02d}".format(step_index)); os.makedirs(cycle_dir, exist_ok=True)
+            plan = _obtain_grounded_plan(args, state, contract, config, runtime["scene_revision"], cycle_dir)
+            progress = evaluate_task_goal_progress(state, contract, plan, config)
+            write_json(os.path.join(args.output_dir, "task_goal_progress_revision_{:02d}.json".format(runtime["scene_revision"])), progress)
+            if progress["task_complete"]:
+                write_json(os.path.join(args.output_dir, "task_demo_summary.json"), {"execution_status": "success", "task_contract": contract, "task_goal_progress": progress})
+                return 0
+            action, action_report = _select_task_action(args, state, contract, plan, progress, cycle_dir)
+            action_history = {
+                "task_type": contract["task_type"],
+                "scene_revision": runtime["scene_revision"],
+                "targeted_unsatisfied_predicates": list(progress["unsatisfied_predicates"]),
+                "predicates_before": list(progress["satisfied_predicates"]),
+                "selected_action": action or action_report,
+                "predicates_after": [],
+            }
+            write_json(os.path.join(cycle_dir, "autonomous_action_history.json"), action_history)
+            action_type = action_report.get("action_type")
+            if action_type == "reobserve":
+                state = _reobserve(args, cycle_dir, runtime)
+                memory = update_from_detections(memory, state.get("objects", [])); save_memory(memory, args.memory_json)
+                continue
+            if action_type == "stop":
+                raise RuntimeError("VLM requested safe stop: {}".format(action_report.get("reason") or "unspecified"))
+            if action is None:
+                raise RuntimeError("No valid VLM task action after replanning.")
+            checked = _preflight_task_action(args, cycle_dir, state, action, step_index)
+            write_json(os.path.join(cycle_dir, "task_action_preflight.json"), checked)
+            if not checked.get("moveit_feasible") and getattr(args, "execute", False):
+                raise RuntimeError("MoveIt preflight failed: {}".format(checked.get("moveit_preflight_error")))
+            state, result = _execute_task_action(args, cycle_dir, runtime, memory, state, checked, step_index)
+            write_json(os.path.join(cycle_dir, "task_action_execution.json"), result)
+            if not getattr(args, "execute", False):
+                write_json(os.path.join(args.output_dir, "task_demo_summary.json"), {"execution_status": "planned_only", "task_contract": contract, "task_goal_progress": progress})
+                return 0
+            advance_scene_revision(runtime, state)
+            memory = update_from_detections(memory, state.get("objects", [])); save_memory(memory, args.memory_json)
+            predicates_after = evaluate_task_goal_progress(state, contract, plan, config)
+            action_history["predicates_after"] = list(predicates_after["satisfied_predicates"])
+            action_history["execution_result"] = result
+            write_json(os.path.join(cycle_dir, "autonomous_action_history.json"), action_history)
+        raise RuntimeError("Task did not satisfy goal before max_task_steps.")
+    except Exception as exc:
+        write_json(os.path.join(args.output_dir, "failure_state.json"), {**runtime, "error": str(exc)})
+        return 1
+
+
+def _obtain_contract(args: Any, state: dict, config: dict) -> dict:
+    if getattr(args, "task_contract_json", ""):
+        return validate_task_contract(load_json(args.task_contract_json), config)
+    history: List[dict] = []
+    for attempt in range(1, max(1, int(getattr(args, "max_vlm_task_plan_attempts", 5))) + 1):
+        policy_input = build_task_contract_input(state, args.instruction, config)
+        policy_input["failure_history"] = history
+        raw = call_vlm_task_policy(args, policy_input, "task_contract")
+        prefix = "task_contract_attempt_{:02d}".format(attempt)
+        write_json(os.path.join(args.output_dir, "{}_input.json".format(prefix)), policy_input)
+        write_json(os.path.join(args.output_dir, "{}_raw.json".format(prefix)), raw)
+        try:
+            if raw.get("call_status") != "parsed":
+                raise RuntimeError(raw.get("error") or "task contract VLM call failed")
+            contract = validate_task_contract(raw.get("decision"), config)
+        except Exception as exc:
+            feedback = getattr(exc, "feedback", None) or {"validation_stage": "task_semantic_validation", "passed": False, "errors": [{"type": "task_contract_invalid", "message": str(exc)}]}
+            history.append(feedback); write_json(os.path.join(args.output_dir, "{}_validation.json".format(prefix)), feedback); continue
+        write_json(os.path.join(args.output_dir, "{}_validation.json".format(prefix)), {"passed": True})
+        write_json(os.path.join(args.output_dir, "task_contract_input.json"), policy_input)
+        write_json(os.path.join(args.output_dir, "task_contract_raw.json"), raw)
+        return contract
+    raise RuntimeError("No valid task_contract after replanning.")
+
+
+def _obtain_grounded_plan(args: Any, state: dict, contract: dict, config: dict, revision: int, cycle_dir: str) -> dict:
+    if getattr(args, "grounded_task_plan_json", ""):
+        raw = load_json(args.grounded_task_plan_json)
+        return validate_grounded_task_plan(raw, contract, state, revision, config)
+    history: List[dict] = []
+    for attempt in range(1, max(1, int(getattr(args, "max_vlm_task_plan_attempts", 5))) + 1):
+        policy_input = build_grounded_task_plan_input(state, contract, revision, config, failure_history=history)
+        raw = call_vlm_task_policy(args, policy_input, "grounded_task_plan")
+        prefix = "grounded_task_plan_attempt_{:02d}".format(attempt)
+        write_json(os.path.join(cycle_dir, "{}_input.json".format(prefix)), policy_input)
+        write_json(os.path.join(cycle_dir, "{}_raw.json".format(prefix)), raw)
+        try:
+            plan = validate_grounded_task_plan(raw.get("decision"), contract, state, revision, config)
+        except Exception as exc:
+            feedback = getattr(exc, "feedback", None) or {"validation_stage": "task_semantic_validation", "passed": False, "errors": [{"type": "grounded_plan_invalid", "message": str(exc)}]}
+            history.append(feedback); write_json(os.path.join(cycle_dir, "{}_validation.json".format(prefix)), feedback); continue
+        write_json(os.path.join(cycle_dir, "{}_validation.json".format(prefix)), {"passed": True})
+        write_json(os.path.join(args.output_dir, "grounded_task_plan_input.json"), policy_input)
+        write_json(os.path.join(args.output_dir, "grounded_task_plan_raw.json"), raw)
+        write_json(os.path.join(args.output_dir, "grounded_task_plan_validated.json"), plan)
+        return plan
+    raise RuntimeError("No valid grounded_task_plan after replanning.")
+
+
+def _select_task_action(args: Any, state: dict, contract: dict, plan: dict, progress: dict, cycle_dir: str) -> Tuple[Optional[dict], dict]:
+    history = []
+    for attempt in range(1, max(1, int(getattr(args, "max_vlm_action_attempts", 5))) + 1):
+        policy_input = build_task_action_input(state, contract, plan, progress, state["scene_revision"], history)
+        raw = call_vlm_task_policy(args, policy_input, "task_action")
+        proposal = raw.get("decision") or {}
+        if str(proposal.get("action_type") or "").lower() in {"nudge", "pick_away"}:
+            action, report = validate_vlm_action_decision(proposal, state, protected_ids=[])
+        else:
+            action, report = validate_task_action(proposal, state, contract, plan, progress)
+        write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_input.json".format(attempt)), policy_input)
+        write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_output.json".format(attempt)), raw)
+        if str(proposal.get("action_type") or "").lower() in {"reobserve", "stop"}:
+            write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), report); return None, proposal
+        if action is not None:
+            write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), report); return action, proposal
+        feedback = action_validation_feedback(proposal, report, state["scene_revision"], attempt); history.append(feedback)
+        write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), feedback)
+    return None, {"action_type": "stop", "reason": "no_valid_vlm_action_after_replanning"}
+
+
+def _initial_state(args: Any) -> dict:
+    if getattr(args, "offline_scene_state", ""): return load_json(args.offline_scene_state)
+    initial_dir = os.path.join(args.output_dir, "initial_task_scene"); capture_scene_observation(args, initial_dir)
+    return load_json(os.path.join(initial_dir, "private_scene_state.json"))
+
+
+def _reobserve(args: Any, cycle_dir: str, runtime: dict) -> dict:
+    observation_dir = os.path.join(cycle_dir, "observation_after_vlm_reobserve"); capture_scene_observation(args, observation_dir)
+    state = load_json(os.path.join(observation_dir, "private_scene_state.json")); advance_scene_revision(runtime, state); return state
+
+
+def _load_semantics_config(args: Any) -> dict:
+    path = getattr(args, "task_semantics_config", "config/task_semantics.json")
+    with open(path, "r", encoding="utf-8") as handle: return json.load(handle)
+
+
+def _preflight_task_action(args: Any, cycle_dir: str, state: dict, action: dict, step_index: int) -> dict:
+    if action["action_type"] == "pick_place":
+        return preflight_pick_place_action(args, cycle_dir, state, action, step_index)
+    if action["action_type"] == "nudge":
+        return preflight_nudge_action(args, cycle_dir, state, action, step_index)
+    return preflight_pick_away_action(args, cycle_dir, state, action, step_index)
+
+
+def _execute_task_action(args: Any, cycle_dir: str, runtime: dict, memory: dict, state: dict, action: dict, step_index: int) -> Tuple[dict, dict]:
+    if action["action_type"] == "pick_place":
+        return execute_pick_place_and_reobserve(args, cycle_dir, runtime, state, action, step_index)
+    target = object_by_string_id(state.get("objects", []), action.get("target_object_id"))
+    if action["action_type"] == "nudge":
+        next_state, _memory, _held = execute_nudge_and_reobserve(args, cycle_dir, runtime, memory, state, target, target, action, None, {}, None, step_index)
+    else:
+        next_state, _memory, _held = execute_pick_away_and_reobserve(args, cycle_dir, runtime, memory, state, target, action, None, {}, None, step_index)
+    return next_state, {"status": "executed_and_reobserved", "action_type": action["action_type"]}

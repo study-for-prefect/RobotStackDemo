@@ -13,10 +13,91 @@ from robot_scene_pipeline.vlm_replanning import (
     find_duplicate_failed_proposal,
 )
 from tools.workflows.stack_demo import vlm_action_loop
+from tools.workflows.stack_demo import push_flow
 from tools.workflows.stack_demo import scene as stack_scene
 
 
 class VlmReplanningLoopTests(unittest.TestCase):
+    def test_reobserve_propagates_without_replanning(self):
+        calls = []
+
+        def fake_evaluate(*_args, **kwargs):
+            calls.append(kwargs)
+            report = {"action_type": "reobserve", "reason": "need a clearer image"}
+            return None, report, {"accepted": False, "reason": "policy_requested_reobserve"}, {}
+
+        original = vlm_action_loop.evaluate_autonomous_vlm_action_attempt
+        vlm_action_loop.evaluate_autonomous_vlm_action_attempt = fake_evaluate
+        try:
+            with tempfile.TemporaryDirectory() as output_dir:
+                selected, report, safety, preflight = vlm_action_loop.select_autonomous_vlm_action(
+                    SimpleNamespace(max_vlm_action_attempts=5), output_dir, {}, {}, [], None, {}, 1, scene_revision=8,
+                )
+        finally:
+            vlm_action_loop.evaluate_autonomous_vlm_action_attempt = original
+
+        self.assertIsNone(selected)
+        self.assertEqual(report["action_type"], "reobserve")
+        self.assertEqual(safety["reason"], "policy_requested_reobserve")
+        self.assertEqual(preflight["control_action"], "reobserve")
+        self.assertEqual(len(calls), 1)
+
+    def test_stop_propagates_without_replanning(self):
+        calls = []
+
+        def fake_evaluate(*_args, **kwargs):
+            calls.append(kwargs)
+            report = {"action_type": "stop", "reason": "scene is unsafe"}
+            return None, report, {"accepted": False, "reason": "policy_requested_stop"}, {}
+
+        original = vlm_action_loop.evaluate_autonomous_vlm_action_attempt
+        vlm_action_loop.evaluate_autonomous_vlm_action_attempt = fake_evaluate
+        try:
+            with tempfile.TemporaryDirectory() as output_dir:
+                selected, report, _safety, preflight = vlm_action_loop.select_autonomous_vlm_action(
+                    SimpleNamespace(max_vlm_action_attempts=5), output_dir, {}, {}, [], None, {}, 1, scene_revision=8,
+                )
+        finally:
+            vlm_action_loop.evaluate_autonomous_vlm_action_attempt = original
+
+        self.assertIsNone(selected)
+        self.assertEqual(report["action_type"], "stop")
+        self.assertNotEqual(report.get("reason"), "no_valid_vlm_action_after_replanning")
+        self.assertEqual(preflight["control_action"], "stop")
+        self.assertEqual(len(calls), 1)
+
+    def test_push_flow_reobserve_branch_is_reachable(self):
+        original_select = push_flow.select_autonomous_vlm_action
+        original_reobserve = push_flow._reobserve_and_retry
+        push_flow.select_autonomous_vlm_action = lambda *_args, **_kwargs: (None, {"action_type": "reobserve", "reason": "refresh"}, {"accepted": False}, {})
+        push_flow._reobserve_and_retry = lambda *_args, **_kwargs: ({"objects": []}, {}, {"id": 1})
+        try:
+            with tempfile.TemporaryDirectory() as output_dir:
+                state, _memory, held = push_flow.handle_vlm_action_before_pick(
+                    _push_flow_args(output_dir), output_dir, {"scene_revision": 1}, {}, _flow_scene(), {"id": 1, "label": "blue", "geometry_center_m": [0.0, 0.0, 0.02]}, {"id": 1, "label": "blue", "geometry_center_m": [0.0, 0.0, 0.02]}, None, {}, action_attempt=0,
+                )
+        finally:
+            push_flow.select_autonomous_vlm_action = original_select
+            push_flow._reobserve_and_retry = original_reobserve
+
+        self.assertEqual(held["id"], 1)
+
+    def test_push_flow_stop_is_not_reported_as_physical_rejection(self):
+        original_select = push_flow.select_autonomous_vlm_action
+        push_flow.select_autonomous_vlm_action = lambda *_args, **_kwargs: (None, {"action_type": "stop", "reason": "unsafe"}, {"accepted": False}, {})
+        try:
+            with tempfile.TemporaryDirectory() as output_dir:
+                with self.assertRaisesRegex(RuntimeError, "VLM requested safe stop"):
+                    push_flow.handle_vlm_action_before_pick(
+                        _push_flow_args(output_dir), output_dir, {"scene_revision": 1}, {}, _flow_scene(), {"id": 1, "label": "blue", "geometry_center_m": [0.0, 0.0, 0.02]}, {"id": 1, "label": "blue", "geometry_center_m": [0.0, 0.0, 0.02]}, None, {}, action_attempt=0,
+                    )
+                with open(os.path.join(output_dir, "selected_action.json"), "r", encoding="utf-8") as handle:
+                    selected = json.load(handle)
+        finally:
+            push_flow.select_autonomous_vlm_action = original_select
+
+        self.assertEqual(selected["status"], "policy_requested_safe_stop")
+
     def test_stack_semantic_failure_is_fed_back_before_second_order(self):
         state = _stack_state()
         calls = []
@@ -193,6 +274,14 @@ def _push_plan():
         "lift_m": 0.05, "contact_z_offset_m": 0.015,
         "gripper_yaw_rad": 0.0, "target_yaw_deg": 0.0,
     }
+
+
+def _push_flow_args(output_dir):
+    return SimpleNamespace(max_vlm_action_attempts=5, instruction="test", output_dir=output_dir, execute=False, execute_push_clearing=False, memory_json=os.path.join(output_dir, "memory.json"))
+
+
+def _flow_scene():
+    return {"objects": [{"id": 1, "label": "blue", "geometry_center_m": [0.0, 0.0, 0.02], "dimensions_m": [0.03, 0.03, 0.04]}]}
 
 
 def _stack_state():

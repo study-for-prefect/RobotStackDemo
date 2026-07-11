@@ -9,13 +9,19 @@ DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run a per-block closed-loop stack demo.")
-    parser.add_argument("--instruction", default="把积木按指定顺序叠起来")
+    parser = argparse.ArgumentParser(description="Run a closed-loop semantic block task.")
+    parser.add_argument("--instruction", default="搭一个房子")
     parser.add_argument("--output-dir", default=os.path.join(PROJECT_ROOT, "runtime"))
     parser.add_argument("--stack-decision-json", default="")
     parser.add_argument("--offline-scene-state", default="")
     parser.add_argument("--base-object-id", type=int, default=None)
     parser.add_argument("--stack-order", nargs="+", type=int, default=None)
+    parser.add_argument("--legacy-linear-stack", action="store_true", help="Use the old stack_blocks-only compatibility workflow.")
+    parser.add_argument("--task-contract-json", default="", help="Optional offline task_contract_v1 JSON.")
+    parser.add_argument("--grounded-task-plan-json", default="", help="Optional current-scene grounded_task_plan_v1 JSON.")
+    parser.add_argument("--task-semantics-config", default="config/task_semantics.json")
+    parser.add_argument("--max-vlm-task-plan-attempts", type=int, default=5)
+    parser.add_argument("--max-task-steps", type=int, default=12)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
         "--execute-push-clearing",

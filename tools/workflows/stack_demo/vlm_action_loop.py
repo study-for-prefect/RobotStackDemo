@@ -44,6 +44,30 @@ def select_autonomous_vlm_action(
             attempt_index=artifact_index,
         )
         proposal = (safety_report.get("decision") or action_report) if isinstance(safety_report, dict) else action_report
+        control_action_type = str(
+            action_report.get("action_type") or proposal.get("action_type") or ""
+        ).strip().lower()
+        if control_action_type in {"reobserve", "stop"}:
+            attempts.append({
+                "attempt": attempt,
+                "proposal": proposal,
+                "validation": safety_report,
+                "result_type": "control_action",
+            })
+            _write_history(
+                cycle_dir,
+                scene_revision,
+                attempts,
+                None,
+                {
+                    "status": control_action_type,
+                    "reason": action_report.get("reason"),
+                },
+            )
+            return None, action_report, safety_report, {
+                "run_moveit_preflight": False,
+                "control_action": control_action_type,
+            }
         if selected is not None and safety_report.get("accepted"):
             attempts.append({"attempt": attempt, "proposal": proposal, "validation": safety_report})
             _write_history(cycle_dir, scene_revision, attempts, selected, None)

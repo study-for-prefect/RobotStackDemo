@@ -1,15 +1,46 @@
 # Stack Demo Workflow
 
 `tools/workflows/stack_demo_pipeline.py` remains the single command-line entry.
-This workflow uses autonomous VLM action decisions: the model diagnoses the
-scene and chooses the action, object, direction, distance, and expected benefit
-from snapshot images, objective geometry, and task state.
+Its default semantic workflow supports `build_house` and `organize_blocks`.
+`--legacy-linear-stack` retains the previous `stack_blocks` compatibility path.
+
+The semantic workflow separates immutable task meaning from current detections:
+
+```text
+instruction -> task_contract -> grounded_task_plan(scene_revision)
+-> task_goal_progress -> one VLM action -> validation/MoveIt -> reobserve
+```
+
+`task_contract` never contains a detection `object_id`. `grounded_task_plan`
+contains temporary current-scene bindings, and each action must echo its
+`scene_revision`; ID changes and ordinary motion cause reassociation/replanning,
+not task failure.
+
+`build_house` uses left/right support and roof roles plus `on_table`,
+`left_of`, `supports`, and `bridges` geometry predicates. `organize_blocks`
+uses the configured color/rows defaults, non-overlapping workspace regions,
+spacing, and row-alignment predicates. Completion is computed from a new
+observation, never from VLM text.
+
+The new `pick_place` action carries a VLM-selected current object, role,
+scene revision, and `target_pose_base`. Code validates role compatibility,
+grounding, workspace and protected structure constraints, then reuses the
+existing pick/place MoveIt plan-only and execution commands.
+
+Task logs are written as `task_contract_{input,raw,validated}.json`,
+`grounded_task_plan_{input,raw,validated}.json`, and
+`task_goal_progress_revision_XX.json`.
 
 ## Responsibility Split
 
 | Module | Responsibility |
 | --- | --- |
 | `arguments.py` | Command-line options and defaults |
+| `task_workflow.py` | Default task-contract orchestration and reobservation loop |
+| `task_execution.py` | VLM `pick_place` plan-only validation and execution handoff |
+| `robot_scene_pipeline/vlm_task_policy.py` | Task contract, temporary binding, and action VLM inputs |
+| `robot_scene_pipeline/task_semantic_validation.py` | Contract and current-scene binding validation |
+| `robot_scene_pipeline/task_goal_evaluator.py` | House/organization geometry predicate progress |
 | `commands.py` | External process commands and observation capture |
 | `scene.py` | Initial VLM stack decision, scene lookup, target reacquisition, stack estimation |
 | `push_flow.py` | Autonomous VLM action loop and post-decision dispatch |

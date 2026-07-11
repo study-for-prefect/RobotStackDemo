@@ -1,0 +1,18 @@
+{
+  "organize_defaults": {
+    "grouping_key": "color",
+    "layout_type": "rows",
+    "include_scope": "all_detected_blocks",
+    "allow_stacking": false,
+    "minimum_spacing_m": 0.015,
+    "alignment_tolerance_m": 0.012
+  },
+  "house_semantics": {
+    "support_height_tolerance_m": 0.008,
+    "vertical_contact_tolerance_m": 0.006,
+    "minimum_support_overlap_ratio": 0.2,
+    "minimum_support_separation_m": 0.025,
+    "maximum_structure_tilt_deg": 10.0,
+    "role_position_tolerance_m": 0.015
+  }
+}

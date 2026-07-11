@@ -49,19 +49,36 @@ python3 tools/calibration/xy_bias_diagnosis.py --help
 # 两阶段视觉抓取
 python3 tools/workflows/two_stage_visual_pick.py --help
 
-# 闭环堆叠
+# 语义任务闭环：搭房子或整理积木
 python3 tools/workflows/stack_demo_pipeline.py --help
 
 # 测试
 python3 -m unittest discover -s tests
 ```
 
-闭环堆叠的自主 VLM 动作策略见
+默认工作流支持 `build_house` 与 `organize_blocks`。它先让 VLM 生成一次不含检测
+`object_id` 的 `task_contract`，再在每个 `scene_revision` 由 VLM 生成临时
+`grounded_task_plan` 和单步动作；完成状态由重新感知后的几何谓词计算。
+
+```bash
+# 搭房子：两个支撑物 + 一个屋顶
+python3 tools/workflows/stack_demo_pipeline.py --instruction "搭一个房子"
+
+# 按颜色整理成行
+python3 tools/workflows/stack_demo_pipeline.py --instruction "按颜色整理积木"
+```
+
+旧线性堆叠仅作为兼容路径保留，必须显式启用 `--legacy-linear-stack`。
+详细自主 VLM 策略见
 [`tools/workflows/stack_demo/README.md`](tools/workflows/stack_demo/README.md)：
 真实推障仍必须显式 `--execute --execute-push-clearing`，短距离 nudge
 动作会先进入代码碰撞检查与 MoveIt 预检，预检通过后才会执行。
 
-本分支的闭环堆叠是 VLM-first 决策：
+以下内容描述 `--legacy-linear-stack` 兼容路径；它不参与默认的房子/整理任务状态机。
+
+## 旧线性堆叠兼容路径
+
+旧线性堆叠同样是 VLM-first 决策：
 
 ```bash
 python3 tools/workflows/stack_demo_pipeline.py \

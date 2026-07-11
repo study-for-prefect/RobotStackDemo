@@ -61,6 +61,7 @@ from .scene import (
     validate_decision,
 )
 from .target_recovery import recover_or_lock_missing_target
+from .task_workflow import run_semantic_task_workflow
 
 SECOND_PICK_OBSERVATION_ERROR_MARKERS = (
     "Second observation center z",
@@ -125,6 +126,9 @@ def main() -> int:
         if not isinstance(tcp_offset, (list, tuple)) or len(tcp_offset) != 3:
             raise RuntimeError("tcp_offset_tool_m must contain exactly three values.")
         args.tcp_offset_tool = [float(value) for value in tcp_offset]
+
+    if not args.legacy_linear_stack:
+        return run_semantic_task_workflow(args)
 
     memory = load_memory(args.memory_json, task="stack_blocks")
 
