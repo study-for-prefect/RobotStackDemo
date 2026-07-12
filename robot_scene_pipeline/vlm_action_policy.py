@@ -21,7 +21,9 @@ ACTION_TYPES = {"pick", "nudge", "pick_away", "reobserve", "stop"}
 def compact_object_for_action_policy(obj: ObjectDict) -> ObjectDict:
     """Return scene facts for VLM action intent without camera intrinsics."""
     return {
-        "id": obj.get("id"),
+        "object_ref": obj.get("object_ref"),
+        "track_id": obj.get("track_id"),
+        "detector_object_id": obj.get("id"),
         "label": obj.get("label"),
         "confidence": obj.get("confidence"),
         "bbox_xyxy_px": obj.get("bbox_xyxy_px"),
@@ -29,6 +31,7 @@ def compact_object_for_action_policy(obj: ObjectDict) -> ObjectDict:
         "depth_m": obj.get("depth_m"),
         "geometry_center_base_m": obj.get("geometry_center_m") or obj.get("center_3d_base_m"),
         "dimensions_m": obj.get("dimensions_m"),
+        "semantic_shape": obj.get("semantic_shape"),
         "top_z_base_m": obj.get("top_z_base_m"),
         "role": obj.get("role"),
         "state": obj.get("state"),
@@ -50,12 +53,16 @@ def build_vlm_action_decision_input(
     failure_history: Optional[List[dict]] = None,
     scene_revision: int = 1,
     depth_visualization_path: Optional[str] = None,
+    replanning_context: Optional[dict] = None,
 ) -> dict:
     """Build VLM input from images, objective scene facts, and task state."""
     structure = (memory or {}).get("structure") or {}
     objects = [obj for obj in current_state.get("objects", []) if isinstance(obj, dict)]
     duplicate_ids = _duplicate_object_ids(objects)
     label_groups = _label_instance_groups(objects)
+    protected_id_keys = {str(value) for value in protected_ids or []}
+    base_object = _object_by_detector_id(objects, base_id)
+    protected_objects = [obj for obj in objects if str(obj.get("id")) in protected_id_keys]
     return {
         "schema_version": "vlm_autonomous_action_input_v2",
         "scene_rgb": scene_rgb_path,
@@ -94,8 +101,12 @@ def build_vlm_action_decision_input(
             "same_label_instance_groups": label_groups,
         },
         "physical_context": {
-            "base_object_id": base_id,
-            "protected_object_ids": [value for value in protected_ids or []],
+            "base_object_ref": (base_object or {}).get("object_ref"),
+            "base_track_id": (base_object or {}).get("track_id"),
+            "protected_objects": [
+                {"object_ref": obj.get("object_ref"), "track_id": obj.get("track_id")}
+                for obj in protected_objects
+            ],
             "note": "These identify the physical structure that must not be moved.",
             "workspace_bounds": current_state.get("table_bounds") or current_state.get("workspace_bounds"),
         },
@@ -110,14 +121,17 @@ def build_vlm_action_decision_input(
             "moveit": "ik_collision_and_trajectory_preflight",
         },
         "output_schema": {
+            "strategy_id": "high-level strategy string",
             "scene_problem": "string; VLM diagnosis of the current scene",
             "action_type": "pick|nudge|pick_away|reobserve|stop",
-            "object_id": "int|string|null",
-            "object_label": "exact objects[].label for object_id; required for executable actions",
-            "object_center_base_m": "exact objects[].geometry_center_base_m for object_id",
-            "target_object_id": "int|string|null; task object this action is intended to advance, chosen by VLM",
-            "target_object_label": "exact objects[].label for target_object_id",
-            "target_object_center_base_m": "exact objects[].geometry_center_base_m for target_object_id",
+            "object_ref": "scene_<revision>:obj_<id>",
+            "object_track_id": "stable track id",
+            "object_label": "exact objects[].label for the selected reference; required for executable actions",
+            "object_center_base_m": "exact objects[].geometry_center_base_m for the selected reference",
+            "target_object_ref": "scene-local task target reference",
+            "target_object_track_id": "stable task target track id",
+            "target_object_label": "exact objects[].label for the selected target reference",
+            "target_object_center_base_m": "exact objects[].geometry_center_base_m for the selected target reference",
             "contact_side": "+x|-x|+y|-y on the operated object, required for nudge",
             "direction_base": "[x,y,z] unit vector in base_link, required for nudge",
             "distance_m": "0.01..0.05, required for nudge",
@@ -127,8 +141,10 @@ def build_vlm_action_decision_input(
             "risk_assessment": "string; main uncertainty or downside",
             "reason": "string",
             "confidence": "0.0..1.0",
+            "alternative_actions": "optional VLM-generated action objects for deterministic anti-loop fallback",
         },
         "failure_history": list(failure_history or []),
+        "replanning_context": replanning_context or {},
     }
 
 
@@ -139,12 +155,17 @@ def call_vlm_action_policy(args: Any, policy_input: dict) -> dict:
     images = _image_payloads(policy_input, include_images=not bool(getattr(args, "no_image", False)))
     if images:
         message["images"] = images
+    attempt = int((policy_input.get("replanning_context") or {}).get("attempt", 1))
     payload = {
         "model": getattr(args, "model", "qwen2.5vl:7b-q4_K_M"),
         "messages": [message],
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0.0, "num_predict": min(512, int(getattr(args, "num_predict", 512)))},
+        "options": {
+            "temperature": 0.0 if attempt <= 1 else float(getattr(args, "replanning_temperature", 0.15)),
+            "top_p": float(getattr(args, "replanning_top_p", 0.85)),
+            "num_predict": min(512, int(getattr(args, "num_predict", 512))),
+        },
     }
     try:
         response = requests.post(
@@ -208,26 +229,31 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         "- reobserve: 视觉信息不足，需要重新观察。\n"
         "- stop: 没有安全/合理动作。\n\n"
         "物理约束：不移动 base、placed、locked、protected 物体；保护已堆叠结构。\n"
-        "object_id 是实际被抓/推的物体；target_object_id 是此动作要推进的任务对象，也由你根据任务和场景选择。\n"
-        "pick 时两者通常相同；nudge/pick_away 时 object_id 可是障碍物，target_object_id 可是受益对象。\n"
+        "只能使用object_ref或track_id引用物体，禁止裸整数ID和数组index。\n"
+        "pick 时两者通常相同；nudge/pick_away 时 operated reference 可是障碍物，target reference 可是受益对象。\n"
         "不要因为 current_plan_focus 存在就机械选择它；先看全图和全部几何，再说明你的判断。\n"
-        "同颜色/label 多实例必须用 id、bbox 和 base_link 中心区分，禁止只按颜色猜。\n"
+        "同颜色/label 多实例必须用track_id、object_ref、bbox和base_link中心区分，禁止只按颜色猜。\n"
         "对于可执行动作，object_label/object_center_base_m 和 target_object_label/target_object_center_base_m "
-        "必须从 objects 对应 id 原样复制；id、label、中心不一致会被拒绝。\n"
+        "必须从 objects 对应 reference 原样复制；reference、label、中心不一致会被拒绝。\n"
         "nudge 必须自主给出 contact_side、direction_base、distance_m 和 gripper_yaw_rad。"
         "接触侧应位于 direction_base 反方向，并垂直接近；必须根据 manipulator_geometry "
         "确认该接触侧和工具扫掠走廊没有其他物体。不要把推动当成精确堆叠手段。\n"
-        "failure_history 是同一 scene_revision 已被代码拒绝的方案和具体原因；新方案必须至少改变其中要求的一项。\n"
+        "nudge仅表示桌面平面清障，不能实现放到另一个物体上方；竖直堆叠必须pick。当前待堆叠目标默认不应nudge。\n"
+        "禁止输出replanning_context中的forbidden_action_fingerprints；只改reason、confidence或小数尾数仍是重复动作。\n"
+        "新动作至少实质改变strategy_id、action_type、操作物体、方向、grasp_yaw或target_role之一。\n"
         "如果 scene_integrity.object_ids_unique=false，输出 stop 并说明检测 id 不唯一，不能执行。\n"
         "代码只会验证碰撞、抓取/放置几何和 MoveIt 可行性，不会替你选择另一个动作。\n\n"
         "只输出严格 JSON：\n"
         "{\n"
+        '  "strategy_id": "direct_pick_target",\n'
         '  "scene_problem": "...",\n'
         '  "action_type": "pick|nudge|pick_away|reobserve|stop",\n'
-        '  "object_id": 0,\n'
+        '  "object_ref": "scene_1:obj_0",\n'
+        '  "object_track_id": "track_green_01",\n'
         '  "object_label": "exact detector label",\n'
         '  "object_center_base_m": [0.0, 0.0, 0.0],\n'
-        '  "target_object_id": 0,\n'
+        '  "target_object_ref": "scene_1:obj_1",\n'
+        '  "target_object_track_id": "track_red_01",\n'
         '  "target_object_label": "exact detector label",\n'
         '  "target_object_center_base_m": [0.0, 0.0, 0.0],\n'
         '  "contact_side": "-x",\n'
@@ -238,7 +264,8 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         '  "predicted_scene_benefit": "...",\n'
         '  "risk_assessment": "...",\n'
         '  "reason": "...",\n'
-        '  "confidence": 0.0\n'
+        '  "confidence": 0.0,\n'
+        '  "alternative_actions": []\n'
         "}\n\n"
         "输入：\n"
         + json.dumps(text_input, ensure_ascii=False, indent=2)
@@ -262,12 +289,26 @@ def parse_vlm_action_decision_text(text: str) -> ActionDict:
         _required_center(decision, "target_object_center_base_m")
         if executable else decision.get("target_object_center_base_m")
     )
+    alternatives = []
+    for item in decision.get("alternative_actions") or []:
+        if isinstance(item, dict):
+            candidate = dict(item)
+            candidate.pop("alternative_actions", None)
+            try:
+                alternatives.append(parse_vlm_action_decision_text(json.dumps(candidate, ensure_ascii=False)))
+            except (TypeError, ValueError):
+                continue
     return {
+        "strategy_id": str(decision.get("strategy_id") or {"pick": "direct_pick_target", "nudge": "clear_blocker_by_nudge", "pick_away": "clear_blocker_by_pick_away", "reobserve": "reobserve_scene", "stop": "safe_stop"}.get(action_type, "unspecified")),
         "scene_problem": scene_problem,
         "action_type": action_type,
+        "object_ref": decision.get("object_ref"),
+        "object_track_id": decision.get("object_track_id") or decision.get("track_id"),
         "object_id": decision.get("object_id"),
         "object_label": _required_text(decision, "object_label") if executable else decision.get("object_label"),
         "object_center_base_m": object_center,
+        "target_object_ref": decision.get("target_object_ref"),
+        "target_object_track_id": decision.get("target_object_track_id"),
         "target_object_id": decision.get("target_object_id"),
         "target_object_label": (
             _required_text(decision, "target_object_label") if executable else decision.get("target_object_label")
@@ -283,6 +324,7 @@ def parse_vlm_action_decision_text(text: str) -> ActionDict:
         "reason": reason,
         "confidence": _strict_confidence(decision.get("confidence")),
         "raw_decision": decision,
+        "alternative_actions": alternatives,
     }
 
 
@@ -311,15 +353,20 @@ def _label_instance_groups(objects: Iterable[ObjectDict]) -> List[dict]:
             "label": label,
             "instances": [
                 {
-                    "id": obj.get("id"),
+                    "object_ref": obj.get("object_ref"),
+                    "track_id": obj.get("track_id"),
                     "bbox_xyxy_px": obj.get("bbox_xyxy_px"),
                     "geometry_center_base_m": obj.get("geometry_center_m") or obj.get("center_3d_base_m"),
                 }
                 for obj in items
             ],
-            "rule": "Use id and geometry_center_base_m to distinguish these same-label objects.",
+            "rule": "Use object_ref, track_id, and geometry_center_base_m to distinguish these same-label objects.",
         })
     return output
+
+
+def _object_by_detector_id(objects: Iterable[ObjectDict], object_id: Any) -> Optional[ObjectDict]:
+    return next((obj for obj in objects if str(obj.get("id")) == str(object_id)), None)
 
 
 def _image_payloads(policy_input: dict, include_images: bool) -> List[str]:

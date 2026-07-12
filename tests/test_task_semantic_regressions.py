@@ -235,17 +235,18 @@ class DynamicProtectionAndSafetyTests(unittest.TestCase):
 
     def test_moveit_failure_is_fed_back_before_later_action_passes(self):
         proposal = {
-            "action_type": "pick_place", "role_id": "left_support_lower", "selected_object_id": 1,
+            "strategy_id": "place_from_left", "action_type": "pick_place", "role_id": "left_support_lower", "selected_object_id": 1,
             "object_label": "square red", "object_center_base_m": [0.30, 0.0, 0.02],
             "scene_revision": 4, "target_pose_base": {"position_m": [0.25, -0.08, 0.02], "yaw_rad": 0.0},
         }
+        second_proposal = {**proposal, "strategy_id": "place_from_right"}
         args = SimpleNamespace(max_vlm_action_attempts=2, execute=True)
         preflight_results = [
             {**adapt_task_action_to_legacy_action(proposal), "moveit_feasible": False, "moveit_preflight_error": "no IK"},
             {**adapt_task_action_to_legacy_action(proposal), "moveit_feasible": True},
         ]
         with tempfile.TemporaryDirectory() as output_dir:
-            with patch("tools.workflows.stack_demo.task_workflow.call_vlm_task_policy", return_value={"decision": proposal}), patch(
+            with patch("tools.workflows.stack_demo.task_workflow.call_vlm_task_policy", side_effect=[{"decision": proposal}, {"decision": second_proposal}]), patch(
                 "tools.workflows.stack_demo.task_workflow._preflight_task_action", side_effect=preflight_results,
             ) as preflight:
                 action, _report = _select_task_action(

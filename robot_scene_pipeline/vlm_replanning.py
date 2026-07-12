@@ -1,10 +1,10 @@
-"""Structured feedback and duplicate detection for VLM replanning loops."""
+"""Structured feedback for VLM replanning loops."""
 
 from __future__ import annotations
 
 import copy
 import math
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List
 
 
 ACTION_CHANGE_FIELDS = [
@@ -33,8 +33,8 @@ class VlmReplanningExhausted(RuntimeError):
         self.failure_history = failure_history
 
 
-def action_fingerprint(proposal: Dict[str, Any], scene_revision: int) -> Dict[str, Any]:
-    """Return a tolerance-bucketed fingerprint for one VLM action proposal."""
+def _feedback_action_signature(proposal: Dict[str, Any], scene_revision: int) -> Dict[str, Any]:
+    """Return compact legacy-compatible feedback fields, not duplicate identity."""
     direction = proposal.get("direction_base") or proposal.get("push_direction_base")
     distance = proposal.get("distance_m", proposal.get("push_distance_m"))
     yaw = proposal.get("gripper_yaw_rad")
@@ -46,39 +46,6 @@ def action_fingerprint(proposal: Dict[str, Any], scene_revision: int) -> Dict[st
         "distance_range_m": _distance_range(distance),
         "contact_side": proposal.get("contact_side"),
         "gripper_yaw_sector": _yaw_sector(yaw),
-    }
-
-
-def find_duplicate_failed_proposal(
-    proposal: Dict[str, Any],
-    scene_revision: int,
-    failure_history: Iterable[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    """Find an approximately identical failed proposal in the same scene revision."""
-    fingerprint = action_fingerprint(proposal, scene_revision)
-    for failure in failure_history:
-        previous = failure.get("action_fingerprint") if isinstance(failure, dict) else None
-        if isinstance(previous, dict) and previous == fingerprint:
-            return failure
-    return None
-
-
-def duplicate_proposal_feedback(
-    proposal: Dict[str, Any], scene_revision: int, attempt: int,
-) -> Dict[str, Any]:
-    """Build feedback that requires a materially different next action."""
-    return {
-        "proposal_id": "attempt_{}".format(attempt),
-        "scene_revision": int(scene_revision),
-        "validation_stage": "duplicate_detection",
-        "passed": False,
-        "hard_failure": False,
-        "failed_checks": [{"type": "duplicate_failed_proposal"}],
-        "rejected_action": compact_action(proposal),
-        "action_fingerprint": action_fingerprint(proposal, scene_revision),
-        "constraints_for_next_proposal": {
-            "must_change_at_least_one": list(ACTION_CHANGE_FIELDS),
-        },
     }
 
 
@@ -118,7 +85,7 @@ def action_validation_feedback(
         "hard_failure": stage in ("geometry_validation", "moveit_validation"),
         "failed_checks": failed_checks,
         "rejected_action": compact_action(proposal),
-        "action_fingerprint": action_fingerprint(proposal, scene_revision),
+        "action_signature": _feedback_action_signature(proposal, scene_revision),
         "constraints_for_next_proposal": {
             "must_change_at_least_one": list(ACTION_CHANGE_FIELDS),
         },

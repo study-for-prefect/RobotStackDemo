@@ -282,7 +282,7 @@ class VlmActionPolicyTests(unittest.TestCase):
         )
 
         self.assertIsNone(selected)
-        self.assertEqual(safety["reason"], "decision_object_grounding_mismatch")
+        self.assertEqual(safety["reason"], "object_semantic_binding_mismatch")
         self.assertIn("object_label_matches_selected_id", safety["failed_fields"])
 
     def test_action_input_contains_objective_scene_and_advisory_task_focus(self):
@@ -298,7 +298,8 @@ class VlmActionPolicyTests(unittest.TestCase):
         )
         prompt = vlm_action_policy.build_vlm_action_prompt(payload)
 
-        self.assertEqual(payload["task_goal"]["current_plan_focus"]["id"], 1)
+        self.assertNotIn("id", payload["task_goal"]["current_plan_focus"])
+        self.assertIn("object_ref", payload["task_goal"]["current_plan_focus"])
         self.assertTrue(payload["task_goal"]["current_plan_focus_is_advisory"])
         self.assertNotIn("target_grasp_state", payload)
         encoded = json.dumps(payload)
@@ -309,7 +310,7 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertIn("contact_rule", payload["manipulator_geometry"])
         self.assertIn("没有代码生成的候选动作", prompt)
 
-    def test_action_input_lists_same_label_instances_for_id_based_choice(self):
+    def test_action_input_lists_same_label_instances_by_stable_reference(self):
         scene = _scene()
         scene["objects"].append(
             {
@@ -334,7 +335,8 @@ class VlmActionPolicyTests(unittest.TestCase):
         groups = payload["scene_integrity"]["same_label_instance_groups"]
         self.assertFalse(payload["scene_integrity"]["duplicate_object_ids"])
         self.assertEqual(groups[0]["label"], "red_block")
-        self.assertEqual([item["id"] for item in groups[0]["instances"]], [2, 4])
+        self.assertTrue(all("id" not in item for item in groups[0]["instances"]))
+        self.assertTrue(all("object_ref" in item and "track_id" in item for item in groups[0]["instances"]))
 
 
 def _scene():

@@ -12,10 +12,8 @@ from robot_scene_pipeline.vlm_action_policy import (
     mark_moveit_result,
     validate_vlm_action_decision,
 )
-from robot_scene_pipeline.vlm_replanning import (
-    duplicate_proposal_feedback,
-    find_duplicate_failed_proposal,
-)
+from robot_scene_pipeline.action_fingerprint import normalize_action_fingerprint
+from robot_scene_pipeline.object_tracking import resolve_action_references
 from tools.planning.decision_to_execution import write_json
 
 from .clearance_execution import preflight_nudge_action, preflight_pick_away_action
@@ -35,6 +33,8 @@ def evaluate_autonomous_vlm_action_attempt(
     failure_history: Optional[list] = None,
     scene_revision: int = 1,
     attempt_index: int = 1,
+    replanning_context: Optional[dict] = None,
+    forced_decision: Optional[dict] = None,
 ) -> Tuple[Optional[dict], dict, dict, dict]:
     """Evaluate one VLM-proposed action without choosing a replacement in code."""
     scene_rgb_path, depth_path, minimal_overlay_path = materialize_vlm_images(cycle_dir, current_state)
@@ -48,7 +48,15 @@ def evaluate_autonomous_vlm_action_attempt(
         memory,
         step_index,
         manipulator_geometry={
-            "closed_gripper_outer_width_m": float(getattr(args, "grasp_gripper_outer_width_m", 0.112)),
+            "open_outer_width_m": float(getattr(args, "grasp_gripper_outer_width_m", 0.112)),
+            "open_inner_gap_m": float(getattr(args, "grasp_gripper_inner_width_m", 0.049)),
+            "closed_tip_width_m": float(getattr(args, "gripper_closed_tip_width_m", 0.025)),
+            "closed_upper_width_m": float(getattr(args, "gripper_closed_upper_width_m", 0.062)),
+            "push_profile": [
+                {"name": "tip", "z_from_tip_min_m": 0.0, "z_from_tip_max_m": float(getattr(args, "gripper_tip_height_m", 0.025)), "width_m": float(getattr(args, "gripper_closed_tip_width_m", 0.025))},
+                {"name": "upper_fingers", "z_from_tip_min_m": float(getattr(args, "gripper_tip_height_m", 0.025)), "z_from_tip_max_m": float(getattr(args, "gripper_upper_height_m", 0.070)), "width_m": float(getattr(args, "gripper_closed_upper_width_m", 0.062))},
+                {"name": "gripper_body", "z_from_tip_min_m": float(getattr(args, "gripper_upper_height_m", 0.070)), "z_from_tip_max_m": float(getattr(args, "gripper_body_height_m", 0.150)), "width_m": float(getattr(args, "grasp_gripper_outer_width_m", 0.112))},
+            ],
             "finger_length_m": float(getattr(args, "push_tool_finger_length_m", 0.12)),
             "safety_margin_m": float(getattr(args, "push_tool_safety_margin_m", 0.005)),
             "contact_z_offset_m": float(getattr(args, "push_clearing_contact_z_offset_m", 0.015)),
@@ -64,15 +72,55 @@ def evaluate_autonomous_vlm_action_attempt(
         failure_history=failure_history,
         scene_revision=scene_revision,
         depth_visualization_path=depth_path,
+        replanning_context=replanning_context,
     )
-    raw_output = call_vlm_action_policy(args, policy_input)
-    decision = raw_output.get("decision") or {}
-    if find_duplicate_failed_proposal(decision, scene_revision, failure_history or []):
-        safety_report = duplicate_proposal_feedback(decision, scene_revision, attempt_index)
+    raw_output = (
+        {"call_status": "deterministic_vlm_candidate_fallback", "decision": dict(forced_decision)}
+        if forced_decision is not None
+        else call_vlm_action_policy(args, policy_input)
+    )
+    raw_decision = raw_output.get("decision") or {}
+    decision, reference_error = resolve_action_references(raw_decision, current_state, scene_revision)
+    if reference_error:
+        safety_report = {"accepted": False, "validation_stage": "object_reference_validation", "reason": reference_error["reason"], "failed_fields": [reference_error.get("field", "object_reference")], "checks": {}, "decision": raw_decision}
+        validated_output = _validated_output(raw_output, None, safety_report)
+        write_vlm_action_artifacts(cycle_dir, policy_input, raw_output, validated_output, safety_report, attempt_index)
+        return None, validated_output, safety_report, {"run_moveit_preflight": False, "failures": []}
+    raw_output["decision"] = decision
+    fingerprint = normalize_action_fingerprint(decision, current_state, scene_revision)
+    forbidden = set(((replanning_context or {}).get("hard_constraints") or {}).get("forbidden_action_fingerprints", []))
+    if fingerprint["fingerprint"] in forbidden:
+        safety_report = {
+            "accepted": False,
+            "validation_stage": "duplicate_detection",
+            "reason": "duplicate_failed_action",
+            "failed_fields": ["action_fingerprint"],
+            "checks": {},
+            "decision": decision,
+            "normalized_action_fingerprint": fingerprint,
+        }
         validated_output = _validated_output(raw_output, None, safety_report)
         write_vlm_action_artifacts(
             cycle_dir, policy_input, raw_output, validated_output, safety_report, attempt_index,
         )
+        return None, validated_output, safety_report, {"run_moveit_preflight": False, "failures": []}
+    hard_constraints = (replanning_context or {}).get("hard_constraints") or {}
+    if decision.get("action_type") in set(hard_constraints.get("forbidden_action_types", [])):
+        safety_report = {"accepted": False, "validation_stage": "graded_replanning", "reason": "repeated_action_type_forbidden", "failed_fields": ["action_type"], "checks": {}, "decision": decision, "normalized_action_fingerprint": fingerprint}
+        validated_output = _validated_output(raw_output, None, safety_report)
+        write_vlm_action_artifacts(cycle_dir, policy_input, raw_output, validated_output, safety_report, attempt_index)
+        return None, validated_output, safety_report, {"run_moveit_preflight": False, "failures": []}
+    previous_strategies = {item.get("strategy_id") for item in (replanning_context or {}).get("failed_actions", [])}
+    if hard_constraints.get("required_strategy_change") and decision.get("strategy_id") in previous_strategies:
+        safety_report = {"accepted": False, "validation_stage": "graded_replanning", "reason": "strategy_change_required", "failed_fields": ["strategy_id"], "checks": {}, "decision": decision, "normalized_action_fingerprint": fingerprint}
+        validated_output = _validated_output(raw_output, None, safety_report)
+        write_vlm_action_artifacts(cycle_dir, policy_input, raw_output, validated_output, safety_report, attempt_index)
+        return None, validated_output, safety_report, {"run_moveit_preflight": False, "failures": []}
+    semantic_error = _stack_action_semantic_error(decision, task_focus_object)
+    if semantic_error:
+        safety_report = {"accepted": False, "validation_stage": "action_semantic_validation", "reason": semantic_error, "failed_fields": [semantic_error], "checks": {}, "decision": decision, "normalized_action_fingerprint": fingerprint}
+        validated_output = _validated_output(raw_output, None, safety_report)
+        write_vlm_action_artifacts(cycle_dir, policy_input, raw_output, validated_output, safety_report, attempt_index)
         return None, validated_output, safety_report, {"run_moveit_preflight": False, "failures": []}
     selected, safety_report = validate_vlm_action_decision(
         decision,
@@ -87,6 +135,7 @@ def evaluate_autonomous_vlm_action_attempt(
         protection_margin_m=float(getattr(args, "push_tool_safety_margin_m", 0.005)),
         future_place_regions=future_place_regions or [],
     )
+    safety_report["normalized_action_fingerprint"] = fingerprint
     preflight_report = {
         "schema_version": "vlm_action_moveit_preflight_v1",
         "run_moveit_preflight": False,
@@ -127,6 +176,18 @@ def evaluate_autonomous_vlm_action_attempt(
     return selected if safety_report.get("accepted") else None, validated_output, safety_report, preflight_report
 
 
+def _stack_action_semantic_error(decision: dict, task_focus_object: dict) -> Optional[str]:
+    if str(decision.get("action_type")) != "nudge":
+        return None
+    same_id = str(decision.get("object_id")) == str(task_focus_object.get("id"))
+    same_track = decision.get("object_track_id") and str(decision.get("object_track_id")) == str(task_focus_object.get("track_id"))
+    vertical_text = " ".join(str(decision.get(key) or "") for key in ("reason", "predicted_scene_benefit", "scene_problem")).lower()
+    vertical_relation = any(token in vertical_text for token in ("上方", "堆叠", "on_top", "on top", "stack"))
+    if (same_id or same_track) and vertical_relation:
+        return "nudge_cannot_satisfy_vertical_stack_relation"
+    return None
+
+
 def write_vlm_action_artifacts(
     cycle_dir: str,
     policy_input: dict,
@@ -144,6 +205,25 @@ def write_vlm_action_artifacts(
         write_json(os.path.join(cycle_dir, "vlm_action_decision_raw.json"), raw_output)
     write_json(os.path.join(cycle_dir, "vlm_action_decision_validated.json"), validated_output)
     write_json(os.path.join(cycle_dir, "vlm_action_safety_report.json"), safety_report)
+    write_json(os.path.join(cycle_dir, "action_proposal.json"), raw_output.get("decision") or {})
+    fingerprint = safety_report.get("normalized_action_fingerprint")
+    if fingerprint: write_json(os.path.join(cycle_dir, "action_fingerprint.json"), fingerprint)
+    stage = str(safety_report.get("validation_stage") or "semantic_validation")
+    artifact = {
+        "geometry_validation": "geometry_validation.json", "moveit_validation": "moveit_validation.json",
+        "action_semantic_validation": "semantic_validation.json", "object_reference_validation": "semantic_validation.json",
+        "graded_replanning": "semantic_validation.json", "duplicate_detection": "semantic_validation.json",
+    }.get(stage, "collision_validation.json")
+    artifacts = (
+        "semantic_validation.json", "geometry_validation.json",
+        "collision_validation.json", "moveit_validation.json",
+    )
+    for name in artifacts:
+        write_json(os.path.join(cycle_dir, name), {
+            "status": "not_run",
+            "reason": "blocked_before_{}".format(name.removesuffix(".json")),
+        })
+    write_json(os.path.join(cycle_dir, artifact), safety_report)
 
 
 def materialize_vlm_images(

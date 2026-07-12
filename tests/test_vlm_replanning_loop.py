@@ -6,12 +6,7 @@ from types import SimpleNamespace
 
 from robot_scene_pipeline.tool_swept_volume import check_tool_swept_volume
 from robot_scene_pipeline.vlm_action_validation import validate_vlm_action_decision
-from robot_scene_pipeline.vlm_replanning import (
-    action_fingerprint,
-    advance_scene_revision,
-    duplicate_proposal_feedback,
-    find_duplicate_failed_proposal,
-)
+from robot_scene_pipeline.vlm_replanning import advance_scene_revision
 from tools.workflows.stack_demo import vlm_action_loop
 from tools.workflows.stack_demo import push_flow
 from tools.workflows.stack_demo import scene as stack_scene
@@ -188,16 +183,9 @@ class VlmReplanningLoopTests(unittest.TestCase):
             vlm_action_loop.evaluate_autonomous_vlm_action_attempt = original
 
         self.assertIsNone(selected)
-        self.assertEqual(report["reason"], "no_valid_vlm_action_after_replanning")
+        self.assertEqual(report["reason"], "reobserve_after_nondiverse_replanning")
+        self.assertEqual(report["action_type"], "reobserve")
         self.assertEqual(len(safety["failure_history"]), 2)
-
-    def test_duplicate_detection_is_limited_to_same_scene_revision(self):
-        proposal = _nudge([1.0, 0.0, 0.0], "-x")
-        feedback = duplicate_proposal_feedback(proposal, 7, 1)
-
-        self.assertIsNotNone(find_duplicate_failed_proposal(proposal, 7, [feedback]))
-        self.assertIsNone(find_duplicate_failed_proposal(proposal, 8, [feedback]))
-        self.assertEqual(action_fingerprint(proposal, 7)["distance_range_m"], [0.02, 0.03])
 
     def test_movable_object_contact_is_recoverable(self):
         selected, safety = validate_vlm_action_decision(

@@ -229,7 +229,7 @@ def _reobserve_and_retry(
     if observed_state is None:
         raise RuntimeError("VLM requested reobserve, but no live observation was produced.")
     advance_scene_revision(runtime, observed_state)
-    memory = update_from_detections(memory, observed_state.get("objects", []))
+    memory = update_from_detections(memory, observed_state.get("objects", []), scene_revision=runtime["scene_revision"])
     save_memory(memory, args.memory_json)
     held_object = copy.deepcopy(reacquire_target(observed_state, held_template))
     return handle_vlm_action_before_pick(

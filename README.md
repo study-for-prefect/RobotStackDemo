@@ -65,10 +65,13 @@ python3 -m unittest discover -s tests
 屋顶中央。合法角色固定为 `left_support_lower`、`right_support_lower`、
 `left_support_upper`、`right_support_upper`、`roof` 和 `triangle_top`，不得退化为旧版三块房子。
 
-所有可执行单步动作统一用 `selected_object_id`。房子 `pick_place` 或
+所有传给 VLM 的当前帧物体统一使用 `object_ref=scene_<revision>:obj_<detector_id>`，
+跨帧身份使用 `track_id`。语义任务动作输出 `selected_object_ref` 或
+`selected_track_id`；解析为当前检测对象后，兼容适配层内部才使用 `selected_object_id`。
+房子 `pick_place` 或
 `pick_reorient_place` 还包含
 `role_id`；整理 `pick_place` 包含 `group_id` 和 `target_region_id`。语义校验通过后，
-唯一的兼容适配层才把 `selected_object_id` 复制为旧 MoveIt/清障模块使用的
+唯一的兼容适配层再把已解析的 `selected_object_id` 复制为旧 MoveIt/清障模块使用的
 `object_id`；两个字段冲突会直接拒绝，不会改选对象或修改目标位姿。
 
 ```bash
@@ -105,8 +108,9 @@ plan-only 后才允许执行。三角形方向由三顶点内角、深度/点云
 - VLM = 初始结构/堆叠顺序，以及每轮场景问题、动作类型、操作物体、方向、距离和预期收益。
 - 初始结构只输出一个权威字段 `full_stack_order`；代码自动派生底座和后续放置顺序，
   不再比较三个等价字段。
-- 每轮动作输出 `scene_problem`、`action_type`、`object_id`、`object_label`、
-  `object_center_base_m`、`target_object_id`、`target_object_label`、
+- 每轮动作输出 `strategy_id`、`scene_problem`、`action_type`、`object_ref`、
+  `object_track_id`、`object_label`、`object_center_base_m`、`target_object_ref`、
+  `target_object_track_id`、`target_object_label`、
   `target_object_center_base_m`、
   `contact_side`、`direction_base`、`distance_m`、`gripper_yaw_rad`、
   `safe_place_center_base_m`、
@@ -118,30 +122,35 @@ plan-only 后才允许执行。三角形方向由三顶点内角、深度/点云
 VLM 输入不会包含相机内参；相机内参只在感知模块里用于像素和深度到三维坐标转换。
 大模型输入使用快照图、带编号图、已经计算好的 `base_link` 坐标、物体尺寸、
 bbox、任务目标、堆叠进度和记忆。同色/同 label 物体会以实例组形式列出，VLM 必须用
-object id、bbox 和 `base_link` 中心区分，不能只按颜色猜。
+`object_ref`、`track_id`、bbox 和 `base_link` 中心区分，不能只按颜色猜。
 
 每轮输入不包含代码计算的 `grasp_feasible`、`blocking_objects`、候选动作、候选评分、
 推荐推向或推荐距离。`current_plan_focus` 只是先前 VLM 堆叠计划的上下文，不会在验证器中
-强制 `pick.object_id` 与它相等。VLM 选定 `pick`/`pick_away` 物体后，代码才搜索抓取 yaw；
+强制 `pick` 操作对象与它相等。VLM 选定 `pick`/`pick_away` 物体后，代码才搜索抓取 yaw；
 VLM 选定 `nudge` 后，代码才检查终点和扫掠路径。
 
-VLM 必须把所选 id 对应的检测 label 和 `base_link` 中心原样回填。代码只验证这组三元组
-是否与当前检测一致，用来阻止“reason 说绿色、object_id 实际指向黄色”的 grounding 错误。
+VLM 必须把所选引用对应的检测 label 和 `base_link` 中心原样回填。代码根据当前场景重新
+计算实际语义，用来阻止“reason 说绿色、track 实际指向黄色”的 grounding 错误。
 初始堆叠输出同样通过 `object_bindings` 绑定 id、label 和中心，但代码不替 VLM解释任务顺序。
 
-VLM 输出后，代码会校验 object id、base/placed/locked/protected 状态、推动距离
+VLM 输出后，代码会解析当前 `object_ref`/`track_id`，校验 base/placed/locked/protected 状态、推动距离
 范围、`base_link` 单位方向、`pick_away` 临时放置点、保护结构终点区域、
 保护结构扫掠碰撞和 MoveIt 预检。普通 `pick` 也必须在真实执行前通过 plan-only 预检。
 `nudge` 的接触侧、方向、距离和夹爪 yaw 均由 VLM 决定。代码使用考虑
-`tool0→TCP`、夹爪外宽/深度、指长和末端 yaw 的 OBB 做保守粗筛，最终仍以 MoveIt 为准。
-GF225 工具碰物体、桌面或受保护结构是硬拒绝；被推物体碰普通可移动物体只记录为可恢复接触。
+`tool0→TCP`、指长和末端 yaw 的分段 OBB 做保守粗筛：尖端 `0–0.025 m / 0.025 m`，
+上指 `0.025–0.070 m / 0.062 m`，壳体 `0.070–0.150 m / 0.112 m`。这些高度是安装后的
+默认值，真实硬件必须重新实测校准。抓取模型使用两根实体手指，中间 `0.049 m` 开口不是
+碰撞实体。桌面、工作区边缘、支撑物和 protected 结构始终硬拒绝；未保护散乱积木仅在
+侵入、被动位移、出界和倾覆风险均通过配置阈值时允许 `controlled_contact`，随后必须重新感知。
 非法 JSON、未知 object id、不安全方向/距离、保护结构碰撞或 MoveIt 不可行会生成结构化反馈，
 连同原场景再次发送给 VLM；代码不会生成替代动作。每轮动作决策前，代码会先保证当前 snapshot
 内 object id 唯一；若检测结果出现重复 id，会写 `scene_state_unique_object_ids.json`
 记录重分配。
-同一 `scene_revision` 的近似重复失败动作会被拒绝；通过校验并执行后必须重新获取 RGB-D、
-更新检测与记忆并递增场景版本。`--max-vlm-action-attempts` 和
-`--max-vlm-stack-attempts` 达到上限后才 fail-safe 停止。
+失败动作使用基于 `track_id` 的 `ActionFingerprint`：方向离散，距离按 `0.005 m`、yaw 按
+`5°` 量化，reason/confidence 不参与。失败指纹进入硬黑名单，在几何、碰撞和 MoveIt 前拒绝。
+第 3 次可禁用连续失败的动作类型，第 4 次强制更换高层策略；只有至少两个唯一指纹和两个
+唯一策略均失败后才允许 safe-stop，否则要求重新观察。动作后递增 `scene_revision` 并执行
+一对一 track 重绑定，旧 `object_ref` 立即失效。
 
 VLM 决策日志：
 
@@ -154,6 +163,9 @@ VLM 决策日志：
 - `vlm_action_safety_report.json`
 - `vlm_action_attempt_XX_input.json` / `output.json` / `validation.json`
 - `autonomous_action_history.json`
+- `action_fingerprint.json` / `failure_ledger.json` / `replanning_context.json`
+- `track_assignment.json` / `track_history.json` / `role_binding_history.json`
+- `gripper_collision_profile.json` / `controlled_contact_evaluation.json`
 
 旧的代码侧动作发现/评分路径不再进入堆叠 workflow；初始堆叠 JSON 也不再由颜色规则
 解析器覆盖或修复。代码只检查 schema、引用 id 和执行所需几何，任务理解由 VLM 负责。

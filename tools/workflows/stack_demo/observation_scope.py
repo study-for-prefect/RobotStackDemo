@@ -331,6 +331,7 @@ def observe_empty_with_scope(
         scoped_object_ids=scoped_ids,
         critical_object_ids=critical_memory_ids,
         observation_scope=scope_name,
+        scene_revision=selected_state.get("scene_revision"),
     )
     report = {
         "schema_version": "scoped_observation_v1",

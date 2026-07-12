@@ -72,7 +72,7 @@ def validate_vlm_action_decision(
     _record(safety, "object_center_matches_selected_id", object_center_ok, object_center_detail)
     _record(safety, "target_center_matches_selected_id", target_center_ok, target_center_detail)
     if not all((object_label_ok, target_label_ok, object_center_ok, target_center_ok)):
-        safety["reason"] = "decision_object_grounding_mismatch"
+        safety["reason"] = "object_semantic_binding_mismatch"
         return None, safety
     movable_ok = _object_can_move(obj, protected_ids, require_pushable=action_type == "nudge")
     _record(safety, "object_not_base_placed_locked_protected", movable_ok)

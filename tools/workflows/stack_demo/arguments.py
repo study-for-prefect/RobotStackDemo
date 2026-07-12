@@ -56,6 +56,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--push-tool-safety-margin-m", type=float, default=0.005)
     parser.add_argument("--grasp-gripper-side-clearance-m", type=float, default=0.006)
+    parser.add_argument("--gripper-closed-tip-width-m", type=float, default=0.025)
+    parser.add_argument("--gripper-closed-upper-width-m", type=float, default=0.062)
+    parser.add_argument("--gripper-tip-height-m", type=float, default=0.025)
+    parser.add_argument("--gripper-upper-height-m", type=float, default=0.070)
+    parser.add_argument("--gripper-body-height-m", type=float, default=0.150)
+    parser.add_argument("--controlled-contact-enabled", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--controlled-contact-max-intrusion-m", type=float, default=0.005)
+    parser.add_argument("--controlled-contact-max-displacement-m", type=float, default=0.015)
+    parser.add_argument("--controlled-contact-max-objects", type=int, default=2)
+    parser.add_argument("--replanning-temperature", type=float, default=0.15)
+    parser.add_argument("--replanning-top-p", type=float, default=0.85)
     parser.add_argument("--max-vlm-action-attempts", type=int, default=5)
     parser.add_argument("--max-vlm-stack-attempts", type=int, default=5)
     parser.add_argument("--yes", action="store_true")
@@ -145,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grasp-axis", choices=("long", "short"), default="long")
     parser.add_argument("--gripper-yaw-offset-deg", type=float, default=0.0)
     parser.add_argument("--grasp-gripper-outer-width-m", type=float, default=0.112)
-    parser.add_argument("--grasp-gripper-inner-width-m", type=float, default=0.048)
+    parser.add_argument("--grasp-gripper-inner-width-m", type=float, default=0.049)
     parser.add_argument(
         "--grasp-approach-length-m",
         type=float,

@@ -109,7 +109,10 @@ TASK_ACTION_SCHEMA = {
     "type": "object",
     "required": ["action_type"],
     "properties": {
+        "strategy_id": {"type": "string"},
         "action_type": {"type": "string", "enum": ["pick_place", "pick_reorient_place", "nudge", "pick_away", "reobserve", "stop"]},
+        "selected_object_ref": {"type": "string"},
+        "selected_track_id": {"type": "string"},
         "selected_object_id": {"type": ["integer", "string"]},
         "role_id": ROLE_ID_SCHEMA,
         "group_id": {"type": "string"},

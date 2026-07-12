@@ -14,6 +14,8 @@ from robot_scene_pipeline.orientation_fusion import fuse_house_orientation_obser
 from robot_scene_pipeline.orientation_assets import prepare_orientation_candidate_assets
 from robot_scene_pipeline.task_semantic_validation import validate_grounded_task_plan, validate_task_contract
 from robot_scene_pipeline.vlm_replanning import action_validation_feedback, advance_scene_revision
+from robot_scene_pipeline.action_fingerprint import build_replanning_context, ledger_entry, normalize_action_fingerprint
+from robot_scene_pipeline.object_tracking import resolve_action_references
 from robot_scene_pipeline.vlm_task_policy import build_grounded_task_plan_input, build_task_action_input, build_task_contract_input, call_vlm_task_policy
 from robot_scene_pipeline.scene_memory import default_memory, save_memory, update_from_detections
 from robot_scene_pipeline.vlm_action_validation import validate_vlm_action_decision
@@ -44,7 +46,7 @@ def run_semantic_task_workflow(args: Any) -> int:
         state = _initial_state(args)
         state["scene_revision"] = runtime["scene_revision"]
         contract = _obtain_contract(args, state, config)
-        memory = update_from_detections(default_memory(task=contract["task_type"]), state.get("objects", []))
+        memory = update_from_detections(default_memory(task=contract["task_type"]), state.get("objects", []), scene_revision=state["scene_revision"])
         save_memory(memory, args.memory_json)
         write_json(os.path.join(args.output_dir, "task_contract_validated.json"), contract)
         previous_progress = None
@@ -64,6 +66,11 @@ def run_semantic_task_workflow(args: Any) -> int:
                 write_json(pending_post_place_log, prior_execution)
                 pending_post_place_log = None
             progress = evaluate_task_goal_progress(state, contract, plan, config, previous_progress)
+            _update_role_binding_history(
+                memory,
+                progress.get("selected_role_assignment"),
+                runtime["scene_revision"],
+            )
             protection = derive_dynamic_protection(
                 state, contract, progress, progress.get("selected_role_assignment"),
             )
@@ -72,6 +79,9 @@ def run_semantic_task_workflow(args: Any) -> int:
             write_json(os.path.join(cycle_dir, "selected_role_assignment.json"), progress.get("selected_role_assignment"))
             write_json(os.path.join(cycle_dir, "dynamic_protection.json"), protection)
             write_json(os.path.join(cycle_dir, "orientation_fusion.json"), plan.get("fused_orientation_results", []))
+            write_json(os.path.join(cycle_dir, "track_assignment.json"), memory.get("last_track_assignment", []))
+            write_json(os.path.join(args.output_dir, "track_history.json"), memory.get("track_history", []))
+            write_json(os.path.join(args.output_dir, "role_binding_history.json"), memory.get("role_binding_history", []))
             if progress["task_complete"]:
                 write_json(os.path.join(args.output_dir, "task_demo_summary.json"), {"execution_status": "success", "task_contract": contract, "task_goal_progress": progress})
                 return 0
@@ -92,7 +102,7 @@ def run_semantic_task_workflow(args: Any) -> int:
                 previous_progress = progress
                 previous_plan = plan
                 state = _reobserve(args, cycle_dir, runtime)
-                memory = update_from_detections(memory, state.get("objects", [])); save_memory(memory, args.memory_json)
+                memory = update_from_detections(memory, state.get("objects", []), scene_revision=state["scene_revision"]); save_memory(memory, args.memory_json)
                 continue
             if action_type == "stop":
                 raise RuntimeError("VLM requested safe stop: {}".format(action_report.get("reason") or "unspecified"))
@@ -109,7 +119,7 @@ def run_semantic_task_workflow(args: Any) -> int:
                 write_json(os.path.join(args.output_dir, "task_demo_summary.json"), {"execution_status": "planned_only", "task_contract": contract, "task_goal_progress": progress})
                 return 0
             advance_scene_revision(runtime, state)
-            memory = update_from_detections(memory, state.get("objects", [])); save_memory(memory, args.memory_json)
+            memory = update_from_detections(memory, state.get("objects", []), scene_revision=state["scene_revision"]); save_memory(memory, args.memory_json)
             predicates_after = evaluate_task_goal_progress(state, contract, plan, config, progress)
             action_history["predicates_after"] = list(predicates_after["satisfied_predicates"])
             action_history["execution_result"] = result
@@ -194,13 +204,35 @@ def _select_task_action(
     protection: dict, semantics_config: dict, cycle_dir: str, step_index: int,
 ) -> Tuple[Optional[dict], dict]:
     history = []
-    for attempt in range(1, max(1, int(getattr(args, "max_vlm_action_attempts", 5))) + 1):
-        policy_input = build_task_action_input(state, contract, plan, progress, state["scene_revision"], history)
+    ledger = []
+    max_attempts = max(1, int(getattr(args, "max_vlm_action_attempts", 5)))
+    for attempt in range(1, max_attempts + 1):
+        replanning = build_replanning_context(ledger, attempt, max_attempts)
+        policy_input = build_task_action_input(
+            state, contract, plan, progress, state["scene_revision"], history,
+            replanning_context=replanning,
+        )
         raw = call_vlm_task_policy(args, policy_input, "task_action")
         proposal = raw.get("decision") or {}
         action_type = str(proposal.get("action_type") or "").lower()
         preflight_state = state
+        fingerprint = None
         try:
+            if action_type not in {"reobserve", "stop"}:
+                proposal = _resolve_task_action_reference(proposal, state)
+                raw["decision"] = proposal
+                fingerprint = normalize_action_fingerprint(proposal, state, state["scene_revision"])
+                constraints = replanning["hard_constraints"]
+                if fingerprint["fingerprint"] in set(constraints["forbidden_action_fingerprints"]):
+                    raise TaskActionSchemaError("duplicate_failed_action", proposal)
+                if action_type in set(constraints["forbidden_action_types"]):
+                    raise TaskActionSchemaError("repeated_action_type_forbidden", proposal)
+                prior_strategies = {item.get("strategy_id") for item in replanning["failed_actions"]}
+                if constraints["required_strategy_change"] and proposal.get("strategy_id") in prior_strategies:
+                    raise TaskActionSchemaError("strategy_change_required", proposal)
+                semantic_error = _task_nudge_semantic_error(proposal, progress)
+                if semantic_error:
+                    raise TaskActionSchemaError(semantic_error, proposal)
             if action_type in {"nudge", "pick_away"}:
                 adapted = adapt_task_action_to_legacy_action(proposal)
                 protected_state, protected_ids = _state_with_dynamic_protection(state, protection)
@@ -217,8 +249,12 @@ def _select_task_action(
         write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_input.json".format(attempt)), policy_input)
         write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_output.json".format(attempt)), raw)
         write_json(os.path.join(cycle_dir, "task_action_semantic_validation.json"), report)
-        if action_type in {"reobserve", "stop"}:
+        if action_type == "reobserve":
             write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), report); return None, proposal
+        if action_type == "stop" and replanning["hard_constraints"]["safe_stop_allowed"]:
+            write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), report); return None, proposal
+        if action_type == "stop":
+            report = {"accepted": False, "validation_stage": "graded_replanning", "reason": "safe_stop_not_yet_allowed"}
         if action is not None:
             legacy_action = (
                 action if action_type in {"nudge", "pick_away"}
@@ -237,8 +273,50 @@ def _select_task_action(
                 "moveit_preflight_error": checked.get("moveit_preflight_error"),
             }
         feedback = action_validation_feedback(proposal, report, state["scene_revision"], attempt); history.append(feedback)
+        fingerprint = fingerprint or normalize_action_fingerprint(proposal, state, state["scene_revision"])
+        ledger.append(ledger_entry(
+            attempt, fingerprint, proposal, str(feedback.get("validation_stage") or "semantic"),
+            [str(report.get("reason") or "proposal_rejected")], state["scene_revision"],
+        ))
         write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), feedback)
+        write_json(os.path.join(cycle_dir, "failure_ledger.json"), ledger)
+        write_json(os.path.join(cycle_dir, "replanning_context.json"), build_replanning_context(ledger, min(attempt + 1, max_attempts), max_attempts))
+        write_json(os.path.join(cycle_dir, "action_fingerprint.json"), fingerprint)
+    unique_fingerprints = {item["fingerprint"] for item in ledger}
+    unique_strategies = {item["strategy_id"] for item in ledger}
+    if len(unique_fingerprints) < 2 or len(unique_strategies) < 2:
+        return None, {"action_type": "reobserve", "reason": "reobserve_after_nondiverse_replanning"}
     return None, {"action_type": "stop", "reason": "no_valid_vlm_action_after_replanning"}
+
+
+def _resolve_task_action_reference(proposal: dict, state: dict) -> dict:
+    reference_action = dict(proposal)
+    reference_action["object_ref"] = proposal.get("selected_object_ref")
+    reference_action["object_track_id"] = proposal.get("selected_track_id")
+    reference_action["object_id"] = proposal.get("selected_object_id")
+    resolved, error = resolve_action_references(reference_action, state, int(state["scene_revision"]))
+    if error:
+        raise TaskActionSchemaError(error["reason"], proposal)
+    output = dict(proposal)
+    output["selected_object_id"] = resolved["object_id"]
+    output["selected_object_ref"] = resolved["object_ref"]
+    if resolved.get("object_track_id"):
+        output["selected_track_id"] = resolved["object_track_id"]
+    else:
+        output.pop("selected_track_id", None)
+    output.setdefault("strategy_id", "{}_{}".format(proposal.get("action_type", "action"), proposal.get("role_id") or proposal.get("group_id") or "task"))
+    return output
+
+
+def _task_nudge_semantic_error(proposal: dict, progress: dict) -> Optional[str]:
+    if str(proposal.get("action_type")) != "nudge":
+        return None
+    text = " ".join(str(proposal.get(key) or "") for key in ("reason", "predicted_scene_benefit")).lower()
+    if any(token in text for token in ("上方", "堆叠", "on_top", "on top", "stack")):
+        return "nudge_cannot_satisfy_vertical_stack_relation"
+    if proposal.get("role_id") and any("on_top" in str(value) for value in progress.get("unsatisfied_predicates", [])):
+        return "nudge_cannot_satisfy_vertical_stack_relation"
+    return None
 
 
 def _state_with_dynamic_protection(state: dict, protection: dict) -> Tuple[dict, List[Any]]:
@@ -275,6 +353,28 @@ def _reobserve(args: Any, cycle_dir: str, runtime: dict) -> dict:
 def _load_semantics_config(args: Any) -> dict:
     path = getattr(args, "task_semantics_config", "config/task_semantics.json")
     with open(path, "r", encoding="utf-8") as handle: return json.load(handle)
+
+
+def _update_role_binding_history(memory: dict, assignment: Any, scene_revision: int) -> None:
+    if not isinstance(assignment, dict):
+        return
+    history = memory.setdefault("role_binding_history", [])
+    for role_id, obj in assignment.items():
+        if not isinstance(obj, dict) or not obj.get("track_id"):
+            continue
+        previous = next((item for item in reversed(history) if item.get("role_id") == role_id), None)
+        track_id = str(obj["track_id"])
+        object_ref = obj.get("object_ref")
+        if previous and previous.get("track_id") == track_id and previous.get("object_ref") == object_ref:
+            continue
+        history.append({
+            "event": "role_rebound" if previous and previous.get("track_id") != track_id else "role_bound",
+            "role_id": role_id,
+            "track_id": track_id,
+            "previous_track_id": None if previous is None else previous.get("track_id"),
+            "object_ref": object_ref,
+            "scene_revision": int(scene_revision),
+        })
 
 
 def _preflight_task_action(args: Any, cycle_dir: str, state: dict, action: dict, step_index: int) -> dict:

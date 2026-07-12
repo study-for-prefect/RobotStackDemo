@@ -168,7 +168,9 @@ def main() -> int:
         write_json(os.path.join(args.output_dir, "stack_blocks_decision.json"), decision)
         write_json(os.path.join(args.output_dir, "initial_scene_state.json"), initial_state)
 
-        memory = update_from_detections(memory, initial_state.get("objects", []))
+        memory = update_from_detections(memory, initial_state.get("objects", []), scene_revision=runtime["scene_revision"])
+        write_json(os.path.join(args.output_dir, "track_assignment.json"), memory.get("last_track_assignment", []))
+        write_json(os.path.join(args.output_dir, "track_history.json"), memory.get("track_history", []))
         memory["task_plan"] = {
             "instruction": args.instruction,
             "base_object_id": base_id,
@@ -189,6 +191,7 @@ def main() -> int:
             if target_mem_id is not None:
                 memory = set_role(memory, target_mem_id, role="target", state="free")
 
+        write_json(os.path.join(args.output_dir, "role_binding_history.json"), memory.get("role_binding_history", []))
         save_memory(memory, args.memory_json)
 
         held_templates = {object_id: copy.deepcopy(object_by_id(initial_state, object_id)) for object_id in order}
@@ -221,7 +224,7 @@ def main() -> int:
                 if observed is not None:
                     current_state = observed
                     advance_scene_revision(runtime, current_state)
-                    memory = update_from_detections(memory, current_state.get("objects", []))
+                    memory = update_from_detections(memory, current_state.get("objects", []), scene_revision=runtime["scene_revision"])
                     save_memory(memory, args.memory_json)
 
             runtime["current_stage"] = "detect_target_and_freeze_place"
@@ -282,7 +285,7 @@ def main() -> int:
                     )
                     if recheck_state is not None:
                         current_state = recheck_state
-                        memory = update_from_detections(memory, current_state.get("objects", []))
+                        memory = update_from_detections(memory, current_state.get("objects", []), scene_revision=runtime["scene_revision"])
                         save_memory(memory, args.memory_json)
                         held_object = copy.deepcopy(reacquire_target(current_state, selected_pick_template))
                         pre_pick_excluded_ids, pre_pick_excluded_xy = target_exclusion_for_pre_pick(held_object)
@@ -599,6 +602,7 @@ def main() -> int:
                     target_id=memory["structure"].get("current_top"),
                     result="executed" if args.execute else "dry_run",
                 )
+                write_json(os.path.join(args.output_dir, "role_binding_history.json"), memory.get("role_binding_history", []))
                 placed_template = expected_placed_template(held_object, place_step)
                 placed_center = placed_template.get("geometry_center_m")
                 if isinstance(placed_center, list) and len(placed_center) >= 3:
@@ -630,7 +634,7 @@ def main() -> int:
                 held_state = simulate_held_state(current_state, held_object.get("id"))
                 current_state = simulate_placed_state(held_state, held_object, place_step)
                 write_json(os.path.join(cycle_dir, "after_place_scene_state.json"), current_state)
-                memory = update_from_detections(memory, current_state.get("objects", []))
+                memory = update_from_detections(memory, current_state.get("objects", []), scene_revision=runtime["scene_revision"])
                 _, protected_locked_stack = estimate_current_stack(
                     current_state,
                     base_object,
@@ -655,7 +659,7 @@ def main() -> int:
         )
         if observed is not None:
             current_state = observed
-            memory = update_from_detections(memory, current_state.get("objects", []))
+            memory = update_from_detections(memory, current_state.get("objects", []), scene_revision=runtime["scene_revision"])
             save_memory(memory, args.memory_json)
         final_base_object, final_stack_state = estimate_current_stack(
             current_state,

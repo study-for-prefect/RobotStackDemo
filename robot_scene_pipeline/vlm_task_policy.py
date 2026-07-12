@@ -18,7 +18,9 @@ TASK_TYPES = {"build_house", "organize_blocks"}
 def compact_task_object(obj: Dict[str, Any]) -> Dict[str, Any]:
     """Return stable scene facts; detection ids remain explicitly temporary."""
     return {
-        "object_id": obj.get("id"),
+        "object_ref": obj.get("object_ref"),
+        "track_id": obj.get("track_id"),
+        "detector_object_id": obj.get("id"),
         "label": obj.get("label"),
         "confidence": obj.get("confidence"),
         "geometry_center_base_m": obj.get("geometry_center_m") or obj.get("center_3d_base_m"),
@@ -100,6 +102,7 @@ def build_grounded_task_plan_input(
 def build_task_action_input(
     state: dict, task_contract: dict, grounded_plan: dict, goal_progress: dict,
     scene_revision: int, failure_history: Optional[List[dict]] = None,
+    replanning_context: Optional[dict] = None,
 ) -> dict:
     """Build VLM input for exactly one current-scene task action."""
     return {
@@ -107,6 +110,7 @@ def build_task_action_input(
         "minimal_overlay": state.get("annotated_image"), "scene_revision": int(scene_revision),
         "task_contract": task_contract, "grounded_task_plan": grounded_plan,
         "current_goal_progress": goal_progress, "failure_history": list(failure_history or []),
+        "replanning_context": replanning_context or {},
         "workspace_bounds": state.get("table_bounds") or state.get("workspace_bounds"),
         "build_house_definition": HOUSE_DEFINITION_PROMPT,
         "objects": [compact_task_object(obj) for obj in _scene_objects(state)],
@@ -133,7 +137,17 @@ def call_vlm_task_policy(args: Any, policy_input: dict, policy_kind: str) -> dic
             json={
                 "model": getattr(args, "model", "qwen2.5vl:7b-q4_K_M"),
                 "messages": [system_message, message], "stream": False, "format": response_schema,
-                "options": {"temperature": 0.0, "num_predict": min(1536, int(getattr(args, "num_predict", 1536)))},
+                "options": {
+                    "temperature": (
+                        0.0 if policy_kind != "task_action" or int((policy_input.get("replanning_context") or {}).get("attempt", 1)) <= 1
+                        else float(getattr(args, "replanning_temperature", 0.15))
+                    ),
+                    "top_p": (
+                        float(getattr(args, "replanning_top_p", 0.85))
+                        if policy_kind == "task_action" else 0.85
+                    ),
+                    "num_predict": min(1536, int(getattr(args, "num_predict", 1536))),
+                },
             },
             timeout=float(getattr(args, "timeout", 600)),
         )
@@ -160,11 +174,11 @@ def _task_prompt(policy_input: dict, policy_kind: str) -> str:
         )
     else:
         instruction = (
-            "基于固定任务合同和当前未满足谓词输出一个动作。所有可执行动作必须且只能用 selected_object_id，禁止输出 object_id。"
+            "基于固定任务合同和当前未满足谓词输出一个动作。所有可执行动作必须使用 selected_object_ref 或 selected_track_id，禁止裸整数 object_id/selected_object_id。"
             "房子 pick_place 给 role_id；整理 pick_place 给 group_id 和 target_region_id；并给 scene_revision、准确 grounding 和目标位姿。"
             "需要改变 roof/triangle 正反面时选择 pick_reorient_place；仅 yaw 不能代替翻面，具体轴角由代码计算。"
-            "nudge/pick_away 也使用 selected_object_id 和完整物理参数。"
-            "只能选择当前检测 id；不要自动宣称任务完成。"
+            "nudge/pick_away 也使用统一引用和完整物理参数。禁止输出 replanning_context 中的失败指纹，不能只修改 reason、confidence 或小数尾数。"
+            "nudge 只能用于桌面平面清障，不能形成 on_top_of；堆叠必须 pick_place。只能选择当前可见引用；不要自动宣称任务完成。"
         )
     return "你是 UR5 桌面积木任务语义规划器。\n{}\n\n{}\n只输出符合 output_schema 的 JSON。\n输入：\n{}".format(
         HOUSE_DEFINITION_PROMPT, instruction, json.dumps(text, ensure_ascii=False, indent=2),

@@ -175,8 +175,13 @@ Code validates VLM intent before any motion:
 - `nudge` contact side must oppose its base-link unit XY direction, distance
   must be `0.01..0.05 m`, and gripper yaw must be supplied by the VLM;
 - `nudge` end and swept path must avoid protected structure;
-- the GF225 precheck uses yaw-oriented OBBs anchored asymmetrically from TCP
-  toward `tool0`; tool/table/protected-structure contact is a hard rejection;
+- the GF225 precheck uses yaw-oriented segmented OBBs: 25 mm tip below 25 mm,
+  62 mm upper fingers from 25–70 mm, and 112 mm body from 70–150 mm; these
+  installed heights are calibration defaults and must be measured on hardware;
+- open-gripper grasp checks use two solid fingers and a non-solid 49 mm gap;
+- table/support/protected contact is strict; small loose-object contact may pass
+  only within intrusion, displacement, object-count, workspace, topple, and
+  withdrawal limits, and always requires reobservation;
 - pushed-object contact with an ordinary movable object is recorded as a
   recoverable contact and does not by itself reject the proposal;
 - `pick_away` must have a VLM-proposed `safe_place_center_base_m` that avoids
@@ -187,11 +192,17 @@ Code validates VLM intent before any motion:
 
 Invalid JSON, unknown ids, unsafe intent, tool collision, or MoveIt failure is
 returned to the VLM as structured JSON. The VLM must change at least one
-action field. Approximate repeats in the same `scene_revision` are rejected as
-`duplicate_failed_proposal`; after successful execution a fresh RGB-D
-observation increments the revision and replanning continues. Exhausting the
-configured attempts stops fail-safe.
-The workflow does not fall back to geometry scores or generated candidates.
+action field. Actions are normalized to track-based `ActionFingerprint` values
+before geometry: direction, distance (5 mm), and yaw (5 degrees) are bucketed,
+while prose and confidence are ignored. Failed fingerprints are hard-blacklisted.
+Replanning escalates from changing the physical action, to forbidding twice-failed
+action types, to requiring a new strategy. Safe-stop requires multiple unique
+failed fingerprints and strategies; otherwise the control result is `reobserve`.
+A fresh RGB-D observation increments the revision, invalidates old frame-local
+references, and rebinds stable tracks one-to-one.
+The workflow never invents geometry candidates. If the VLM supplied optional
+`alternative_actions`, anti-loop fallback may select the highest-confidence
+untried candidate that still passes reference and basic semantic checks.
 Initial stack output is not repaired or overridden by a color-rule parser.
 
 ## Logs
@@ -215,6 +226,12 @@ cycle_*/vlm_action_decision_validated.json
 cycle_*/vlm_action_safety_report.json
 cycle_*/vlm_action_attempt_XX_{input,output,validation}.json
 cycle_*/autonomous_action_history.json
+cycle_*/action_fingerprint.json
+cycle_*/failure_ledger.json
+cycle_*/replanning_context.json
+cycle_*/track_assignment.json
+cycle_*/gripper_collision_profile.json
+cycle_*/controlled_contact_evaluation.json
 cycle_*/selected_action.json
 cycle_*/clearance_verification.json
 cycle_*/clearance_step_XX_result.json

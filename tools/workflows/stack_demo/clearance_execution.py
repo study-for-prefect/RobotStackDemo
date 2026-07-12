@@ -83,6 +83,7 @@ def preflight_nudge_action(
     args: Any, cycle_dir: str, current_state: dict, selected_action: dict, step_index: int,
 ) -> dict:
     push_execution_plan = _build_nudge_execution_plan(args, current_state, selected_action)
+    push_execution_plan["workspace_bounds"] = current_state.get("table_bounds") or current_state.get("workspace_bounds")
     plan_path = os.path.join(
         cycle_dir,
         "clearance_step_{:02d}_action_{}_push_plan.json".format(
@@ -102,10 +103,23 @@ def preflight_nudge_action(
         fingertip_thickness_m=float(getattr(args, "push_tool_fingertip_thickness_m", 0.01)),
         safety_margin_m=float(getattr(args, "push_tool_safety_margin_m", 0.005)),
         tcp_offset_tool_m=getattr(args, "tcp_offset_tool", [0.0, 0.0, 0.0]),
+        push_profile=[
+            {"name": "tip", "z_from_tip_min_m": 0.0, "z_from_tip_max_m": float(getattr(args, "gripper_tip_height_m", 0.025)), "width_m": float(getattr(args, "gripper_closed_tip_width_m", 0.025))},
+            {"name": "upper_fingers", "z_from_tip_min_m": float(getattr(args, "gripper_tip_height_m", 0.025)), "z_from_tip_max_m": float(getattr(args, "gripper_upper_height_m", 0.070)), "width_m": float(getattr(args, "gripper_closed_upper_width_m", 0.062))},
+            {"name": "gripper_body", "z_from_tip_min_m": float(getattr(args, "gripper_upper_height_m", 0.070)), "z_from_tip_max_m": float(getattr(args, "gripper_body_height_m", 0.150)), "width_m": float(getattr(args, "grasp_gripper_outer_width_m", 0.112))},
+        ],
+        controlled_contact={
+            "enabled": bool(getattr(args, "controlled_contact_enabled", True)),
+            "max_side_intrusion_m": float(getattr(args, "controlled_contact_max_intrusion_m", 0.005)),
+            "max_expected_passive_displacement_m": float(getattr(args, "controlled_contact_max_displacement_m", 0.015)),
+            "max_contacted_objects": int(getattr(args, "controlled_contact_max_objects", 2)),
+        },
     )
     output = dict(selected_action)
     output["push_execution_plan_path"] = plan_path
     output["tool_swept_volume_report"] = tool_report
+    write_json(os.path.join(cycle_dir, "gripper_collision_profile.json"), tool_report.get("gripper_collision_profile", []))
+    write_json(os.path.join(cycle_dir, "controlled_contact_evaluation.json"), {"status": tool_report.get("contact_status"), "contacts": tool_report.get("controlled_contacts", []), "requires_reobservation": tool_report.get("requires_reobservation", False)})
     if not tool_report.get("feasible"):
         output["moveit_feasible"] = False
         output["executable_safe"] = False

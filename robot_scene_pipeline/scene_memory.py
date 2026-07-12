@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from .object_tracking import update_scene_tracks
 
 
 Memory = Dict[str, Any]
@@ -26,6 +27,9 @@ def default_memory(task: str = "build_blocks") -> Memory:
             "top_z": None,
         },
         "action_history": [],
+        "tracks": {},
+        "track_history": [],
+        "role_binding_history": [],
     }
 
 
@@ -121,11 +125,14 @@ def _find_match(
     label: str,
     center: List[float],
     max_dist_m: float = 0.05,
+    excluded_ids: Optional[Set[str]] = None,
 ) -> Optional[str]:
     best_id = None
     best_dist = float("inf")
 
     for obj_id, obj in memory["objects"].items():
+        if str(obj_id) in (excluded_ids or set()):
+            continue
         if obj.get("label") != label:
             continue
 
@@ -155,6 +162,7 @@ def update_from_detections(
     memory: Memory,
     detections: List[Obj],
     match_dist_m: float = 0.05,
+    scene_revision: Optional[int] = None,
 ) -> Memory:
     """
     用当前检测结果更新场景记忆。
@@ -168,10 +176,13 @@ def update_from_detections(
 
     memory["step_index"] = int(memory.get("step_index", 0)) + 1
     step_index = memory["step_index"]
+    memory, assignments = update_scene_tracks(memory, detections, scene_revision or step_index)
+    memory["last_track_assignment"] = assignments
 
     for obj in memory["objects"].values():
         obj["visible"] = False
 
+    matched_memory_ids: Set[str] = set()
     for det in detections:
         label = _get_label(det)
         center = _get_center_base(det)
@@ -180,7 +191,7 @@ def update_from_detections(
         if label is None or center is None:
             continue
 
-        obj_id = _find_match(memory, label, center, max_dist_m=match_dist_m)
+        obj_id = _find_match(memory, label, center, max_dist_m=match_dist_m, excluded_ids=matched_memory_ids)
 
         if obj_id is None:
             obj_id = _make_object_id(label, memory["objects"])
@@ -192,6 +203,7 @@ def update_from_detections(
             }
 
         mem_obj = memory["objects"][obj_id]
+        matched_memory_ids.add(str(obj_id))
 
         role = mem_obj.get("role", "unknown")
         state = mem_obj.get("state", "free")
@@ -212,6 +224,9 @@ def update_from_detections(
             "graspable": graspable,
             "pushable": pushable,
             "last_seen_step": step_index,
+            "track_id": det.get("track_id"),
+            "object_ref": det.get("object_ref"),
+            "tracking_ambiguous": det.get("tracking_ambiguous", False),
         })
 
     for obj in memory["objects"].values():
@@ -228,6 +243,7 @@ def update_from_scoped_detections(
     scoped_object_ids: Optional[Iterable[str]] = None,
     critical_object_ids: Optional[Iterable[str]] = None,
     observation_scope: str = "post_action",
+    scene_revision: Optional[int] = None,
 ) -> Memory:
     """
     Update memory from a scoped observation after pick / push / place.
@@ -240,9 +256,17 @@ def update_from_scoped_detections(
 
     memory["step_index"] = int(memory.get("step_index", 0)) + 1
     step_index = memory["step_index"]
+    memory, assignments = update_scene_tracks(
+        memory,
+        detections,
+        scene_revision or step_index,
+        mark_unseen_invisible=False,
+    )
+    memory["last_track_assignment"] = assignments
     scoped_ids: Set[str] = {str(value) for value in scoped_object_ids or []}
     critical_ids: Set[str] = {str(value) for value in critical_object_ids or []}
     seen_ids: Set[str] = set()
+    matched_memory_ids: Set[str] = set()
 
     for obj_id in scoped_ids:
         obj = memory.get("objects", {}).get(obj_id)
@@ -259,7 +283,10 @@ def update_from_scoped_detections(
         if label is None or center is None:
             continue
 
-        obj_id = _find_match(memory, label, center, max_dist_m=match_dist_m)
+        obj_id = _find_match(
+            memory, label, center, max_dist_m=match_dist_m,
+            excluded_ids=matched_memory_ids,
+        )
 
         if obj_id is None:
             obj_id = _make_object_id(label, memory["objects"])
@@ -271,6 +298,7 @@ def update_from_scoped_detections(
             }
 
         mem_obj = memory["objects"][obj_id]
+        matched_memory_ids.add(str(obj_id))
         role = mem_obj.get("role", "unknown")
         state = mem_obj.get("state", "free")
         yaw = _get_yaw(det)
@@ -290,6 +318,9 @@ def update_from_scoped_detections(
             "last_seen_step": step_index,
             "observation_confidence": 1.0,
             "last_observation_scope": observation_scope,
+            "track_id": det.get("track_id"),
+            "object_ref": det.get("object_ref"),
+            "tracking_ambiguous": det.get("tracking_ambiguous", False),
         })
         mem_obj.pop("missing_observation_scope", None)
         seen_ids.add(str(obj_id))
@@ -327,6 +358,9 @@ def set_role(
     if state is not None:
         obj["state"] = state
 
+    _sync_track_role(memory, obj)
+    _record_role_binding(memory, obj, role)
+
     if role in ["base", "structure"] or obj.get("state") in ["placed", "locked"]:
         obj["graspable"] = False
         obj["pushable"] = False
@@ -339,6 +373,7 @@ def lock_object(memory: Memory, obj_id: str) -> Memory:
     obj["state"] = "locked"
     obj["graspable"] = False
     obj["pushable"] = False
+    _sync_track_role(memory, obj)
     return memory
 
 
@@ -349,6 +384,8 @@ def set_base(memory: Memory, obj_id: str) -> Memory:
     obj["state"] = "locked"
     obj["graspable"] = False
     obj["pushable"] = False
+    _sync_track_role(memory, obj)
+    _record_role_binding(memory, obj, "base")
 
     memory["structure"]["base"] = obj_id
     memory["structure"]["current_top"] = obj_id
@@ -373,6 +410,8 @@ def mark_placed(
     obj["state"] = "placed"
     obj["graspable"] = False
     obj["pushable"] = False
+    _sync_track_role(memory, obj)
+    _record_role_binding(memory, obj, "structure")
 
     if obj_id not in memory["structure"]["placed_order"]:
         memory["structure"]["placed_order"].append(obj_id)
@@ -390,6 +429,29 @@ def mark_placed(
     })
 
     return memory
+
+
+def _record_role_binding(memory: Memory, obj: Obj, role: str) -> None:
+    track_id = obj.get("track_id")
+    if not track_id:
+        return
+    history = memory.setdefault("role_binding_history", [])
+    previous = next((item for item in reversed(history) if item.get("role") == role), None)
+    event = "role_rebound" if previous and previous.get("track_id") != track_id else "role_bound"
+    history.append({
+        "event": event,
+        "role": role,
+        "track_id": track_id,
+        "object_ref": obj.get("object_ref"),
+        "step_index": int(memory.get("step_index", 0)),
+    })
+
+
+def _sync_track_role(memory: Memory, obj: Obj) -> None:
+    track = memory.get("tracks", {}).get(str(obj.get("track_id")))
+    if track is not None:
+        track["role"] = obj.get("role")
+        track["state"] = obj.get("state")
 
 
 def mark_pushed(
