@@ -9,12 +9,10 @@ from robot_scene_pipeline.task_semantic_validation import (
     validate_grounded_task_plan,
     validate_task_contract,
 )
+from tests.house_task_fixtures import HOUSE_CONFIG, house_contract, house_plan, house_state
 
 
-CONFIG = {
-    "organize_defaults": {"grouping_key": "color", "layout_type": "rows", "include_scope": "all_detected_blocks", "allow_stacking": False, "minimum_spacing_m": 0.015, "alignment_tolerance_m": 0.012},
-    "house_semantics": {"vertical_contact_tolerance_m": 0.006, "minimum_support_overlap_ratio": 0.20, "minimum_support_separation_m": 0.025},
-}
+CONFIG = HOUSE_CONFIG
 
 
 class TaskSemanticTests(unittest.TestCase):
@@ -25,15 +23,15 @@ class TaskSemanticTests(unittest.TestCase):
         with self.assertRaises(TaskSemanticValidationError):
             validate_task_contract(contract, CONFIG)
 
-    def test_valid_house_plan_with_two_supports_and_roof_passes(self):
+    def test_valid_six_role_house_plan_passes(self):
         validated = validate_grounded_task_plan(_house_plan(), _house_contract(), _house_state(), 4, CONFIG)
 
         self.assertEqual(validated["scene_revision"], 4)
-        self.assertEqual(len(validated["role_assignments"]), 3)
+        self.assertEqual(len(validated["role_assignments"]), 6)
         self.assertTrue(all(item["assignment_status"] == "temporary" for item in validated["role_assignments"]))
 
     def test_duplicate_support_object_is_rejected(self):
-        plan = _house_plan(); plan["role_assignments"][1]["selected_object_id"] = 1; plan["role_assignments"][1]["object_id"] = 1
+        plan = _house_plan(); plan["role_assignments"][1]["selected_object_id"] = 1
         plan["role_assignments"][1]["observed_label"] = "square red"; plan["role_assignments"][1]["geometry_center_base_m"] = [0.30, 0.0, 0.02]
 
         with self.assertRaises(TaskSemanticValidationError) as raised:
@@ -47,31 +45,37 @@ class TaskSemanticTests(unittest.TestCase):
             validate_task_contract(contract, CONFIG)
         self.assertIn("missing_required_role", {item["type"] for item in raised.exception.feedback["errors"]})
 
-        contract = _house_contract(); contract["goal_spec"]["required_relations"].append({"type": "supports", "subject_role": "roof", "object_role": "left_support"})
+        contract = _house_contract(); contract["goal_spec"]["required_relations"].append({"type": "supports", "subject_role": "triangle_top", "object_role": "roof"})
         with self.assertRaises(TaskSemanticValidationError) as raised:
             validate_grounded_task_plan(_house_plan(), contract, _house_state(), 4, CONFIG)
         self.assertIn("support_relation_cycle", {item["type"] for item in raised.exception.feedback["errors"]})
 
-    def test_roof_step_must_depend_on_both_support_steps(self):
-        plan = _house_plan(); plan["assembly_steps"][2]["prerequisites"] = ["left"]
+    def test_roof_step_must_depend_on_both_upper_support_steps(self):
+        plan = _house_plan(); plan["assembly_steps"][4]["prerequisites"] = ["step_03_left_upper"]
         with self.assertRaises(TaskSemanticValidationError) as raised:
             validate_grounded_task_plan(plan, _house_contract(), _house_state(), 4, CONFIG)
-        self.assertIn("roof_step_missing_support_prerequisites", {item["type"] for item in raised.exception.feedback["errors"]})
+        self.assertIn("invalid_fixed_assembly_step", {item["type"] for item in raised.exception.feedback["errors"]})
 
     def test_roof_without_two_support_contacts_is_not_complete(self):
-        state = _house_state(); state["objects"][2]["geometry_center_m"] = [0.30, 0.0, 0.07]
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
+        from robot_scene_pipeline.orientation_fusion import fuse_house_orientation_observations
+        state = _house_state(); state["objects"][4]["geometry_center_m"] = [0.30, 0.0, 0.09]
+        plan = fuse_house_orientation_observations(_house_plan(), state, CONFIG)
+        progress = evaluate_task_goal_progress(state, _house_contract(), plan, CONFIG)
 
         self.assertFalse(progress["task_complete"])
-        self.assertIn("right_support.supports.roof", progress["unsatisfied_predicates"])
+        self.assertIn("right_support_upper.supports.roof", progress["unsatisfied_predicates"])
 
     def test_house_id_change_and_large_motion_keep_satisfied_role_geometry(self):
         state = _house_state()
         for index, obj in enumerate(state["objects"]): obj["id"] = index + 20
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
+        from robot_scene_pipeline.orientation_fusion import fuse_house_orientation_observations
+        plan = _house_plan()
+        for index, binding in enumerate(plan["role_assignments"]): binding["selected_object_id"] = index + 20
+        for index, observation in enumerate(plan["orientation_observations"]): observation["selected_object_id"] = index + 24
+        progress = evaluate_task_goal_progress(state, _house_contract(), fuse_house_orientation_observations(plan, state, CONFIG), CONFIG)
 
         self.assertTrue(progress["task_complete"])
-        self.assertEqual(progress["role_observations"]["roof"]["observed_object_id"], 22)
+        self.assertEqual(progress["role_observations"]["roof"]["observed_object_id"], 24)
 
     def test_missing_temporary_binding_returns_reselection_feedback(self):
         feedback = temporary_binding_feedback(_house_contract()["goal_spec"]["roles"][0], 1, _house_state(), 5)
@@ -114,7 +118,7 @@ class TaskSemanticTests(unittest.TestCase):
 
     def test_stale_pick_place_action_is_rejected_for_replanning(self):
         plan = validate_grounded_task_plan(_house_plan(), _house_contract(), _house_state(), 4, CONFIG)
-        proposal = {"action_type": "pick_place", "role_id": "left_support", "selected_object_id": 1, "object_label": "square red", "object_center_base_m": [0.30, 0.0, 0.02], "scene_revision": 3, "target_pose_base": {"position_m": [0.30, 0.0, 0.02], "yaw_rad": 0.0}}
+        proposal = {"action_type": "pick_place", "role_id": "left_support_lower", "selected_object_id": 1, "object_label": "square red", "object_center_base_m": [0.30, 0.0, 0.02], "scene_revision": 3, "target_pose_base": {"position_m": [0.30, 0.0, 0.02], "yaw_rad": 0.0}}
         selected, report = validate_task_action(proposal, _house_state(), _house_contract(), plan, {})
 
         self.assertIsNone(selected)
@@ -122,7 +126,7 @@ class TaskSemanticTests(unittest.TestCase):
 
     def test_current_pick_place_preserves_vlm_selected_object_and_pose(self):
         plan = validate_grounded_task_plan(_house_plan(), _house_contract(), _house_state(), 4, CONFIG)
-        proposal = {"action_type": "pick_place", "role_id": "left_support", "selected_object_id": 1, "object_label": "square red", "object_center_base_m": [0.30, 0.0, 0.02], "scene_revision": 4, "target_pose_base": {"position_m": [0.28, -0.08, 0.02], "yaw_rad": 0.0}, "expected_goal_predicates": ["left_support.on_table"]}
+        proposal = {"action_type": "pick_place", "role_id": "left_support_lower", "selected_object_id": 1, "object_label": "square red", "object_center_base_m": [0.30, 0.0, 0.02], "scene_revision": 4, "target_pose_base": {"position_m": [0.28, -0.08, 0.02], "yaw_rad": 0.0}, "expected_goal_predicates": ["left_support_lower.on_table"]}
         selected, report = validate_task_action(proposal, _house_state(), _house_contract(), plan, {})
 
         self.assertTrue(report["accepted"])
@@ -132,17 +136,15 @@ class TaskSemanticTests(unittest.TestCase):
 
 
 def _house_contract():
-    return {"schema_version": "task_contract_v1", "task_type": "build_house", "reason": "two supports and a roof", "confidence": 0.9, "goal_spec": {"roles": [{"role_id": "left_support", "requirements": {"category": "square_block"}, "replaceable": True}, {"role_id": "right_support", "requirements": {"category": "square_block"}, "replaceable": True}, {"role_id": "roof", "requirements": {"category": "rectangle_block"}, "replaceable": True}], "required_relations": [{"type": "on_table", "subject_role": "left_support"}, {"type": "on_table", "subject_role": "right_support"}, {"type": "left_of", "subject_role": "left_support", "object_role": "right_support"}, {"type": "supports", "subject_role": "left_support", "object_role": "roof"}, {"type": "supports", "subject_role": "right_support", "object_role": "roof"}, {"type": "bridges", "subject_role": "roof", "object_roles": ["left_support", "right_support"]}]}}
+    return house_contract()
 
 
 def _house_state():
-    return {"scene_revision": 4, "table_bounds": {"xmin": 0.1, "xmax": 0.6, "ymin": -0.3, "ymax": 0.3}, "objects": [_object(1, "square red", [0.30, 0.0, 0.02]), _object(2, "square blue", [0.40, 0.0, 0.02]), _object(3, "rectangle yellow", [0.35, 0.0, 0.07], [0.14, 0.03, 0.06])]}
+    return house_state()
 
 
 def _house_plan():
-    state = _house_state(); bindings = []
-    for role, obj in zip(("left_support", "right_support", "roof"), state["objects"]): bindings.append({"role_id": role, "selected_object_id": obj["id"], "object_id": obj["id"], "observed_label": obj["label"], "geometry_center_base_m": obj["geometry_center_m"], "assignment_status": "temporary", "replaceable": True})
-    return {"schema_version": "grounded_task_plan_v1", "task_type": "build_house", "scene_revision": 4, "role_assignments": bindings, "assembly_steps": [{"step_id": "left", "role_id": "left_support", "prerequisites": []}, {"step_id": "right", "role_id": "right_support", "prerequisites": []}, {"step_id": "roof", "role_id": "roof", "prerequisites": ["left", "right"]}]}
+    return house_plan()
 
 
 def _organize_contract():

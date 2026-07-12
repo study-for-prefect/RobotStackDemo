@@ -98,6 +98,11 @@ def orientation_for_step(step, args, current_quaternion_xyzw):
         return normalize_quaternion_xyzw(current_quaternion_xyzw), None, "current"
     if args.orientation_mode == "fixed":
         return normalize_quaternion_xyzw(args.quat_xyzw), None, "fixed"
+    if args.orientation_mode == "step-quaternion":
+        orientation = step.get("target_orientation_xyzw")
+        if not isinstance(orientation, (list, tuple)) or len(orientation) != 4:
+            raise RuntimeError("Step {} has no target_orientation_xyzw.".format(step.get("step")))
+        return normalize_quaternion_xyzw(orientation), None, "step_quaternion"
     return object_yaw_orientation(step, args, current_quaternion_xyzw)
 
 

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .geometry_relations import get_center, get_size
 from .llm_stack_blocks import object_label_contains
+from .reorientation_planner import plan_reorientation, quaternion_multiply
 from .task_geometry import (
     footprint_area,
     footprint_boundary_distance,
@@ -19,6 +20,7 @@ from .task_geometry import (
 )
 from .task_goal_evaluator import evaluate_layout
 from .task_semantic_validation import object_matches_role
+from .task_schemas import TASK_ACTION_SCHEMA, validate_against_schema
 
 
 def validate_task_action(
@@ -34,7 +36,7 @@ def validate_task_action(
     action_type = str(proposal.get("action_type") or "").lower()
     if action_type in {"reobserve", "stop"}:
         return None, _report("task_action_validation", proposal, "policy_requested_{}".format(action_type))
-    if action_type != "pick_place":
+    if action_type not in {"pick_place", "pick_reorient_place"}:
         return None, _report("task_action_validation", proposal, "unsupported_task_action_type", ["action_type"])
     common_failure = _validate_common(proposal, state)
     if common_failure is not None:
@@ -70,52 +72,78 @@ def validate_house_pick_place(
         return None, _fail(report, "selected_object_no_longer_exists", "selected_object_id")
     if not object_matches_role(obj, role):
         return None, _fail(report, "selected_object_no_longer_matches_role", "role_match")
+    binding = next((item for item in grounded_plan.get("role_assignments", []) if item.get("role_id") == role_id), None)
+    if binding is None or str(binding.get("selected_object_id")) != str(obj.get("id")):
+        return None, _fail(report, "selected_object_does_not_match_current_role_binding", "selected_object_id")
     grounding_failure = _grounding_failure(obj, proposal, report)
     if grounding_failure:
         return None, grounding_failure
-    moved = _object_at_pose(obj, proposal["target_pose_base"])
+    dependency_failure = _dependency_failure(role_id, progress)
+    if dependency_failure:
+        return None, _fail(report, dependency_failure, "role_id")
+    orientation = next(
+        (item for item in grounded_plan.get("fused_orientation_results", []) if item.get("role_id") == role_id and str(item.get("selected_object_id")) == str(obj.get("id"))),
+        None,
+    )
+    action_type = str(proposal.get("action_type"))
+    if role_id in {"roof", "triangle_top"}:
+        if orientation is None or orientation.get("reobserve_required"):
+            report["required_response"] = "reobserve"
+            return None, _fail(report, "orientation_reobserve_required", "orientation_observation")
+        threshold = float(semantics_config.get("house_semantics", {}).get("orientation_confidence_threshold", 0.75))
+        if float(orientation.get("orientation_confidence", 0.0)) < threshold:
+            return None, _fail(report, "orientation_confidence_below_threshold", "orientation_confidence")
+        if orientation.get("flip_required") and action_type != "pick_reorient_place":
+            return None, _fail(report, "flip_requires_pick_reorient_place", "action_type")
+        if not orientation.get("flip_required") and action_type == "pick_reorient_place":
+            return None, _fail(report, "unnecessary_three_dimensional_reorientation", "action_type")
+    action = _build_code_oriented_action(proposal, obj, orientation, semantics_config)
+    if isinstance(action, dict) and action.get("validation_error"):
+        return None, _fail(report, action["validation_error"], "reorientation_plan")
+    moved = _object_at_pose(obj, action["target_pose_base"])
     workspace = state.get("table_bounds") or state.get("workspace_bounds")
     failed_predicates: List[dict] = []
     if not object_inside_workspace(moved, workspace):
         failed_predicates.append(_predicate("house.inside_workspace", "target_full_footprint_outside_workspace"))
     semantics = semantics_config.get("house_semantics") or {}
     vertical_tolerance = float(semantics.get("vertical_contact_tolerance_m", 0.006))
-    minimum_separation = float(semantics.get("minimum_support_separation_m", 0.025))
     minimum_overlap = float(semantics.get("minimum_support_overlap_ratio", 0.20))
     observations = progress.get("role_observations") or {}
     current = {name: _object_by_id(state, item.get("observed_object_id")) for name, item in observations.items()}
     current[role_id] = moved
-    if role_id in {"left_support", "right_support"}:
-        other_role = "right_support" if role_id == "left_support" else "left_support"
-        other = current.get(other_role)
+    if role_id in {"left_support_lower", "right_support_lower"}:
         if abs(_bottom_z(moved) - _table_z(state)) > vertical_tolerance:
             failed_predicates.append(_predicate("{}.on_table".format(role_id), "target_bottom_not_on_table"))
-        if other is not None:
-            distance = footprint_boundary_distance(object_footprint_polygon(moved), object_footprint_polygon(other))
-            if distance < minimum_separation:
-                failed_predicates.append(_predicate("supports.separated", "support_boundary_spacing_too_small"))
-            left = moved if role_id == "left_support" else other
-            right = other if role_id == "left_support" else moved
-            if get_center(left)[0] >= get_center(right)[0]:
-                failed_predicates.append(_predicate("left_support.left_of.right_support", "support_side_order_reversed"))
+    elif role_id in {"left_support_upper", "right_support_upper"}:
+        lower_role = role_id.replace("upper", "lower")
+        lower = current.get(lower_role)
+        if lower is None or not _supports_target(lower, moved, vertical_tolerance, minimum_overlap):
+            failed_predicates.append(_predicate("{}.supports.{}".format(lower_role, role_id), "upper_support_not_aligned_on_lower_support"))
     elif role_id == "roof":
-        left, right = current.get("left_support"), current.get("right_support")
+        left, right = current.get("left_support_upper"), current.get("right_support_upper")
         if left is None or right is None:
             failed_predicates.append(_predicate("roof.supported_by_both_supports", "current_supports_unavailable"))
         else:
-            for support, name in ((left, "left_support"), (right, "right_support")):
+            for support, name in ((left, "left_support_upper"), (right, "right_support_upper")):
                 overlap = footprint_overlap_area(object_footprint_polygon(support), object_footprint_polygon(moved))
                 ratio = overlap / max(footprint_area(object_footprint_polygon(support)), 1e-9)
                 if ratio < minimum_overlap:
                     failed_predicates.append(_predicate("roof.supported_by_both_supports", "insufficient_overlap_with_{}".format(name)))
                 if abs(_bottom_z(moved) - _top_z(support)) > vertical_tolerance:
                     failed_predicates.append(_predicate("{}.supports.roof".format(name), "roof_contact_height_mismatch"))
+    elif role_id == "triangle_top":
+        roof = current.get("roof")
+        tolerance = float(semantics.get("triangle_center_tolerance_m", 0.010))
+        if roof is None or not _supports_target(roof, moved, vertical_tolerance, minimum_overlap):
+            failed_predicates.append(_predicate("roof.supports.triangle_top", "triangle_bottom_not_supported_by_roof"))
+        elif math.hypot(get_center(roof)[0] - get_center(moved)[0], get_center(roof)[1] - get_center(moved)[1]) > tolerance:
+            failed_predicates.append(_predicate("triangle_top.centered_on_roof", "triangle_not_centered_on_roof"))
     failed_predicates.extend(_protected_pose_failures(moved, obj, dynamic_protection, state, role_id))
     if failed_predicates:
         report["failed_predicates"] = failed_predicates
         report["reason"] = failed_predicates[0]["reason"]
         return None, report
-    return _accepted_action(proposal, obj, report)
+    return _accepted_action(action, obj, report)
 
 
 def validate_organize_pick_place(
@@ -181,6 +209,10 @@ def validate_organize_pick_place(
 
 def _validate_common(proposal: dict, state: dict) -> Optional[dict]:
     report = _report("action_schema_validation", proposal, "action_schema_invalid")
+    schema_errors = validate_against_schema(proposal, TASK_ACTION_SCHEMA)
+    if schema_errors:
+        report["schema_errors"] = schema_errors
+        return _fail(report, "task_action_json_schema_invalid", "action_schema")
     if "object_id" in proposal:
         if str(proposal.get("object_id")) != str(proposal.get("selected_object_id")):
             return _fail(report, "conflicting_object_id_fields", "selected_object_id")
@@ -193,10 +225,13 @@ def _validate_common(proposal: dict, state: dict) -> Optional[dict]:
     except (TypeError, ValueError):
         return _fail(report, "stale_scene_revision", "scene_revision")
     pose = proposal.get("target_pose_base") or {}
-    position = pose.get("position_m")
+    position = pose.get("position_m", pose.get("position"))
     try:
         valid = isinstance(position, list) and len(position) == 3 and all(math.isfinite(float(v)) for v in position)
-        valid = valid and math.isfinite(float(pose.get("yaw_rad")))
+        orientation = pose.get("orientation_xyzw")
+        yaw_valid = pose.get("yaw_rad") is not None and math.isfinite(float(pose.get("yaw_rad")))
+        quaternion_valid = isinstance(orientation, list) and len(orientation) == 4 and all(math.isfinite(float(v)) for v in orientation)
+        valid = valid and (yaw_valid or quaternion_valid or proposal.get("role_id") in {"roof", "triangle_top"})
     except (TypeError, ValueError):
         valid = False
     return None if valid else _fail(report, "invalid_target_pose_base", "target_pose_base")
@@ -204,7 +239,6 @@ def _validate_common(proposal: dict, state: dict) -> Optional[dict]:
 
 def _accepted_action(proposal: dict, obj: dict, report: dict) -> Tuple[dict, dict]:
     action = copy.deepcopy(proposal)
-    action["action_type"] = "pick_place"
     action["selected_object_id"] = obj.get("id")
     action["selection_source"] = "vlm_task_action_policy"
     action.pop("object_id", None)
@@ -225,9 +259,13 @@ def _grounding_failure(obj: dict, proposal: dict, report: dict) -> Optional[dict
 
 
 def _protected_pose_failures(moved: dict, source: dict, protection: dict, state: dict, role_id: str) -> List[dict]:
-    allowed = set()
-    if role_id == "roof":
-        allowed = {item.get("current_object_id") for item in protection.get("protected_roles", []) if item.get("role_id") in {"left_support", "right_support"}}
+    allowed_roles = {
+        "left_support_upper": {"left_support_lower"},
+        "right_support_upper": {"right_support_lower"},
+        "roof": {"left_support_upper", "right_support_upper"},
+        "triangle_top": {"roof"},
+    }.get(role_id, set())
+    allowed = {item.get("current_object_id") for item in protection.get("protected_roles", []) if item.get("role_id") in allowed_roles}
     protected = {str(value) for value in protection.get("protected_object_ids", []) if value not in allowed}
     for other in state.get("objects", []):
         if str(other.get("id")) == str(source.get("id")) or str(other.get("id")) not in protected:
@@ -239,9 +277,112 @@ def _protected_pose_failures(moved: dict, source: dict, protection: dict, state:
 
 def _object_at_pose(obj: dict, pose: dict) -> dict:
     moved = copy.deepcopy(obj)
-    moved["geometry_center_m"] = [float(value) for value in pose["position_m"]]
-    moved["yaw_rad"] = float(pose["yaw_rad"])
+    moved["geometry_center_m"] = [float(value) for value in pose.get("position_m", pose.get("position"))]
+    if pose.get("yaw_rad") is not None:
+        moved["yaw_rad"] = float(pose["yaw_rad"])
+    if pose.get("orientation_xyzw") is not None:
+        moved["orientation_xyzw"] = list(pose["orientation_xyzw"])
     return moved
+
+
+def _dependency_failure(role_id: str, progress: dict) -> Optional[str]:
+    satisfied = set(progress.get("satisfied_predicates") or [])
+    required = {
+        "left_support_upper": {"left_support_lower.on_table"},
+        "right_support_upper": {"right_support_lower.on_table"},
+        "roof": {
+            "left_support_lower.supports.left_support_upper",
+            "right_support_lower.supports.right_support_upper",
+            "left_column.vertical_aligned", "right_column.vertical_aligned", "columns.height_aligned",
+        },
+        "triangle_top": {
+            "left_support_upper.supports.roof", "right_support_upper.supports.roof",
+            "roof.bridges.upper_supports", "roof.correct_face_up", "roof.opening_down",
+            "roof.straight_edge_up", "roof.orientation_correct",
+        },
+    }.get(role_id, set())
+    if required.issubset(satisfied):
+        return None
+    return "role_prerequisites_not_satisfied"
+
+
+def _build_code_oriented_action(
+    proposal: dict, obj: dict, orientation: Optional[dict], semantics_config: dict,
+) -> dict:
+    action = copy.deepcopy(proposal)
+    pose = copy.deepcopy(action.get("target_pose_base") or {})
+    position = pose.get("position_m", pose.get("position"))
+    pose["position_m"] = [float(value) for value in position]
+    pose.pop("position", None)
+    if orientation is None:
+        action["target_pose_base"] = pose
+        return action
+    candidates = orientation.get("candidate_target_orientations") or []
+    if not candidates:
+        return {"validation_error": "code_target_orientation_unavailable"}
+    target_orientation = list(candidates[0])
+    grasp_transform = obj.get("grasp_transform_object_to_tool_xyzw", [0.0, 0.0, 0.0, 1.0])
+    pose["orientation_xyzw"] = target_orientation
+    pose["orientation_source"] = "house_frame_code_geometry"
+    action["target_pose_base"] = pose
+    action["orientation_confidence"] = orientation.get("orientation_confidence")
+    action["fused_orientation_result"] = copy.deepcopy(orientation)
+    action["target_tool_orientation_xyzw"] = quaternion_multiply(target_orientation, grasp_transform)
+    observed_orientation = _object_orientation(obj)
+    if observed_orientation is not None:
+        action["grasp_tool_orientation_xyzw"] = quaternion_multiply(observed_orientation, grasp_transform)
+    if action.get("action_type") == "pick_reorient_place":
+        current = observed_orientation
+        if current is None:
+            return {"validation_error": "current_object_orientation_unavailable_reobserve"}
+        reorientation = plan_reorientation(
+            current, target_orientation,
+            grasp_transform,
+            get_center(obj), pose["position_m"], semantics_config,
+        )
+        if not reorientation.get("roll_pitch_component"):
+            return {"validation_error": "flip_plan_must_include_roll_or_pitch"}
+        action["source_pose_base"] = {"position": list(get_center(obj)), "orientation_xyzw": current}
+        action["reorientation_plan"] = reorientation
+        action["grasp_target_center_base_m"] = _safe_reorientation_grasp_center(obj, proposal.get("role_id"))
+        action["grasp_constraints"] = (
+            ["avoid_concave_opening", "avoid_roof_support_legs", "retain_object_during_roll_pitch"]
+            if proposal.get("role_id") == "roof"
+            else ["avoid_triangle_apex", "prefer_wide_lower_region", "preserve_stable_bottom_edge"]
+        )
+    return action
+
+
+def _object_orientation(obj: dict) -> Optional[List[float]]:
+    orientation = obj.get("orientation_xyzw") or obj.get("object_orientation_xyzw")
+    if isinstance(orientation, (list, tuple)) and len(orientation) == 4:
+        return [float(value) for value in orientation]
+    if any(obj.get(key) is not None for key in ("roll_rad", "pitch_rad", "yaw_rad")):
+        roll, pitch, yaw = (float(obj.get(key, 0.0)) for key in ("roll_rad", "pitch_rad", "yaw_rad"))
+        cr, sr, cp, sp, cy, sy = math.cos(roll / 2), math.sin(roll / 2), math.cos(pitch / 2), math.sin(pitch / 2), math.cos(yaw / 2), math.sin(yaw / 2)
+        return [sr * cp * cy - cr * sp * sy, cr * sp * cy + sr * cp * sy, cr * cp * sy - sr * sp * cy, cr * cp * cy + sr * sp * sy]
+    return None
+
+
+def _supports_target(support: dict, upper: dict, tolerance: float, minimum_overlap: float) -> bool:
+    overlap = footprint_overlap_area(object_footprint_polygon(support), object_footprint_polygon(upper))
+    ratio = overlap / max(min(
+        footprint_area(object_footprint_polygon(support)),
+        footprint_area(object_footprint_polygon(upper)),
+    ), 1e-9)
+    return abs(_bottom_z(upper) - _top_z(support)) <= tolerance and ratio >= minimum_overlap
+
+
+def _safe_reorientation_grasp_center(obj: dict, role_id: str) -> List[float]:
+    explicit = obj.get("reorientation_grasp_center_base_m")
+    if isinstance(explicit, (list, tuple)) and len(explicit) == 3:
+        return [float(value) for value in explicit]
+    center, size = get_center(obj), get_size(obj)
+    if role_id == "roof":
+        yaw = float(obj.get("yaw_rad", 0.0))
+        offset = 0.25 * max(float(size[0]), float(size[1]))
+        return [center[0] + offset * math.cos(yaw), center[1] + offset * math.sin(yaw), center[2]]
+    return [center[0], center[1], center[2] - 0.15 * float(size[2])]
 
 
 def _object_belongs_to_group(obj: dict, group: dict, grouping_key: str) -> bool:

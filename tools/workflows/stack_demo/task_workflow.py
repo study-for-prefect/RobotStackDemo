@@ -10,6 +10,8 @@ from robot_scene_pipeline.task_action_adapter import TaskActionSchemaError, adap
 from robot_scene_pipeline.task_action_validation import validate_task_action
 from robot_scene_pipeline.task_dynamic_protection import derive_dynamic_protection
 from robot_scene_pipeline.task_goal_evaluator import evaluate_task_goal_progress
+from robot_scene_pipeline.orientation_fusion import fuse_house_orientation_observations
+from robot_scene_pipeline.orientation_assets import prepare_orientation_candidate_assets
 from robot_scene_pipeline.task_semantic_validation import validate_grounded_task_plan, validate_task_contract
 from robot_scene_pipeline.vlm_replanning import action_validation_feedback, advance_scene_revision
 from robot_scene_pipeline.vlm_task_policy import build_grounded_task_plan_input, build_task_action_input, build_task_contract_input, call_vlm_task_policy
@@ -46,9 +48,21 @@ def run_semantic_task_workflow(args: Any) -> int:
         save_memory(memory, args.memory_json)
         write_json(os.path.join(args.output_dir, "task_contract_validated.json"), contract)
         previous_progress = None
+        previous_plan = None
+        pending_post_place_log = None
         for step_index in range(1, max(1, int(getattr(args, "max_task_steps", 12))) + 1):
             cycle_dir = os.path.join(args.output_dir, "task_cycle_{:02d}".format(step_index)); os.makedirs(cycle_dir, exist_ok=True)
-            plan = _obtain_grounded_plan(args, state, contract, config, runtime["scene_revision"], cycle_dir)
+            state = prepare_orientation_candidate_assets(state, os.path.join(cycle_dir, "orientation_assets"))
+            plan = _obtain_grounded_plan(
+                args, state, contract, config, runtime["scene_revision"], cycle_dir,
+                previous_plan, previous_progress,
+            )
+            if pending_post_place_log:
+                prior_execution = load_json(pending_post_place_log)
+                prior_execution["post_place_orientation_result"] = plan.get("fused_orientation_results", [])
+                prior_execution["post_place_scene_revision"] = state.get("scene_revision")
+                write_json(pending_post_place_log, prior_execution)
+                pending_post_place_log = None
             progress = evaluate_task_goal_progress(state, contract, plan, config, previous_progress)
             protection = derive_dynamic_protection(
                 state, contract, progress, progress.get("selected_role_assignment"),
@@ -57,6 +71,7 @@ def run_semantic_task_workflow(args: Any) -> int:
             write_json(os.path.join(cycle_dir, "role_assignment_candidates.json"), progress.get("role_assignment_candidates", []))
             write_json(os.path.join(cycle_dir, "selected_role_assignment.json"), progress.get("selected_role_assignment"))
             write_json(os.path.join(cycle_dir, "dynamic_protection.json"), protection)
+            write_json(os.path.join(cycle_dir, "orientation_fusion.json"), plan.get("fused_orientation_results", []))
             if progress["task_complete"]:
                 write_json(os.path.join(args.output_dir, "task_demo_summary.json"), {"execution_status": "success", "task_contract": contract, "task_goal_progress": progress})
                 return 0
@@ -75,6 +90,7 @@ def run_semantic_task_workflow(args: Any) -> int:
             action_type = action_report.get("action_type")
             if action_type == "reobserve":
                 previous_progress = progress
+                previous_plan = plan
                 state = _reobserve(args, cycle_dir, runtime)
                 memory = update_from_detections(memory, state.get("objects", [])); save_memory(memory, args.memory_json)
                 continue
@@ -85,7 +101,10 @@ def run_semantic_task_workflow(args: Any) -> int:
             checked = action
             write_json(os.path.join(cycle_dir, "task_action_preflight.json"), checked)
             state, result = _execute_task_action(args, cycle_dir, runtime, memory, state, checked, step_index)
-            write_json(os.path.join(cycle_dir, "task_action_execution.json"), result)
+            execution_log_path = os.path.join(cycle_dir, "task_action_execution.json")
+            write_json(execution_log_path, result)
+            if checked.get("action_type") == "pick_reorient_place" and getattr(args, "execute", False):
+                pending_post_place_log = execution_log_path
             if not getattr(args, "execute", False):
                 write_json(os.path.join(args.output_dir, "task_demo_summary.json"), {"execution_status": "planned_only", "task_contract": contract, "task_goal_progress": progress})
                 return 0
@@ -96,6 +115,7 @@ def run_semantic_task_workflow(args: Any) -> int:
             action_history["execution_result"] = result
             write_json(os.path.join(cycle_dir, "autonomous_action_history.json"), action_history)
             previous_progress = progress
+            previous_plan = plan
         raise RuntimeError("Task did not satisfy goal before max_task_steps.")
     except Exception as exc:
         write_json(os.path.join(args.output_dir, "failure_state.json"), {**runtime, "error": str(exc)})
@@ -127,19 +147,27 @@ def _obtain_contract(args: Any, state: dict, config: dict) -> dict:
     raise RuntimeError("No valid task_contract after replanning.")
 
 
-def _obtain_grounded_plan(args: Any, state: dict, contract: dict, config: dict, revision: int, cycle_dir: str) -> dict:
+def _obtain_grounded_plan(
+    args: Any, state: dict, contract: dict, config: dict, revision: int, cycle_dir: str,
+    previous_plan: Optional[dict] = None, goal_progress: Optional[dict] = None,
+) -> dict:
     if getattr(args, "grounded_task_plan_json", ""):
         raw = load_json(args.grounded_task_plan_json)
-        return validate_grounded_task_plan(raw, contract, state, revision, config)
+        validated = validate_grounded_task_plan(raw, contract, state, revision, config)
+        return _fuse_plan_orientation(validated, state, contract, config, previous_plan)
     history: List[dict] = []
     for attempt in range(1, max(1, int(getattr(args, "max_vlm_task_plan_attempts", 5))) + 1):
-        policy_input = build_grounded_task_plan_input(state, contract, revision, config, failure_history=history)
+        policy_input = build_grounded_task_plan_input(
+            state, contract, revision, config, goal_progress=goal_progress,
+            previous_plan=previous_plan, failure_history=history,
+        )
         raw = call_vlm_task_policy(args, policy_input, "grounded_task_plan")
         prefix = "grounded_task_plan_attempt_{:02d}".format(attempt)
         write_json(os.path.join(cycle_dir, "{}_input.json".format(prefix)), policy_input)
         write_json(os.path.join(cycle_dir, "{}_raw.json".format(prefix)), raw)
         try:
             plan = validate_grounded_task_plan(raw.get("decision"), contract, state, revision, config)
+            plan = _fuse_plan_orientation(plan, state, contract, config, previous_plan)
         except Exception as exc:
             feedback = getattr(exc, "feedback", None) or {"validation_stage": "task_semantic_validation", "passed": False, "errors": [{"type": "grounded_plan_invalid", "message": str(exc)}]}
             history.append(feedback); write_json(os.path.join(cycle_dir, "{}_validation.json".format(prefix)), feedback); continue
@@ -149,6 +177,16 @@ def _obtain_grounded_plan(args: Any, state: dict, contract: dict, config: dict, 
         write_json(os.path.join(args.output_dir, "grounded_task_plan_validated.json"), plan)
         return plan
     raise RuntimeError("No valid grounded_task_plan after replanning.")
+
+
+def _fuse_plan_orientation(
+    plan: dict, state: dict, contract: dict, config: dict, previous_plan: Optional[dict],
+) -> dict:
+    if contract.get("task_type") != "build_house":
+        return plan
+    return fuse_house_orientation_observations(
+        plan, state, config, (previous_plan or {}).get("fused_orientation_results"),
+    )
 
 
 def _select_task_action(
@@ -240,7 +278,7 @@ def _load_semantics_config(args: Any) -> dict:
 
 
 def _preflight_task_action(args: Any, cycle_dir: str, state: dict, action: dict, step_index: int) -> dict:
-    if action["action_type"] == "pick_place":
+    if action["action_type"] in {"pick_place", "pick_reorient_place"}:
         return preflight_pick_place_action(args, cycle_dir, state, action, step_index)
     if action["action_type"] == "nudge":
         return preflight_nudge_action(args, cycle_dir, state, action, step_index)
@@ -248,7 +286,7 @@ def _preflight_task_action(args: Any, cycle_dir: str, state: dict, action: dict,
 
 
 def _execute_task_action(args: Any, cycle_dir: str, runtime: dict, memory: dict, state: dict, action: dict, step_index: int) -> Tuple[dict, dict]:
-    if action["action_type"] == "pick_place":
+    if action["action_type"] in {"pick_place", "pick_reorient_place"}:
         return execute_pick_place_and_reobserve(args, cycle_dir, runtime, state, action, step_index)
     target = object_by_string_id(state.get("objects", []), action.get("target_object_id"))
     if action["action_type"] == "nudge":

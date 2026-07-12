@@ -22,6 +22,7 @@ from robot_scene_pipeline.task_goal_evaluator import (
     evaluate_rows_layout,
     evaluate_task_goal_progress,
 )
+from robot_scene_pipeline.orientation_fusion import fuse_house_orientation_observations
 from robot_scene_pipeline.vlm_action_validation import validate_vlm_action_decision
 from tools.workflows.stack_demo.execution_safety import validate_execution_source
 from tools.workflows.stack_demo.task_workflow import (
@@ -29,6 +30,7 @@ from tools.workflows.stack_demo.task_workflow import (
     _state_with_dynamic_protection,
     run_semantic_task_workflow,
 )
+from tests.house_task_fixtures import HOUSE_CONFIG, house_contract, house_plan, house_state
 
 
 CONFIG = {
@@ -42,6 +44,7 @@ CONFIG = {
         "maximum_structure_tilt_deg": 10.0,
     },
 }
+CONFIG["house_semantics"] = copy.deepcopy(HOUSE_CONFIG["house_semantics"])
 
 
 class ActionSchemaTests(unittest.TestCase):
@@ -178,126 +181,31 @@ class GeometryAndCompletionTests(unittest.TestCase):
         self.assertIn("red_group.all_inside", progress["unsatisfied_predicates"])
 
 
-class HouseCombinationTests(unittest.TestCase):
-    def test_later_legal_role_combination_completes_house(self):
-        state = _house_state()
-        state["objects"].insert(0, _object(9, "square green", [0.20, 0.0, 0.02]))
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
-        self.assertTrue(progress["task_complete"])
-        self.assertGreater(len(progress["role_assignment_candidates"]), 1)
-
-    def test_same_object_cannot_fill_both_support_roles(self):
-        state = _house_state(); state["objects"] = [state["objects"][0], state["objects"][2]]
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
-        self.assertFalse(progress["task_complete"])
-        self.assertIn({"type": "insufficient_role_resources"}, progress["scene_events"])
-
-    def test_id_change_rebinds_to_current_geometry(self):
-        state = _house_state()
-        for obj in state["objects"]: obj["id"] += 20
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
-        self.assertTrue(progress["task_complete"])
-        self.assertEqual(progress["selected_role_assignment"]["roof"]["current_object_id"], 23)
-
-    def test_support_height_difference_breaks_completion(self):
-        state = _house_state(); state["objects"][1]["geometry_center_m"][2] += 0.012
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
-        self.assertIn("supports.height_aligned", progress["unsatisfied_predicates"])
-
-    def test_support_boundary_separation_too_small_breaks_completion(self):
-        state = _house_state(); state["objects"][1]["geometry_center_m"][0] = 0.34
-        state["objects"][2]["geometry_center_m"][0] = 0.32
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
-        self.assertIn("supports.separated", progress["unsatisfied_predicates"])
-
-    def test_roof_tilt_breaks_completion(self):
-        state = _house_state(); state["objects"][2]["tilt_deg"] = 15.0
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
-        self.assertIn("roof.tilt_within_limit", progress["unsatisfied_predicates"])
-
-    def test_full_house_footprint_outside_workspace_is_rejected(self):
-        state = _house_state(); state["table_bounds"]["xmax"] = 0.40
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
-        self.assertIn("house.inside_workspace", progress["unsatisfied_predicates"])
-
-    def test_broken_structure_enters_repair_and_reports_lost_predicate(self):
-        before = evaluate_task_goal_progress(_house_state(), _house_contract(), _house_plan(), CONFIG)
-        state = _house_state(); state["objects"][2]["geometry_center_m"][0] = 0.30
-        after = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG, before)
-        self.assertTrue(after["repair_required"])
-        self.assertTrue(any(event["type"] == "goal_predicate_lost" for event in after["scene_events"]))
-
-    def test_large_motion_that_preserves_geometry_is_recoverable(self):
-        before = evaluate_task_goal_progress(_house_state(), _house_contract(), _house_plan(), CONFIG)
-        state = _house_state()
-        for obj in state["objects"]: obj["geometry_center_m"][0] += 0.10
-        after = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG, before)
-        self.assertTrue(after["task_complete"])
-        self.assertTrue(any(event["type"] == "object_moved_far" for event in after["scene_events"]))
-
-    def test_current_id_change_is_reported_without_task_failure(self):
-        before = evaluate_task_goal_progress(_house_state(), _house_contract(), _house_plan(), CONFIG)
-        state = _house_state()
-        for obj in state["objects"]: obj["id"] += 10
-        after = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG, before)
-        self.assertTrue(after["task_complete"])
-        self.assertTrue(any(event["type"] == "object_id_changed" for event in after["scene_events"]))
-
-    def test_preferred_complete_combination_wins_when_multiple_are_legal(self):
-        state = _house_state()
-        state["objects"].extend([
-            _object(4, "square green", [0.30, 0.0, 0.02]),
-            _object(5, "square orange", [0.40, 0.0, 0.02]),
-        ])
-        plan = {"role_assignments": [
-            {"role_id": "left_support", "selected_object_id": 4},
-            {"role_id": "right_support", "selected_object_id": 5},
-            {"role_id": "roof", "selected_object_id": 3},
-        ]}
-        progress = evaluate_task_goal_progress(state, _house_contract(), plan, CONFIG)
-        self.assertEqual(progress["selected_role_assignment"]["left_support"]["current_object_id"], 4)
-        self.assertEqual(progress["selected_role_assignment"]["right_support"]["current_object_id"], 5)
-
-    def test_outside_objects_do_not_block_inside_same_class_replacements(self):
-        state = _house_state()
-        state["objects"][0]["geometry_center_m"][0] = 0.02
-        state["objects"][1]["geometry_center_m"][0] = 0.68
-        state["objects"].extend([
-            _object(4, "square green", [0.30, 0.0, 0.02]),
-            _object(5, "square orange", [0.40, 0.0, 0.02]),
-        ])
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
-        self.assertTrue(progress["task_complete"])
-        selected_ids = {item["current_object_id"] for item in progress["selected_role_assignment"].values()}
-        self.assertTrue({4, 5}.issubset(selected_ids))
-
-    def test_vlm_completion_claim_does_not_override_geometry(self):
-        state = _house_state(); state["objects"][2]["geometry_center_m"][0] = 0.55
-        plan = _house_plan(); plan["task_complete"] = True; plan["done"] = True
-        progress = evaluate_task_goal_progress(state, _house_contract(), plan, CONFIG)
-        self.assertFalse(progress["task_complete"])
-
-
 class DynamicProtectionAndSafetyTests(unittest.TestCase):
     def test_satisfied_current_roles_become_protected(self):
-        state = _house_state(); progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
+        state = _house_state(); progress = _house_progress(state)
         protection = derive_dynamic_protection(state, _house_contract(), progress, progress["selected_role_assignment"])
-        self.assertEqual(set(protection["protected_object_ids"]), {1, 2, 3})
-        self.assertEqual(len(protection["protected_regions"]), 3)
+        self.assertEqual(set(protection["protected_object_ids"]), {1, 2, 3, 4, 5, 6})
+        self.assertEqual(len(protection["protected_regions"]), 6)
 
     def test_protection_tracks_changed_detection_ids(self):
         state = _house_state()
         for obj in state["objects"]: obj["id"] += 10
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
+        plan = _house_plan()
+        for index, binding in enumerate(plan["role_assignments"]): binding["selected_object_id"] = index + 11
+        plan["orientation_observations"][0]["selected_object_id"] = 15
+        plan["orientation_observations"][1]["selected_object_id"] = 16
+        progress = evaluate_task_goal_progress(state, _house_contract(), fuse_house_orientation_observations(plan, state, CONFIG), CONFIG)
         protection = derive_dynamic_protection(state, _house_contract(), progress, progress["selected_role_assignment"])
-        self.assertEqual(set(protection["protected_object_ids"]), {11, 12, 13})
+        self.assertEqual(set(protection["protected_object_ids"]), {11, 12, 13, 14, 15, 16})
 
     def test_failed_role_predicate_removes_that_role_protection(self):
-        state = _house_state(); state["objects"][0]["geometry_center_m"][2] = 0.06
-        progress = evaluate_task_goal_progress(state, _house_contract(), _house_plan(), CONFIG)
+        state = _house_state()
+        for obj in state["objects"][:4]: obj["geometry_center_m"][2] += 0.04
+        progress = _house_progress(state)
         protection = derive_dynamic_protection(state, _house_contract(), progress, progress["selected_role_assignment"])
         roles = {item["role_id"] for item in protection["protected_roles"]}
-        self.assertNotIn("left_support", roles)
+        self.assertNotIn("left_support_lower", roles)
 
     def test_execute_with_offline_scene_is_forbidden(self):
         with self.assertRaises(RuntimeError):
@@ -327,7 +235,7 @@ class DynamicProtectionAndSafetyTests(unittest.TestCase):
 
     def test_moveit_failure_is_fed_back_before_later_action_passes(self):
         proposal = {
-            "action_type": "pick_place", "role_id": "left_support", "selected_object_id": 1,
+            "action_type": "pick_place", "role_id": "left_support_lower", "selected_object_id": 1,
             "object_label": "square red", "object_center_base_m": [0.30, 0.0, 0.02],
             "scene_revision": 4, "target_pose_base": {"position_m": [0.25, -0.08, 0.02], "yaw_rad": 0.0},
         }
@@ -353,32 +261,20 @@ def _object(object_id, label, center, size=None):
 
 
 def _house_contract():
-    return {"task_type": "build_house", "goal_spec": {"roles": [
-        {"role_id": "left_support", "requirements": {"category": "square_block"}},
-        {"role_id": "right_support", "requirements": {"category": "square_block"}},
-        {"role_id": "roof", "requirements": {"category": "rectangle_block"}},
-    ], "required_relations": [
-        {"type": "on_table", "subject_role": "left_support"},
-        {"type": "on_table", "subject_role": "right_support"},
-        {"type": "supports", "subject_role": "left_support", "object_role": "roof"},
-        {"type": "supports", "subject_role": "right_support", "object_role": "roof"},
-    ]}}
+    return house_contract()
 
 
 def _house_state():
-    return {"scene_revision": 4, "table_bounds": {"xmin": 0.1, "xmax": 0.6, "ymin": -0.3, "ymax": 0.3}, "objects": [
-        _object(1, "square red", [0.30, 0.0, 0.02]),
-        _object(2, "square blue", [0.40, 0.0, 0.02]),
-        _object(3, "rectangle yellow", [0.35, 0.0, 0.07], [0.14, 0.03, 0.06]),
-    ]}
+    return house_state()
 
 
 def _house_plan():
-    return {"role_assignments": [
-        {"role_id": "left_support", "selected_object_id": 1},
-        {"role_id": "right_support", "selected_object_id": 2},
-        {"role_id": "roof", "selected_object_id": 3},
-    ]}
+    return house_plan()
+
+
+def _house_progress(state):
+    plan = fuse_house_orientation_observations(_house_plan(), state, CONFIG)
+    return evaluate_task_goal_progress(state, _house_contract(), plan, CONFIG)
 
 
 def _organize_contract():

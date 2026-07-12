@@ -16,15 +16,18 @@ contains temporary current-scene bindings, and each action must echo its
 `scene_revision`; ID changes and ordinary motion cause reassociation/replanning,
 not task failure.
 
-`build_house` uses left/right support and roof roles plus `on_table`,
-`left_of`, `supports`, and `bridges` geometry predicates. `organize_blocks`
+`build_house` is fixed to `two_column_two_level_roof_triangle`: four distinct
+square supports form two two-level columns, a concave rectangle (preferred)
+or rectangle bridges the upper supports, and a triangle is centered on the
+roof. The six legal role names are fixed; the old three-block house is invalid.
+`organize_blocks`
 uses the configured grouping rule, non-overlapping workspace regions, full
 oriented footprints, boundary spacing, and separate rows/columns/grid
 predicates. Required groups cannot complete while empty. Completion is
 computed from a new observation, never from VLM text.
 
 Every executable action carries `selected_object_id` and never VLM-emitted
-`object_id`. A house `pick_place` also carries `role_id`; an organize action
+`object_id`. A house `pick_place`/`pick_reorient_place` also carries `role_id`; an organize action
 carries `group_id` and `target_region_id`. Code validates task semantics,
 grounding, workspace and the dynamically rebuilt protected structure. One
 adapter then copies the selected id to the legacy field immediately before
@@ -35,6 +38,24 @@ scored. Current satisfied roles become protected ids and footprint regions;
 changed detection ids replace old protection automatically, while a lost
 predicate removes protection and requests repair. Large movement and
 same-class reassignment are scene events rather than automatic task failure.
+
+The VLM receives the original RGB image, numbered overlay, candidate RGB/depth
+crops, bbox, dimensions, point-cloud height features, PCA axes, contour angles,
+and an explicit `house_frame`. Image-up is never treated as a fixed base-link
+direction. VLM output is limited to semantic orientation observations; code
+fuses them with depth/contour evidence and computes target quaternions.
+
+A wrong-face concave roof or triangle uses `pick_reorient_place`. The planner
+lifts first, derives the relative quaternion from current pose, target pose and
+object-to-tool grasp transform, then SLERPs at safe height. Pure yaw is rejected
+for a required flip. The angle is not fixed to 45 degrees. Every waypoint is
+MoveIt plan-only checked before execution, with joint-delta limits applied to
+the sequential motions. Placement is followed by a fresh RGB-D observation and
+orientation fusion. Triangle apex validation analyzes all three inner angles;
+the right-angle vertex is not assumed to be the apex.
+
+Ollama `format`, prompt `output_schema`, and local validators share the schemas
+in `robot_scene_pipeline/task_schemas.py`.
 
 Real execution is rejected before robot initialization whenever an offline,
 mock, or recorded perception source is enabled. Dry-run remains supported.
@@ -58,6 +79,11 @@ Task logs include `task_contract_{input,raw,validated}.json`,
 | `robot_scene_pipeline/task_geometry.py` | Shared oriented-footprint predicates |
 | `robot_scene_pipeline/task_dynamic_protection.py` | Per-revision protected roles, ids, regions, and relations |
 | `robot_scene_pipeline/task_action_adapter.py` | The only selected-id to legacy-id compatibility handoff |
+| `robot_scene_pipeline/house_task_definition.py` | Canonical six-role house ontology and assembly dependencies |
+| `robot_scene_pipeline/task_schemas.py` | Shared Ollama/prompt/local JSON Schemas |
+| `robot_scene_pipeline/orientation_assets.py` | Full-resolution roof/triangle RGB and depth crops |
+| `robot_scene_pipeline/orientation_fusion.py` | House frame, concavity and triangle-apex evidence fusion |
+| `robot_scene_pipeline/reorientation_planner.py` | Safe-height quaternion SLERP reorientation planning |
 | `execution_safety.py` | Shared offline-source real-execution guard |
 | `commands.py` | External process commands and observation capture |
 | `scene.py` | Initial VLM stack decision, scene lookup, target reacquisition, stack estimation |

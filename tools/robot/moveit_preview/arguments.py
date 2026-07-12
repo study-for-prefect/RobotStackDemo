@@ -134,9 +134,9 @@ def parse_args():
     )
     parser.add_argument(
         "--orientation-mode",
-        choices=("current", "fixed", "object-yaw"),
+        choices=("current", "fixed", "object-yaw", "step-quaternion"),
         default="current",
-        help="Use current orientation, fixed --quat-xyzw, or valid object yaw from the execution plan.",
+        help="Use current/fixed orientation, object yaw, or target_orientation_xyzw from the execution step.",
     )
     parser.add_argument(
         "--grasp-axis",

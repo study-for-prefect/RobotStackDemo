@@ -8,13 +8,37 @@ from .geometry_relations import get_center, get_size
 
 
 ROLE_REQUIRED_PREDICATES = {
-    "left_support": {"left_support.on_table"},
-    "right_support": {"right_support.on_table"},
+    "left_support_lower": {"left_support_lower.on_table"},
+    "right_support_lower": {"right_support_lower.on_table"},
+    "left_support_upper": {
+        "left_support_lower.on_table",
+        "left_support_lower.supports.left_support_upper",
+        "left_column.vertical_aligned",
+    },
+    "right_support_upper": {
+        "right_support_lower.on_table",
+        "right_support_lower.supports.right_support_upper",
+        "right_column.vertical_aligned",
+    },
     "roof": {
-        "left_support.supports.roof",
-        "right_support.supports.roof",
-        "roof.bridges.left_support.right_support",
-        "roof.tilt_within_limit",
+        "left_support_lower.supports.left_support_upper",
+        "right_support_lower.supports.right_support_upper",
+        "columns.height_aligned",
+        "left_support_upper.supports.roof",
+        "right_support_upper.supports.roof",
+        "roof.bridges.upper_supports",
+        "roof.correct_face_up",
+        "roof.opening_down",
+        "roof.straight_edge_up",
+        "roof.orientation_correct",
+    },
+    "triangle_top": {
+        "roof.orientation_correct",
+        "roof.supports.triangle_top",
+        "triangle_top.correct_face",
+        "triangle_top.apex_up",
+        "triangle_top.not_side_lying",
+        "triangle_top.centered_on_roof",
     },
 }
 

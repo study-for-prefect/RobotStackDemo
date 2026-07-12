@@ -60,13 +60,19 @@ python3 -m unittest discover -s tests
 `object_id` 的 `task_contract`，再在每个 `scene_revision` 由 VLM 生成临时
 `grounded_task_plan` 和单步动作；完成状态由重新感知后的几何谓词计算。
 
-所有可执行单步动作统一用 `selected_object_id`。房子 `pick_place` 还包含
+`build_house` 只有一种合法结构：四个不同正方形组成左右两列、每列两层；一个
+`concave_rectangle`（缺失时才降级为普通 `rectangle`）横跨上层；一个三角形位于
+屋顶中央。合法角色固定为 `left_support_lower`、`right_support_lower`、
+`left_support_upper`、`right_support_upper`、`roof` 和 `triangle_top`，不得退化为旧版三块房子。
+
+所有可执行单步动作统一用 `selected_object_id`。房子 `pick_place` 或
+`pick_reorient_place` 还包含
 `role_id`；整理 `pick_place` 包含 `group_id` 和 `target_region_id`。语义校验通过后，
 唯一的兼容适配层才把 `selected_object_id` 复制为旧 MoveIt/清障模块使用的
 `object_id`；两个字段冲突会直接拒绝，不会改选对象或修改目标位姿。
 
 ```bash
-# 搭房子：两个支撑物 + 一个屋顶
+# 搭房子：四个正方形 + 一个屋顶 + 一个三角形
 python3 tools/workflows/stack_demo_pipeline.py --instruction "搭一个房子"
 
 # 按颜色整理成行
@@ -83,6 +89,12 @@ python3 tools/workflows/stack_demo_pipeline.py --instruction "按颜色整理积
 保护区域和保护关系。整理任务使用带 yaw 的完整二维足迹检查区域、重叠和边界间距，
 并分别计算 rows、columns、grid。`--execute` 与 `--offline-scene-state`（以及 mock、
 recorded 等离线感知源）不能组合，检查发生在任何机器人初始化之前。
+
+凹槽屋顶错误面朝上时，代码根据当前/目标四元数和抓取变换生成安全高度上的
+roll/pitch 翻面轨迹；仅绕 yaw 不能改变正反面。旋转量由观测计算，45°只可能是某次
+样例结果，不是固定参数。轨迹使用四元数 SLERP 分段，每个中间姿态必须通过 MoveIt
+plan-only 后才允许执行。三角形方向由三顶点内角、深度/点云几何和 VLM 语义融合；
+接近 90° 的顶点不会被默认当作目标尖端。真实 UR5 测试必须先 dry-run 和 plan-only。
 
 以下内容描述 `--legacy-linear-stack` 兼容路径；它不参与默认的房子/整理任务状态机。
 

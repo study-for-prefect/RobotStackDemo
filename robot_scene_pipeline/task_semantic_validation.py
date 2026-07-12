@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 from .geometry_relations import get_center, get_size
+from .house_task_definition import (
+    HOUSE_ROLE_IDS,
+    HOUSE_STRUCTURE_VARIANT,
+    SUPPORT_ROLE_IDS,
+    canonical_house_assembly_steps,
+    canonical_house_goal_spec,
+)
 from .llm_stack_blocks import object_label_contains
+from .task_schemas import (
+    GROUNDED_HOUSE_PLAN_SCHEMA,
+    GROUNDED_ORGANIZE_PLAN_SCHEMA,
+    ORIENTATION_OBSERVATION_SCHEMA,
+    TASK_CONTRACT_SCHEMA,
+    validate_against_schema,
+)
 from .vlm_task_policy import TASK_TYPES
 
 
@@ -22,6 +36,7 @@ def validate_task_contract(contract: dict, semantics_config: dict) -> dict:
     """Validate immutable task meaning without selecting scene object ids."""
     if not isinstance(contract, dict):
         _raise("unknown", [{"type": "contract_not_object"}])
+    schema_errors = validate_against_schema(contract, TASK_CONTRACT_SCHEMA)
     task_type = str(contract.get("task_type") or "")
     if task_type not in TASK_TYPES:
         _raise(task_type or "unknown", [{"type": "unsupported_task_type", "allowed": sorted(TASK_TYPES)}])
@@ -34,6 +49,7 @@ def validate_task_contract(contract: dict, semantics_config: dict) -> dict:
         errors = _validate_house_contract(goal_spec)
     else:
         errors = _validate_organize_contract(goal_spec, semantics_config)
+    errors.extend(schema_errors)
     if errors:
         _raise(task_type, errors)
     validated = dict(contract)
@@ -53,6 +69,10 @@ def validate_grounded_task_plan(
     task_type = contract["task_type"]
     if not isinstance(plan, dict) or str(plan.get("task_type")) != task_type:
         _raise(task_type, [{"type": "grounded_plan_task_type_mismatch"}])
+    schema = GROUNDED_HOUSE_PLAN_SCHEMA if task_type == "build_house" else GROUNDED_ORGANIZE_PLAN_SCHEMA
+    schema_errors = validate_against_schema(plan, schema)
+    if schema_errors:
+        _raise(task_type, schema_errors)
     if int(plan.get("scene_revision", -1)) != int(scene_revision):
         _raise(task_type, [{"type": "stale_scene_revision", "expected": scene_revision, "actual": plan.get("scene_revision")}])
     if task_type == "build_house":
@@ -68,6 +88,13 @@ def validate_grounded_task_plan(
 def object_matches_role(obj: dict, role: dict) -> bool:
     """Check factual label/category/size requirements without assigning an object."""
     requirements = role.get("requirements") or {}
+    observed_shape = infer_object_shape(obj)
+    required_shape = str(requirements.get("shape") or "").lower()
+    allowed_shapes = {str(item).lower() for item in requirements.get("shape_any", [])}
+    if required_shape and observed_shape != required_shape:
+        return False
+    if allowed_shapes and observed_shape not in allowed_shapes:
+        return False
     category = str(requirements.get("category") or "").lower()
     label = str(obj.get("label") or "").lower()
     category_tokens = [token for token in category.replace("_", " ").split() if token and token != "block"]
@@ -82,6 +109,23 @@ def object_matches_role(obj: dict, role: dict) -> bool:
         if bounds is not None and (not isinstance(bounds, list) or len(bounds) != 2 or not bounds[0] <= size[index] <= bounds[1]):
             return False
     return True
+
+
+def infer_object_shape(obj: dict) -> str:
+    """Return the fused/detected task shape with concave checked before rectangle."""
+    explicit = str(obj.get("fused_shape") or obj.get("shape") or "").strip().lower()
+    if explicit:
+        return explicit
+    label = str(obj.get("label") or "").lower()
+    if "concave" in label and "rectangle" in label:
+        return "concave_rectangle"
+    if "triangle" in label:
+        return "triangle"
+    if "rectangle" in label:
+        return "rectangle"
+    if "square" in label:
+        return "square"
+    return "unknown"
 
 
 def temporary_binding_feedback(
@@ -105,13 +149,31 @@ def _validate_house_contract(goal: dict) -> List[dict]:
     if not isinstance(roles, list):
         return [{"type": "missing_roles"}]
     role_ids = [item.get("role_id") for item in roles if isinstance(item, dict)]
-    required = {"left_support", "right_support", "roof"}
+    required = set(HOUSE_ROLE_IDS)
     errors = [{"type": "missing_required_role", "role_id": role} for role in sorted(required - set(role_ids))]
+    errors.extend({"type": "unknown_house_role", "role_id": role} for role in sorted(set(role_ids) - required))
+    if goal.get("structure_variant") != HOUSE_STRUCTURE_VARIANT:
+        errors.append({"type": "unsupported_house_structure_variant", "required": HOUSE_STRUCTURE_VARIANT})
+    by_role = {item.get("role_id"): item for item in roles if isinstance(item, dict)}
+    for role_id in SUPPORT_ROLE_IDS:
+        if (by_role.get(role_id, {}).get("requirements") or {}).get("shape") != "square":
+            errors.append({"type": "support_role_must_require_square", "role_id": role_id})
+    roof_requirements = by_role.get("roof", {}).get("requirements") or {}
+    if set(roof_requirements.get("shape_any") or []) != {"concave_rectangle", "rectangle"}:
+        errors.append({"type": "roof_shape_requirements_invalid"})
+    if roof_requirements.get("preferred_shape") != "concave_rectangle":
+        errors.append({"type": "roof_preferred_shape_invalid"})
+    if (by_role.get("triangle_top", {}).get("requirements") or {}).get("shape") != "triangle":
+        errors.append({"type": "triangle_role_must_require_triangle"})
     if len(role_ids) != len(set(role_ids)):
         errors.append({"type": "duplicate_role_id"})
     relations = goal.get("required_relations")
     if not isinstance(relations, list):
         errors.append({"type": "missing_required_relations"})
+    elif {_relation_key(item) for item in relations} != {
+        _relation_key(item) for item in canonical_house_goal_spec()["required_relations"]
+    }:
+        errors.append({"type": "house_relations_must_match_fixed_structure"})
     return errors
 
 
@@ -129,8 +191,11 @@ def _validate_organize_contract(goal: dict, config: dict) -> List[dict]:
     return errors
 
 
-def _validate_house_plan(plan: dict, contract: dict, state: dict, _config: dict) -> Tuple[List[dict], dict]:
+def _validate_house_plan(plan: dict, contract: dict, state: dict, config: dict) -> Tuple[List[dict], dict]:
     roles = _house_roles(contract)
+    resources = _house_resource_counts(state)
+    if resources["square"] < 4 or resources["roof"] < 1 or resources["triangle"] < 1:
+        return [{"type": "insufficient_role_resources", "available": resources, "required": {"square": 4, "roof": 1, "triangle": 1}}], {}
     bindings = plan.get("role_assignments") or plan.get("role_bindings")
     if not isinstance(bindings, list):
         return [{"type": "missing_role_assignments"}], {}
@@ -138,20 +203,21 @@ def _validate_house_plan(plan: dict, contract: dict, state: dict, _config: dict)
     object_map = {str(obj.get("id")): obj for obj in _objects(state)}
     for binding in bindings:
         role_id = binding.get("role_id") if isinstance(binding, dict) else None
-        object_id = binding.get("selected_object_id", binding.get("object_id")) if isinstance(binding, dict) else None
+        object_id = binding.get("selected_object_id") if isinstance(binding, dict) else None
         role = roles.get(role_id)
         obj = object_map.get(str(object_id))
         if role is None:
             errors.append({"type": "unknown_role", "role_id": role_id}); continue
         if obj is None:
             errors.append(temporary_binding_feedback(role, object_id, state, plan.get("scene_revision", 0))); continue
-        if object_id in object_ids:
+        object_key = str(object_id)
+        if object_key in object_ids:
             errors.append({"type": "object_assigned_to_multiple_roles", "object_id": object_id}); continue
         if not object_matches_role(obj, role):
             errors.append({"type": "selected_object_no_longer_matches_role", "role_id": role_id, "object_id": object_id}); continue
         if not _binding_matches_object(binding, obj):
             errors.append({"type": "object_binding_grounding_mismatch", "role_id": role_id, "object_id": object_id}); continue
-        object_ids.add(object_id)
+        object_ids.add(object_key)
         by_role[role_id] = _normalized_binding(binding, obj, role)
     for role_id in roles:
         if role_id not in by_role:
@@ -160,7 +226,35 @@ def _validate_house_plan(plan: dict, contract: dict, state: dict, _config: dict)
     errors.extend(_validate_house_relations(relations, roles))
     steps = plan.get("assembly_steps", [])
     errors.extend(_validate_assembly_steps(steps))
-    return errors, {"role_assignments": list(by_role.values()), "assembly_steps": steps}
+    roof = by_role.get("roof")
+    if roof is not None and infer_object_shape(object_map[str(roof["selected_object_id"])]) == "rectangle":
+        concave_ids = [obj.get("id") for obj in object_map.values() if infer_object_shape(obj) == "concave_rectangle"]
+        if concave_ids:
+            errors.append({"type": "concave_rectangle_must_be_preferred_for_roof", "available_object_ids": concave_ids})
+    observations = plan.get("orientation_observations")
+    observation_errors, normalized_observations = _validate_orientation_observations(observations, by_role, config)
+    errors.extend(observation_errors)
+    return errors, {
+        "role_assignments": list(by_role.values()),
+        "assembly_steps": steps,
+        "orientation_observations": normalized_observations,
+    }
+
+
+def _house_resource_counts(state: dict) -> dict:
+    shapes = [infer_object_shape(obj) for obj in _objects(state)]
+    return {
+        "square": sum(shape == "square" for shape in shapes),
+        "roof": sum(shape in {"concave_rectangle", "rectangle"} for shape in shapes),
+        "triangle": sum(shape == "triangle" for shape in shapes),
+    }
+
+
+def _relation_key(relation: dict) -> tuple:
+    return (
+        relation.get("type"), relation.get("subject_role"), relation.get("object_role"),
+        tuple(relation.get("object_roles") or []),
+    )
 
 
 def _validate_organize_plan(plan: dict, contract: dict, state: dict, _config: dict) -> Tuple[List[dict], dict]:
@@ -225,14 +319,46 @@ def _validate_assembly_steps(steps: list) -> List[dict]:
     edges = [(dependency, step_id) for step_id, item in by_id.items() for dependency in item.get("prerequisites", [])]
     errors = [{"type": "invalid_assembly_dependency", "step_id": step, "missing_prerequisite": dep} for dep, step in edges if dep not in by_id]
     if _has_cycle(edges): errors.append({"type": "assembly_dependency_cycle"})
-    roof = next((item for item in by_id.values() if item.get("role_id") == "roof"), None)
-    support_steps = {
-        step_id for step_id, item in by_id.items()
-        if item.get("role_id") in {"left_support", "right_support"}
-    }
-    if roof and not support_steps.issubset(set(roof.get("prerequisites", []))):
-        errors.append({"type": "roof_step_missing_support_prerequisites"})
+    expected = {item["step_id"]: item for item in canonical_house_assembly_steps()}
+    if set(by_id) != set(expected):
+        errors.append({"type": "house_assembly_steps_must_match_fixed_sequence"})
+    for step_id, expected_step in expected.items():
+        actual = by_id.get(step_id) or {}
+        if actual.get("role_id") != expected_step["role_id"] or set(actual.get("prerequisites", [])) != set(expected_step["prerequisites"]):
+            errors.append({"type": "invalid_fixed_assembly_step", "step_id": step_id})
     return errors
+
+
+def _validate_orientation_observations(
+    observations: Any, bindings: dict, _config: dict,
+) -> Tuple[List[dict], List[dict]]:
+    if not isinstance(observations, list):
+        return [{"type": "missing_orientation_observations"}], []
+    allowed_roles = set(ORIENTATION_OBSERVATION_SCHEMA["properties"]["role_id"]["enum"])
+    by_role, errors = {}, []
+    for observation in observations:
+        if not isinstance(observation, dict):
+            errors.append({"type": "orientation_observation_not_object"}); continue
+        role_id = observation.get("role_id")
+        if role_id not in allowed_roles:
+            errors.append({"type": "unknown_orientation_observation_role", "role_id": role_id}); continue
+        binding = bindings.get(role_id) or {}
+        if str(observation.get("selected_object_id")) != str(binding.get("selected_object_id")):
+            errors.append({"type": "orientation_observation_binding_mismatch", "role_id": role_id}); continue
+        try:
+            confidence = float(observation.get("confidence"))
+        except (TypeError, ValueError):
+            confidence = -1.0
+        if not 0.0 <= confidence <= 1.0:
+            errors.append({"type": "invalid_orientation_confidence", "role_id": role_id}); continue
+        if role_id in by_role:
+            errors.append({"type": "duplicate_orientation_observation", "role_id": role_id}); continue
+        normalized = dict(observation)
+        normalized["confidence"] = confidence
+        by_role[role_id] = normalized
+    for role_id in allowed_roles - set(by_role):
+        errors.append({"type": "missing_orientation_observation", "role_id": role_id})
+    return errors, [by_role[role_id] for role_id in ("roof", "triangle_top") if role_id in by_role]
 
 
 def _validate_regions(regions: list, objects: list, spacing: float, state: dict) -> List[dict]:
