@@ -60,6 +60,11 @@ python3 -m unittest discover -s tests
 `object_id` 的 `task_contract`，再在每个 `scene_revision` 由 VLM 生成临时
 `grounded_task_plan` 和单步动作；完成状态由重新感知后的几何谓词计算。
 
+所有可执行单步动作统一用 `selected_object_id`。房子 `pick_place` 还包含
+`role_id`；整理 `pick_place` 包含 `group_id` 和 `target_region_id`。语义校验通过后，
+唯一的兼容适配层才把 `selected_object_id` 复制为旧 MoveIt/清障模块使用的
+`object_id`；两个字段冲突会直接拒绝，不会改选对象或修改目标位姿。
+
 ```bash
 # 搭房子：两个支撑物 + 一个屋顶
 python3 tools/workflows/stack_demo_pipeline.py --instruction "搭一个房子"
@@ -74,19 +79,16 @@ python3 tools/workflows/stack_demo_pipeline.py --instruction "按颜色整理积
 真实推障仍必须显式 `--execute --execute-push-clearing`，短距离 nudge
 动作会先进入代码碰撞检查与 MoveIt 预检，预检通过后才会执行。
 
+每次重新观察都会搜索全部合法房子角色组合，并按当前谓词重建动态保护对象、
+保护区域和保护关系。整理任务使用带 yaw 的完整二维足迹检查区域、重叠和边界间距，
+并分别计算 rows、columns、grid。`--execute` 与 `--offline-scene-state`（以及 mock、
+recorded 等离线感知源）不能组合，检查发生在任何机器人初始化之前。
+
 以下内容描述 `--legacy-linear-stack` 兼容路径；它不参与默认的房子/整理任务状态机。
 
 ## 旧线性堆叠兼容路径
 
-旧线性堆叠同样是 VLM-first 决策：
-
-```bash
-python3 tools/workflows/stack_demo_pipeline.py \
-  ... \
-  --use-vlm-action-policy
-```
-
-`--use-vlm-action-policy` 现在只是兼容开关；在线堆叠主流程默认就是 VLM-first：
+旧线性堆叠同样是 VLM-first 决策；已无作用的 `--use-vlm-action-policy` 兼容开关已删除：
 
 - VLM = 初始结构/堆叠顺序，以及每轮场景问题、动作类型、操作物体、方向、距离和预期收益。
 - 初始结构只输出一个权威字段 `full_stack_order`；代码自动派生底座和后续放置顺序，

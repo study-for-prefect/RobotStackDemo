@@ -19,11 +19,11 @@ class StackDemoArgumentsTests(unittest.TestCase):
 
         self.assertEqual(args.pre_rotate_wrist_yaw_sign, "positive")
 
-    def test_vlm_action_policy_flag_is_available(self):
+    def test_deprecated_vlm_action_policy_flag_is_removed(self):
         with patch("sys.argv", ["stack_demo_pipeline.py", "--use-vlm-action-policy"]):
-            args = parse_args()
-
-        self.assertTrue(args.use_vlm_action_policy)
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parse_args()
 
     def test_push_tool_geometry_can_be_calibrated(self):
         with patch(

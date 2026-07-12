@@ -126,7 +126,8 @@ class TaskSemanticTests(unittest.TestCase):
         selected, report = validate_task_action(proposal, _house_state(), _house_contract(), plan, {})
 
         self.assertTrue(report["accepted"])
-        self.assertEqual(selected["object_id"], 1)
+        self.assertEqual(selected["selected_object_id"], 1)
+        self.assertNotIn("object_id", selected)
         self.assertEqual(selected["target_pose_base"], proposal["target_pose_base"])
 
 

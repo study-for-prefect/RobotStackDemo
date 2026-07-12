@@ -97,11 +97,14 @@ def build_task_action_input(
         "objects": [compact_task_object(obj) for obj in _scene_objects(state)],
         "output_schema": {
             "action_type": "pick_place|nudge|pick_away|reobserve|stop",
-            "role_id": "required for pick_place", "selected_object_id": "current scene id",
+            "selected_object_id": "required current scene id for every executable action; never output object_id",
+            "role_id": "required only for build_house pick_place",
+            "group_id": "required only for organize_blocks pick_place",
+            "target_region_id": "required only for organize_blocks pick_place",
             "object_label": "exact detector label", "object_center_base_m": "exact base_link XYZ",
             "scene_revision": "must equal input scene_revision",
             "target_pose_base": {"position_m": "XYZ in base_link", "yaw_rad": "finite"},
-            "target_object_id": "required for nudge/pick_away", "target_object_label": "exact label",
+            "target_object_id": "task target reference for nudge/pick_away", "target_object_label": "exact label",
             "target_object_center_base_m": "exact XYZ", "contact_side": "nudge contact side",
             "direction_base": "nudge unit base_link XY direction", "distance_m": "nudge distance",
             "gripper_yaw_rad": "nudge yaw", "safe_place_center_base_m": "pick_away temporary place",
@@ -148,8 +151,9 @@ def _task_prompt(policy_input: dict, policy_kind: str) -> str:
         )
     else:
         instruction = (
-            "基于固定任务合同和当前未满足谓词输出一个动作。pick_place 必须给 role_id、当前 selected_object_id、"
-            "scene_revision、准确 object grounding 和 target_pose_base。nudge/pick_away 使用当前检测 id 和完整物理参数。"
+            "基于固定任务合同和当前未满足谓词输出一个动作。所有可执行动作必须且只能用 selected_object_id，禁止输出 object_id。"
+            "房子 pick_place 给 role_id；整理 pick_place 给 group_id 和 target_region_id；并给 scene_revision、准确 grounding 和目标位姿。"
+            "nudge/pick_away 也使用 selected_object_id 和完整物理参数。"
             "只能选择当前检测 id；不要自动宣称任务完成。"
         )
     return "你是 UR5 桌面积木任务语义规划器。\n{}\n只输出 JSON。\n输入：\n{}".format(

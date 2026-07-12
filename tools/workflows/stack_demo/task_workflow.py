@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
+from robot_scene_pipeline.task_action_adapter import TaskActionSchemaError, adapt_task_action_to_legacy_action
 from robot_scene_pipeline.task_action_validation import validate_task_action
+from robot_scene_pipeline.task_dynamic_protection import derive_dynamic_protection
 from robot_scene_pipeline.task_goal_evaluator import evaluate_task_goal_progress
-from robot_scene_pipeline.task_semantic_validation import TaskSemanticValidationError, validate_grounded_task_plan, validate_task_contract
+from robot_scene_pipeline.task_semantic_validation import validate_grounded_task_plan, validate_task_contract
 from robot_scene_pipeline.vlm_replanning import action_validation_feedback, advance_scene_revision
 from robot_scene_pipeline.vlm_task_policy import build_grounded_task_plan_input, build_task_action_input, build_task_contract_input, call_vlm_task_policy
 from robot_scene_pipeline.scene_memory import default_memory, save_memory, update_from_detections
@@ -16,6 +18,7 @@ from robot_scene_pipeline.vlm_action_validation import validate_vlm_action_decis
 from tools.planning.decision_to_execution import write_json
 
 from .commands import capture_scene_observation, init_ready_pose, load_json
+from .execution_safety import validate_execution_source
 from .task_execution import execute_pick_place_and_reobserve, preflight_pick_place_action
 from .clearance_execution import (
     execute_nudge_and_reobserve,
@@ -28,6 +31,7 @@ from .push_clearing import object_by_string_id
 
 def run_semantic_task_workflow(args: Any) -> int:
     """Run contract -> temporary binding -> predicate progress -> action loop."""
+    validate_execution_source(args)
     os.makedirs(args.output_dir, exist_ok=True)
     config = _load_semantics_config(args)
     runtime = {"current_stage": "semantic_task_startup", "scene_revision": 1}
@@ -41,15 +45,24 @@ def run_semantic_task_workflow(args: Any) -> int:
         memory = update_from_detections(default_memory(task=contract["task_type"]), state.get("objects", []))
         save_memory(memory, args.memory_json)
         write_json(os.path.join(args.output_dir, "task_contract_validated.json"), contract)
+        previous_progress = None
         for step_index in range(1, max(1, int(getattr(args, "max_task_steps", 12))) + 1):
             cycle_dir = os.path.join(args.output_dir, "task_cycle_{:02d}".format(step_index)); os.makedirs(cycle_dir, exist_ok=True)
             plan = _obtain_grounded_plan(args, state, contract, config, runtime["scene_revision"], cycle_dir)
-            progress = evaluate_task_goal_progress(state, contract, plan, config)
+            progress = evaluate_task_goal_progress(state, contract, plan, config, previous_progress)
+            protection = derive_dynamic_protection(
+                state, contract, progress, progress.get("selected_role_assignment"),
+            )
             write_json(os.path.join(args.output_dir, "task_goal_progress_revision_{:02d}.json".format(runtime["scene_revision"])), progress)
+            write_json(os.path.join(cycle_dir, "role_assignment_candidates.json"), progress.get("role_assignment_candidates", []))
+            write_json(os.path.join(cycle_dir, "selected_role_assignment.json"), progress.get("selected_role_assignment"))
+            write_json(os.path.join(cycle_dir, "dynamic_protection.json"), protection)
             if progress["task_complete"]:
                 write_json(os.path.join(args.output_dir, "task_demo_summary.json"), {"execution_status": "success", "task_contract": contract, "task_goal_progress": progress})
                 return 0
-            action, action_report = _select_task_action(args, state, contract, plan, progress, cycle_dir)
+            action, action_report = _select_task_action(
+                args, state, contract, plan, progress, protection, config, cycle_dir, step_index,
+            )
             action_history = {
                 "task_type": contract["task_type"],
                 "scene_revision": runtime["scene_revision"],
@@ -61,6 +74,7 @@ def run_semantic_task_workflow(args: Any) -> int:
             write_json(os.path.join(cycle_dir, "autonomous_action_history.json"), action_history)
             action_type = action_report.get("action_type")
             if action_type == "reobserve":
+                previous_progress = progress
                 state = _reobserve(args, cycle_dir, runtime)
                 memory = update_from_detections(memory, state.get("objects", [])); save_memory(memory, args.memory_json)
                 continue
@@ -68,10 +82,8 @@ def run_semantic_task_workflow(args: Any) -> int:
                 raise RuntimeError("VLM requested safe stop: {}".format(action_report.get("reason") or "unspecified"))
             if action is None:
                 raise RuntimeError("No valid VLM task action after replanning.")
-            checked = _preflight_task_action(args, cycle_dir, state, action, step_index)
+            checked = action
             write_json(os.path.join(cycle_dir, "task_action_preflight.json"), checked)
-            if not checked.get("moveit_feasible") and getattr(args, "execute", False):
-                raise RuntimeError("MoveIt preflight failed: {}".format(checked.get("moveit_preflight_error")))
             state, result = _execute_task_action(args, cycle_dir, runtime, memory, state, checked, step_index)
             write_json(os.path.join(cycle_dir, "task_action_execution.json"), result)
             if not getattr(args, "execute", False):
@@ -79,10 +91,11 @@ def run_semantic_task_workflow(args: Any) -> int:
                 return 0
             advance_scene_revision(runtime, state)
             memory = update_from_detections(memory, state.get("objects", [])); save_memory(memory, args.memory_json)
-            predicates_after = evaluate_task_goal_progress(state, contract, plan, config)
+            predicates_after = evaluate_task_goal_progress(state, contract, plan, config, progress)
             action_history["predicates_after"] = list(predicates_after["satisfied_predicates"])
             action_history["execution_result"] = result
             write_json(os.path.join(cycle_dir, "autonomous_action_history.json"), action_history)
+            previous_progress = progress
         raise RuntimeError("Task did not satisfy goal before max_task_steps.")
     except Exception as exc:
         write_json(os.path.join(args.output_dir, "failure_state.json"), {**runtime, "error": str(exc)})
@@ -138,25 +151,76 @@ def _obtain_grounded_plan(args: Any, state: dict, contract: dict, config: dict, 
     raise RuntimeError("No valid grounded_task_plan after replanning.")
 
 
-def _select_task_action(args: Any, state: dict, contract: dict, plan: dict, progress: dict, cycle_dir: str) -> Tuple[Optional[dict], dict]:
+def _select_task_action(
+    args: Any, state: dict, contract: dict, plan: dict, progress: dict,
+    protection: dict, semantics_config: dict, cycle_dir: str, step_index: int,
+) -> Tuple[Optional[dict], dict]:
     history = []
     for attempt in range(1, max(1, int(getattr(args, "max_vlm_action_attempts", 5))) + 1):
         policy_input = build_task_action_input(state, contract, plan, progress, state["scene_revision"], history)
         raw = call_vlm_task_policy(args, policy_input, "task_action")
         proposal = raw.get("decision") or {}
-        if str(proposal.get("action_type") or "").lower() in {"nudge", "pick_away"}:
-            action, report = validate_vlm_action_decision(proposal, state, protected_ids=[])
-        else:
-            action, report = validate_task_action(proposal, state, contract, plan, progress)
+        action_type = str(proposal.get("action_type") or "").lower()
+        preflight_state = state
+        try:
+            if action_type in {"nudge", "pick_away"}:
+                adapted = adapt_task_action_to_legacy_action(proposal)
+                protected_state, protected_ids = _state_with_dynamic_protection(state, protection)
+                preflight_state = protected_state
+                action, report = validate_vlm_action_decision(adapted, protected_state, protected_ids=protected_ids)
+                if action is not None:
+                    action["selected_object_id"] = proposal["selected_object_id"]
+            else:
+                action, report = validate_task_action(
+                    proposal, state, contract, plan, progress, protection, semantics_config,
+                )
+        except TaskActionSchemaError as exc:
+            action, report = None, exc.feedback
         write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_input.json".format(attempt)), policy_input)
         write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_output.json".format(attempt)), raw)
-        if str(proposal.get("action_type") or "").lower() in {"reobserve", "stop"}:
+        write_json(os.path.join(cycle_dir, "task_action_semantic_validation.json"), report)
+        if action_type in {"reobserve", "stop"}:
             write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), report); return None, proposal
         if action is not None:
-            write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), report); return action, proposal
+            legacy_action = (
+                action if action_type in {"nudge", "pick_away"}
+                else adapt_task_action_to_legacy_action(action)
+            )
+            checked = _preflight_task_action(args, cycle_dir, preflight_state, legacy_action, step_index)
+            if not getattr(args, "execute", False) or checked.get("moveit_feasible"):
+                write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), report)
+                return checked, proposal
+            report = {
+                **report,
+                "passed": False,
+                "accepted": False,
+                "validation_stage": "moveit_preflight",
+                "reason": "moveit_preflight_failed",
+                "moveit_preflight_error": checked.get("moveit_preflight_error"),
+            }
         feedback = action_validation_feedback(proposal, report, state["scene_revision"], attempt); history.append(feedback)
         write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), feedback)
     return None, {"action_type": "stop", "reason": "no_valid_vlm_action_after_replanning"}
+
+
+def _state_with_dynamic_protection(state: dict, protection: dict) -> Tuple[dict, List[Any]]:
+    """Expose id-backed and region-only protection to existing physical validators."""
+    protected_state = {**state, "objects": list(state.get("objects", []))}
+    protected_ids: List[Any] = list(protection.get("protected_object_ids") or [])
+    for index, region in enumerate(protection.get("protected_regions") or []):
+        if not region.get("center_base_m") or not region.get("dimensions_m"):
+            continue
+        synthetic_id = "dynamic_protected_region_{}".format(index)
+        protected_state["objects"].append({
+            "id": synthetic_id,
+            "label": "protected task structure region",
+            "geometry_center_m": list(region["center_base_m"]),
+            "dimensions_m": list(region["dimensions_m"]),
+            "yaw_rad": float(region.get("yaw_rad", 0.0)),
+            "state": "protected",
+        })
+        protected_ids.append(synthetic_id)
+    return protected_state, protected_ids
 
 
 def _initial_state(args: Any) -> dict:

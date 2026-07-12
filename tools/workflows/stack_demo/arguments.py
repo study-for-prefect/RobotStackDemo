@@ -29,14 +29,6 @@ def parse_args() -> argparse.Namespace:
         help="Allow execution of VLM-selected nudge or pick-away actions after physical and MoveIt validation.",
     )
     parser.add_argument(
-        "--use-vlm-action-policy",
-        action="store_true",
-        help=(
-            "Deprecated compatibility flag; autonomous scene/action decisions are always VLM-first. "
-            "Code only validates ids, physical safety, grasp/place feasibility, and MoveIt preflight."
-        ),
-    )
-    parser.add_argument(
         "--push-clearing-lift-m",
         type=float,
         default=0.05,

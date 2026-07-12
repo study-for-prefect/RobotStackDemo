@@ -62,6 +62,7 @@ from .scene import (
 )
 from .target_recovery import recover_or_lock_missing_target
 from .task_workflow import run_semantic_task_workflow
+from .execution_safety import validate_execution_source
 
 SECOND_PICK_OBSERVATION_ERROR_MARKERS = (
     "Second observation center z",
@@ -112,6 +113,7 @@ def _write_second_snapshot_hover_plan(first_pick_plan_path: str, output_path: st
 
 def main() -> int:
     args = parse_args()
+    validate_execution_source(args)
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.memory_json is None:
@@ -156,11 +158,6 @@ def main() -> int:
         "scene_revision": 1,
     }
     try:
-        if args.execute and args.execute_push_clearing and args.offline_scene_state:
-            raise RuntimeError(
-                "Real push clearing refuses --offline-scene-state. "
-                "Use a live snapshot before enabling robot motion."
-            )
         runtime["current_stage"] = "init_ready_pose"
         init_ready_pose(args)
 

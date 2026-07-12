@@ -18,18 +18,32 @@ not task failure.
 
 `build_house` uses left/right support and roof roles plus `on_table`,
 `left_of`, `supports`, and `bridges` geometry predicates. `organize_blocks`
-uses the configured color/rows defaults, non-overlapping workspace regions,
-spacing, and row-alignment predicates. Completion is computed from a new
-observation, never from VLM text.
+uses the configured grouping rule, non-overlapping workspace regions, full
+oriented footprints, boundary spacing, and separate rows/columns/grid
+predicates. Required groups cannot complete while empty. Completion is
+computed from a new observation, never from VLM text.
 
-The new `pick_place` action carries a VLM-selected current object, role,
-scene revision, and `target_pose_base`. Code validates role compatibility,
-grounding, workspace and protected structure constraints, then reuses the
-existing pick/place MoveIt plan-only and execution commands.
+Every executable action carries `selected_object_id` and never VLM-emitted
+`object_id`. A house `pick_place` also carries `role_id`; an organize action
+carries `group_id` and `target_region_id`. Code validates task semantics,
+grounding, workspace and the dynamically rebuilt protected structure. One
+adapter then copies the selected id to the legacy field immediately before
+the existing physical validator or execution handoff.
 
-Task logs are written as `task_contract_{input,raw,validated}.json`,
-`grounded_task_plan_{input,raw,validated}.json`, and
-`task_goal_progress_revision_XX.json`.
+After every observation, all distinct legal house role combinations are
+scored. Current satisfied roles become protected ids and footprint regions;
+changed detection ids replace old protection automatically, while a lost
+predicate removes protection and requests repair. Large movement and
+same-class reassignment are scene events rather than automatic task failure.
+
+Real execution is rejected before robot initialization whenever an offline,
+mock, or recorded perception source is enabled. Dry-run remains supported.
+
+Task logs include `task_contract_{input,raw,validated}.json`,
+`grounded_task_plan_{input,raw,validated}.json`,
+`task_goal_progress_revision_XX.json`, `role_assignment_candidates.json`,
+`selected_role_assignment.json`, `dynamic_protection.json`, and
+`task_action_semantic_validation.json`.
 
 ## Responsibility Split
 
@@ -41,6 +55,10 @@ Task logs are written as `task_contract_{input,raw,validated}.json`,
 | `robot_scene_pipeline/vlm_task_policy.py` | Task contract, temporary binding, and action VLM inputs |
 | `robot_scene_pipeline/task_semantic_validation.py` | Contract and current-scene binding validation |
 | `robot_scene_pipeline/task_goal_evaluator.py` | House/organization geometry predicate progress |
+| `robot_scene_pipeline/task_geometry.py` | Shared oriented-footprint predicates |
+| `robot_scene_pipeline/task_dynamic_protection.py` | Per-revision protected roles, ids, regions, and relations |
+| `robot_scene_pipeline/task_action_adapter.py` | The only selected-id to legacy-id compatibility handoff |
+| `execution_safety.py` | Shared offline-source real-execution guard |
 | `commands.py` | External process commands and observation capture |
 | `scene.py` | Initial VLM stack decision, scene lookup, target reacquisition, stack estimation |
 | `push_flow.py` | Autonomous VLM action loop and post-decision dispatch |
