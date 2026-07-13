@@ -1,0 +1,178 @@
+import json
+import os
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import requests
+
+from robot_scene_pipeline.ollama_policy_client import call_policy
+
+
+SCHEMA = {
+    "type": "object",
+    "required": ["ok"],
+    "properties": {"ok": {"type": "boolean"}},
+    "additionalProperties": False,
+}
+
+
+class OllamaPolicyClientTests(unittest.TestCase):
+    def test_thinking_and_valid_content_are_both_preserved(self):
+        response = _response(_envelope(thinking="deep", content='{"ok": true}'))
+        with patch("robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response):
+            result = call_policy(_args(), "task_contract", _messages(), SCHEMA)
+        self.assertEqual(result.thinking, "deep")
+        self.assertEqual(result.parsed_decision, {"ok": True})
+
+    def test_empty_content_after_thinking_uses_finalizer(self):
+        responses = [
+            _response(_envelope(thinking="finished reasoning", content="")),
+            _response(_envelope(content='{"ok": true}')),
+        ]
+        with patch("robot_scene_pipeline.ollama_policy_client.requests.post", side_effect=responses) as post:
+            result = call_policy(_args(), "task_contract", _messages(), SCHEMA)
+        self.assertEqual(result.generation_status, "parsed_after_finalization")
+        self.assertEqual(post.call_count, 2)
+        self.assertFalse(post.call_args_list[1].kwargs["json"].get("think", False))
+
+    def test_length_retries_reasoning_with_larger_budget(self):
+        responses = [
+            _response(_envelope(thinking="long", content='{"ok":', done_reason="length", eval_count=8192)),
+            _response(_envelope(thinking="done", content='{"ok": true}')),
+        ]
+        with patch("robot_scene_pipeline.ollama_policy_client.requests.post", side_effect=responses) as post:
+            result = call_policy(_args(), "task_contract", _messages(), SCHEMA)
+        first = post.call_args_list[0].kwargs["json"]["options"]["num_predict"]
+        second = post.call_args_list[1].kwargs["json"]["options"]["num_predict"]
+        self.assertEqual(result.parsed_decision, {"ok": True})
+        self.assertGreater(second, first)
+
+    def test_empty_thinking_and_content_is_backend_failure_not_stop(self):
+        with patch(
+            "robot_scene_pipeline.ollama_policy_client.requests.post",
+            side_effect=[_response(_envelope())] * 3,
+        ):
+            result = call_policy(_args(), "action_proposal", _messages(), SCHEMA)
+        self.assertIsNone(result.parsed_decision)
+        self.assertEqual(result.error_type, "EMPTY_MODEL_MESSAGE")
+
+    def test_qwen25_response_without_thinking_is_valid(self):
+        response = _response(_envelope(content='{"ok": true}', include_thinking=False))
+        args = _args(model="qwen2.5vl:7b-q4_K_M")
+        with patch("robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response) as post:
+            result = call_policy(args, "task_contract", _messages(), SCHEMA)
+        self.assertEqual(result.parsed_decision, {"ok": True})
+        self.assertNotIn("think", post.call_args.kwargs["json"])
+
+    def test_http_500_preserves_body_and_fails_backend(self):
+        response = _response({}, status=500, text="ollama crashed")
+        with patch("robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response):
+            result = call_policy(_args(), "task_contract", _messages(), SCHEMA)
+        self.assertEqual(result.error_type, "HTTP_ERROR")
+        self.assertEqual(result.raw_response, "ollama crashed")
+
+    def test_timeout_is_backend_failure(self):
+        with patch(
+            "robot_scene_pipeline.ollama_policy_client.requests.post",
+            side_effect=requests.Timeout("read timeout"),
+        ):
+            result = call_policy(_args(), "task_contract", _messages(), SCHEMA)
+        self.assertEqual(result.error_type, "REQUEST_TIMEOUT")
+        self.assertIsNone(result.parsed_decision)
+
+    def test_finalizer_empty_content_fails_explicitly(self):
+        args = _args(vlm_max_backend_retries=1)
+        responses = [
+            _response(_envelope(thinking="complete", content="")),
+            _response(_envelope()),
+            _response(_envelope()),
+        ]
+        with patch("robot_scene_pipeline.ollama_policy_client.requests.post", side_effect=responses):
+            result = call_policy(args, "task_contract", _messages(), SCHEMA)
+        self.assertEqual(result.error_type, "FINALIZATION_FAILED")
+        self.assertIsNone(result.parsed_decision)
+
+    def test_unsupported_think_parameter_is_removed_once(self):
+        responses = [
+            _response({}, status=400, text="unknown unsupported field think"),
+            _response(_envelope(content='{"ok": true}')),
+        ]
+        with patch("robot_scene_pipeline.ollama_policy_client.requests.post", side_effect=responses) as post:
+            result = call_policy(_args(), "task_contract", _messages(), SCHEMA)
+        self.assertEqual(result.parsed_decision, {"ok": True})
+        self.assertIn("think", post.call_args_list[0].kwargs["json"])
+        self.assertNotIn("think", post.call_args_list[1].kwargs["json"])
+
+    def test_unsupported_assistant_thinking_replay_uses_internal_context(self):
+        args = _args(vlm_max_backend_retries=1)
+        responses = [
+            _response(_envelope(thinking="finished reasoning", content="")),
+            _response({}, status=400, text="unsupported unknown assistant thinking field"),
+            _response(_envelope(content='{"ok": true}')),
+        ]
+        with patch("robot_scene_pipeline.ollama_policy_client.requests.post", side_effect=responses) as post:
+            result = call_policy(args, "task_contract", _messages(), SCHEMA)
+        second_messages = post.call_args_list[1].kwargs["json"]["messages"]
+        third_messages = post.call_args_list[2].kwargs["json"]["messages"]
+        self.assertEqual(result.parsed_decision, {"ok": True})
+        self.assertTrue(any(item.get("role") == "assistant" and "thinking" in item for item in second_messages))
+        self.assertFalse(any(item.get("role") == "assistant" and "thinking" in item for item in third_messages))
+        self.assertTrue(any("内部推理上下文" in item.get("content", "") for item in third_messages))
+
+    def test_diagnostics_files_include_thinking_content_and_token_fields(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            response = _response(_envelope(thinking="t", content='{"ok": true}'))
+            with patch("robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response):
+                call_policy(_args(output_dir=output_dir), "task_contract", _messages(), SCHEMA, artifact_dir=output_dir)
+            call_dirs = os.listdir(os.path.join(output_dir, "ollama_calls"))
+            call_dir = os.path.join(output_dir, "ollama_calls", call_dirs[0])
+            with open(os.path.join(call_dir, "ollama_diagnostics.json"), encoding="utf-8") as handle:
+                diagnostics = json.load(handle)
+            self.assertEqual(diagnostics["thinking_length_chars"], 1)
+            self.assertEqual(diagnostics["eval_count"], 20)
+            self.assertTrue(os.path.isfile(os.path.join(call_dir, "ollama_response.json")))
+
+
+def _args(**overrides):
+    values = {
+        "model": "qwen3-vl:30b", "ollama_url": "http://local/api/chat",
+        "vlm_think_mode": "auto", "vlm_read_timeout_sec": 1,
+        "vlm_keep_alive": "1h", "vlm_max_backend_retries": 3,
+        "vlm_max_budget_retries": 3, "vlm_num_ctx": 0,
+        "vlm_num_predict": 0, "vlm_finalizer_num_predict": 4096,
+        "output_dir": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _messages():
+    return [{"role": "system", "content": "system"}, {"role": "user", "content": "user"}]
+
+
+def _envelope(thinking="", content="", done_reason="stop", eval_count=20, include_thinking=True):
+    message = {"role": "assistant", "content": content}
+    if include_thinking:
+        message["thinking"] = thinking
+    return {
+        "message": message, "done": True, "done_reason": done_reason,
+        "prompt_eval_count": 10, "eval_count": eval_count,
+        "prompt_eval_duration": 1, "eval_duration": 2,
+        "total_duration": 3, "load_duration": 4,
+    }
+
+
+class _response:
+    def __init__(self, value, status=200, text=""):
+        self._value = value
+        self.status_code = status
+        self.text = text
+
+    def json(self):
+        return self._value
+
+
+if __name__ == "__main__":
+    unittest.main()

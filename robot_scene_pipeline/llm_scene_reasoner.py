@@ -1,9 +1,9 @@
 import json
-
-import requests
+import os
 
 from .depth_geometry import coordinate_convention, public_object
 from .io_utils import image_to_base64
+from .ollama_policy_client import call_policy
 from .llm_stack_blocks import (
     StackColorSelectionError,
     build_stack_blocks_prompt,
@@ -22,6 +22,14 @@ def add_llm_args(parser):
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434/api/chat")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--num-predict", type=int, default=1024)
+    parser.add_argument("--vlm-think-mode", choices=("auto", "on", "off"), default="auto")
+    parser.add_argument("--vlm-num-ctx", type=int, default=0)
+    parser.add_argument("--vlm-num-predict", type=int, default=0)
+    parser.add_argument("--vlm-finalizer-num-predict", type=int, default=4096)
+    parser.add_argument("--vlm-read-timeout-sec", type=float, default=1200.0)
+    parser.add_argument("--vlm-keep-alive", default="1h")
+    parser.add_argument("--vlm-max-backend-retries", type=int, default=3)
+    parser.add_argument("--vlm-max-budget-retries", type=int, default=3)
     parser.add_argument("--no-image", action="store_true")
     parser.add_argument("--skip-llm", action="store_true")
 
@@ -110,17 +118,13 @@ def call_ollama(args, prompt, snapshot_path):
     message = {"role": "user", "content": prompt}
     if not args.no_image:
         message["images"] = [image_to_base64(snapshot_path)]
-    payload = {
-        "model": args.model,
-        "messages": [message],
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.1, "num_predict": args.num_predict},
-    }
-    response = requests.post(args.ollama_url, json=payload, timeout=args.timeout)
-    response.raise_for_status()
-    data = response.json()
-    return data.get("message", {}).get("content", json.dumps(data, ensure_ascii=False))
+    result = call_policy(
+        args, "orientation_analysis", [message], {"type": "object"},
+        artifact_dir=os.path.dirname(snapshot_path), temperature=0.1,
+    )
+    if result.parsed_decision is None:
+        raise RuntimeError("VLM_BACKEND_FAILED: {}".format(result.error_type or result.generation_status))
+    return json.dumps(result.parsed_decision, ensure_ascii=False)
 
 
 def parse_json_or_embedded(text):

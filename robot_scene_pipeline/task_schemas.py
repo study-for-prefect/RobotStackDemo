@@ -36,12 +36,12 @@ ORIENTATION_OBSERVATION_SCHEMA = {
     "additionalProperties": True,
 }
 
-TASK_CONTRACT_SCHEMA = {
+BUILD_HOUSE_CONTRACT_SCHEMA = {
     "type": "object",
     "required": ["schema_version", "task_type", "goal_spec", "reason", "confidence"],
     "properties": {
         "schema_version": {"const": "task_contract_v1"},
-        "task_type": {"type": "string", "enum": ["build_house", "organize_blocks"]},
+        "task_type": {"const": "build_house"},
         "goal_spec": {
             "type": "object",
             "properties": {
@@ -64,6 +64,38 @@ TASK_CONTRACT_SCHEMA = {
     "additionalProperties": False,
 }
 
+ORGANIZE_BLOCKS_CONTRACT_SCHEMA = {
+    "type": "object",
+    "required": ["schema_version", "task_type", "goal_spec", "reason", "confidence"],
+    "properties": {
+        "schema_version": {"const": "task_contract_v1"},
+        "task_type": {"const": "organize_blocks"},
+        "goal_spec": {
+            "type": "object",
+            "required": ["grouping_key", "layout_type", "include_scope", "allow_stacking"],
+            "properties": {
+                "grouping_key": {"const": "color"},
+                "layout_type": {"type": "string", "enum": ["rows", "columns", "regions"]},
+                "include_scope": {"const": "all_detected_blocks"},
+                "allow_stacking": {"const": False},
+                "minimum_spacing_m": {"type": "number"},
+                "alignment_tolerance_m": {"type": "number"},
+            },
+            "additionalProperties": False,
+        },
+        "reason": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    },
+    "additionalProperties": False,
+}
+
+TASK_CONTRACT_SCHEMAS = {
+    "build_house": BUILD_HOUSE_CONTRACT_SCHEMA,
+    "organize_blocks": ORGANIZE_BLOCKS_CONTRACT_SCHEMA,
+}
+# Compatibility alias for code that validates after task_type is already known.
+TASK_CONTRACT_SCHEMA = BUILD_HOUSE_CONTRACT_SCHEMA
+
 ROLE_ASSIGNMENT_SCHEMA = {
     "type": "object",
     "required": ["role_id", "selected_object_id", "observed_label", "geometry_center_base_m"],
@@ -78,7 +110,44 @@ ROLE_ASSIGNMENT_SCHEMA = {
     "additionalProperties": True,
 }
 
+HOUSE_ROLE_BINDING_SCHEMA = {
+    "type": "object",
+    "required": ["role_id", "object_ref", "track_id", "confidence"],
+    "properties": {
+        "role_id": ROLE_ID_SCHEMA,
+        "object_ref": {"type": "string"},
+        "track_id": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    },
+    "additionalProperties": False,
+}
+
+HOUSE_ORIENTATION_BINDING_SCHEMA = {
+    "type": "object",
+    "required": ["role_id", "object_ref", "track_id", "confidence"],
+    "properties": {
+        **ORIENTATION_OBSERVATION_SCHEMA["properties"],
+        "object_ref": {"type": "string"},
+        "track_id": {"type": "string"},
+    },
+    "additionalProperties": True,
+}
+
 GROUNDED_HOUSE_PLAN_SCHEMA = {
+    "type": "object",
+    "required": ["schema_version", "scene_revision", "role_bindings", "orientation_observations", "reason", "confidence"],
+    "properties": {
+        "schema_version": {"const": "grounded_house_plan_v1"},
+        "scene_revision": {"type": "integer"},
+        "role_bindings": {"type": "array", "items": HOUSE_ROLE_BINDING_SCHEMA, "minItems": 6, "maxItems": 6},
+        "orientation_observations": {"type": "array", "items": HOUSE_ORIENTATION_BINDING_SCHEMA},
+        "reason": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    },
+    "additionalProperties": False,
+}
+
+LEGACY_GROUNDED_HOUSE_PLAN_SCHEMA = {
     "type": "object",
     "required": ["schema_version", "task_type", "scene_revision", "role_assignments", "assembly_steps", "orientation_observations"],
     "properties": {
@@ -153,11 +222,45 @@ TASK_ACTION_SCHEMA = {
     "additionalProperties": True,
 }
 
+VLM_ACTION_SCHEMA = {
+    "type": "object",
+    "required": [
+        "action_type", "scene_problem", "predicted_scene_benefit",
+        "risk_assessment", "reason", "confidence",
+    ],
+    "properties": {
+        "strategy_id": {"type": "string"},
+        "action_type": {"type": "string", "enum": ["pick", "nudge", "pick_away", "reobserve", "stop"]},
+        "scene_problem": {"type": "string"},
+        "object_ref": {"type": ["string", "null"]},
+        "object_track_id": {"type": ["string", "null"]},
+        "object_id": {"type": ["integer", "string", "null"]},
+        "object_label": {"type": ["string", "null"]},
+        "object_center_base_m": {"type": ["array", "null"], "items": {"type": "number"}},
+        "target_object_ref": {"type": ["string", "null"]},
+        "target_object_track_id": {"type": ["string", "null"]},
+        "target_object_id": {"type": ["integer", "string", "null"]},
+        "target_object_label": {"type": ["string", "null"]},
+        "target_object_center_base_m": {"type": ["array", "null"], "items": {"type": "number"}},
+        "contact_side": {"type": ["string", "null"]},
+        "direction_base": {"type": ["array", "null"], "items": {"type": "number"}},
+        "distance_m": {"type": ["number", "null"]},
+        "gripper_yaw_rad": {"type": ["number", "null"]},
+        "safe_place_center_base_m": {"type": ["array", "null"], "items": {"type": "number"}},
+        "predicted_scene_benefit": {"type": "string"},
+        "risk_assessment": {"type": "string"},
+        "reason": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "alternative_actions": {"type": "array", "items": {"type": "object"}},
+    },
+    "additionalProperties": True,
+}
+
 
 def schema_for_policy(policy_kind: str, task_type: str = "") -> Dict[str, object]:
     """Return the exact schema supplied to Ollama for one task-policy call."""
     if policy_kind == "task_contract":
-        return TASK_CONTRACT_SCHEMA
+        return TASK_CONTRACT_SCHEMAS.get(task_type, BUILD_HOUSE_CONTRACT_SCHEMA)
     if policy_kind == "grounded_task_plan":
         return GROUNDED_HOUSE_PLAN_SCHEMA if task_type == "build_house" else GROUNDED_ORGANIZE_PLAN_SCHEMA
     return TASK_ACTION_SCHEMA

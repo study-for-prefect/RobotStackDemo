@@ -1,0 +1,130 @@
+import unittest
+
+from robot_scene_pipeline.house_task_definition import canonical_house_assembly_steps
+from robot_scene_pipeline.object_tracking import update_scene_tracks
+from robot_scene_pipeline.task_routing import route_task_type
+from robot_scene_pipeline.task_schemas import (
+    BUILD_HOUSE_CONTRACT_SCHEMA,
+    GROUNDED_HOUSE_PLAN_SCHEMA,
+    ORGANIZE_BLOCKS_CONTRACT_SCHEMA,
+    schema_for_policy,
+    validate_against_schema,
+)
+from robot_scene_pipeline.task_semantic_validation import (
+    TaskSemanticValidationError,
+    infer_object_shape,
+    normalize_semantic_shape,
+    object_matches_role,
+    validate_grounded_task_plan,
+    validate_task_contract,
+)
+from robot_scene_pipeline.vlm_task_policy import (
+    _task_prompt, build_grounded_task_plan_input, build_task_contract_input,
+)
+from tests.test_task_semantics import CONFIG, _house_contract, _house_state
+
+
+class PolicyRoutingAndGroundingTests(unittest.TestCase):
+    def test_instruction_routes_to_one_task_family(self):
+        self.assertEqual(route_task_type("按颜色整理积木"), "organize_blocks")
+        self.assertEqual(route_task_type("请搭房子"), "build_house")
+        self.assertEqual(route_task_type("红绿蓝黄依次向上堆叠"), "stack_blocks")
+
+    def test_organize_contract_prompt_has_no_house_ontology(self):
+        payload = build_task_contract_input({}, "按颜色整理积木", CONFIG)
+        prompt = _task_prompt(payload, "task_contract")
+        forbidden = (
+            "HOUSE_DEFINITION_PROMPT", "two_column_two_level_roof_triangle",
+            "left_support_lower", "right_support_lower", "triangle_top",
+        )
+        self.assertEqual(payload["expected_task_type"], "organize_blocks")
+        self.assertTrue(all(token not in prompt for token in forbidden))
+        self.assertNotIn("objects", payload)
+        self.assertNotIn("scene_rgb", payload)
+
+    def test_organize_grounded_prompt_has_no_house_semantics(self):
+        contract = {
+            "task_type": "organize_blocks", "goal_spec": {
+                "grouping_key": "color", "layout_type": "rows",
+                "include_scope": "all_detected_blocks", "allow_stacking": False,
+            },
+        }
+        payload = build_grounded_task_plan_input(
+            {"objects": [], "scene_revision": 1}, contract, 1, CONFIG,
+        )
+        prompt = _task_prompt(payload, "grounded_task_plan")
+        self.assertNotIn("house_semantics", prompt)
+        self.assertNotIn("left_support_lower", prompt)
+        self.assertNotIn("triangle_top", prompt)
+
+    def test_contract_schemas_are_task_specific(self):
+        self.assertIs(schema_for_policy("task_contract", "build_house"), BUILD_HOUSE_CONTRACT_SCHEMA)
+        self.assertIs(schema_for_policy("task_contract", "organize_blocks"), ORGANIZE_BLOCKS_CONTRACT_SCHEMA)
+        self.assertEqual(BUILD_HOUSE_CONTRACT_SCHEMA["properties"]["task_type"]["const"], "build_house")
+        self.assertEqual(ORGANIZE_BLOCKS_CONTRACT_SCHEMA["properties"]["task_type"]["const"], "organize_blocks")
+
+    def test_contract_task_type_must_match_route(self):
+        with self.assertRaises(TaskSemanticValidationError) as raised:
+            validate_task_contract(_house_contract(), CONFIG, expected_task_type="organize_blocks")
+        self.assertIn("task_type_instruction_mismatch", {item["type"] for item in raised.exception.feedback["errors"]})
+
+    def test_concave_aliases_normalize_and_match_roof(self):
+        role = {"requirements": {"shape_any": ["concave_rectangle", "rectangle"]}}
+        for label in ("concave", "concave rectangle", "concave_rectangle"):
+            self.assertEqual(normalize_semantic_shape(label), "concave_rectangle")
+            self.assertEqual(infer_object_shape({"label": label}), "concave_rectangle")
+            self.assertTrue(object_matches_role({"label": label}, role))
+
+    def test_concise_house_plan_resolves_refs_and_injects_fixed_steps(self):
+        state = _tracked_house_state()
+        plan = _concise_house_plan(state)
+
+        validated = validate_grounded_task_plan(plan, _house_contract(), state, 4, CONFIG)
+
+        self.assertEqual(len(validated["role_assignments"]), 6)
+        self.assertEqual(validated["assembly_steps"], canonical_house_assembly_steps())
+        self.assertEqual(validated["role_assignments"][4]["observed_label"], "concave")
+
+    def test_model_cannot_declare_house_completion_or_assembly_steps(self):
+        state = _tracked_house_state()
+        plan = _concise_house_plan(state)
+        plan["assembly_status"] = "completed"
+        plan["assembly_steps"] = []
+        errors = validate_against_schema(plan, GROUNDED_HOUSE_PLAN_SCHEMA)
+        paths = {item["path"] for item in errors}
+        self.assertIn("$.assembly_status", paths)
+        self.assertIn("$.assembly_steps", paths)
+
+
+def _tracked_house_state():
+    state = _house_state()
+    state["scene_revision"] = 4
+    state["objects"][4]["label"] = "concave"
+    update_scene_tracks({}, state["objects"], 4)
+    return state
+
+
+def _concise_house_plan(state):
+    roles = (
+        "left_support_lower", "right_support_lower", "left_support_upper",
+        "right_support_upper", "roof", "triangle_top",
+    )
+    bindings = []
+    for role, obj in zip(roles, state["objects"]):
+        bindings.append({
+            "role_id": role, "object_ref": obj["object_ref"],
+            "track_id": obj["track_id"], "confidence": 0.95,
+        })
+    orientations = []
+    for role in ("roof", "triangle_top"):
+        binding = next(item for item in bindings if item["role_id"] == role)
+        orientations.append({**binding, "confidence": 0.9})
+    return {
+        "schema_version": "grounded_house_plan_v1", "scene_revision": 4,
+        "role_bindings": bindings, "orientation_observations": orientations,
+        "reason": "bind current instances", "confidence": 0.9,
+    }
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -73,17 +73,16 @@ def canonical_house_assembly_steps() -> List[dict]:
     return [
         {"step_id": "step_01_left_lower", "role_id": "left_support_lower", "prerequisites": []},
         {"step_id": "step_02_right_lower", "role_id": "right_support_lower", "prerequisites": []},
-        {"step_id": "step_03_left_upper", "role_id": "left_support_upper", "prerequisites": ["step_01_left_lower"]},
-        {"step_id": "step_04_right_upper", "role_id": "right_support_upper", "prerequisites": ["step_02_right_lower"]},
-        {"step_id": "step_05_roof", "role_id": "roof", "prerequisites": ["step_03_left_upper", "step_04_right_upper"]},
-        {"step_id": "step_06_triangle", "role_id": "triangle_top", "prerequisites": ["step_05_roof"]},
+        {"step_id": "step_03_left_upper", "role_id": "left_support_upper", "prerequisites": ["left_support_lower"]},
+        {"step_id": "step_04_right_upper", "role_id": "right_support_upper", "prerequisites": ["right_support_lower"]},
+        {"step_id": "step_05_roof", "role_id": "roof", "prerequisites": ["left_support_upper", "right_support_upper"]},
+        {"step_id": "step_06_triangle", "role_id": "triangle_top", "prerequisites": ["roof"]},
     ]
 
 
 def assembly_prerequisites_by_role() -> Dict[str, List[str]]:
     """Map each role to prerequisite role ids."""
-    step_to_role = {step["step_id"]: step["role_id"] for step in canonical_house_assembly_steps()}
     return {
-        step["role_id"]: [step_to_role[item] for item in step["prerequisites"]]
+        step["role_id"]: list(step["prerequisites"])
         for step in canonical_house_assembly_steps()
     }

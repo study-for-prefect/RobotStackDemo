@@ -246,6 +246,35 @@ python3 tools/workflows/stack_demo_pipeline.py \
   --execute-push-clearing
 ```
 
+## Qwen3 reasoning and policy protocols
+
+All Ollama chat requests are issued by `ollama_policy_client.py`. Qwen3 reasoning
+preserves `message.thinking`; empty or malformed final content is converted by a
+separate no-thinking finalization call. Backend retries and token-budget retries
+finish before `Order Attempt` or `Action Attempt` begins. A failed transport never
+creates a stop action, object reference, fingerprint, geometry check, or MoveIt call.
+
+Task contracts are routed before the VLM call and use separate house and organization
+schemas. Organization prompts contain no house definition. House grounded output is
+the concise `grounded_house_plan_v1`; code resolves role refs, restores observed facts,
+and injects canonical assembly steps. Four-color linear stacks use `stack_binding_v2`
+and an independent OrderFingerprint blacklist.
+
+Ollama diagnostics are stored below `ollama_calls/<logical-call>/`:
+
+```text
+ollama_request.json
+ollama_response.json
+ollama_thinking.txt
+ollama_content.txt
+ollama_diagnostics.json
+```
+
+`model_runtime_diagnostics.json` records load duration, token counts, context budget,
+generation budget, keep-alive, and possible repeated model loading. Real execution
+remains forbidden when workspace bounds are absent or until dry-run and MoveIt
+plan-only have reached the first legal action for every task family.
+
 `--max-vlm-action-attempts` limits same-scene rejected action proposals;
 `--max-vlm-stack-attempts` limits initial semantic-order proposals. Both stop
 fail-safe at their limits. `--push-tool-finger-length-m`,

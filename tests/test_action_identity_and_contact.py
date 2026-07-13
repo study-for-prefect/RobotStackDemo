@@ -100,7 +100,7 @@ class ActionIdentityAndContactTests(unittest.TestCase):
         fingerprint = normalize_action_fingerprint(proposal, state, 12)["fingerprint"]
         original_call = vlm_action.call_vlm_action_policy
         original_validate = vlm_action.validate_vlm_action_decision
-        vlm_action.call_vlm_action_policy = lambda *_args: {"call_status": "parsed", "decision": proposal}
+        vlm_action.call_vlm_action_policy = lambda *_args, **_kwargs: {"call_status": "parsed", "decision": proposal}
         vlm_action.validate_vlm_action_decision = lambda *_args, **_kwargs: self.fail("geometry validation ran")
         try:
             with tempfile.TemporaryDirectory() as output_dir:
@@ -115,6 +115,54 @@ class ActionIdentityAndContactTests(unittest.TestCase):
         self.assertIsNone(selected)
         self.assertEqual(safety["reason"], "duplicate_failed_action")
         self.assertFalse(preflight["run_moveit_preflight"])
+
+    def test_backend_failure_never_reaches_reference_or_fingerprint(self):
+        original_call = vlm_action.call_vlm_action_policy
+        original_resolve = vlm_action.resolve_action_references
+        original_fingerprint = vlm_action.normalize_action_fingerprint
+        vlm_action.call_vlm_action_policy = lambda *_args, **_kwargs: {
+            "call_status": "backend_failed", "error_type": "REQUEST_TIMEOUT", "decision": None,
+        }
+        vlm_action.resolve_action_references = lambda *_args, **_kwargs: self.fail("reference validation ran")
+        vlm_action.normalize_action_fingerprint = lambda *_args, **_kwargs: self.fail("fingerprint generation ran")
+        try:
+            with tempfile.TemporaryDirectory() as output_dir:
+                selected, report, safety, preflight = vlm_action.evaluate_autonomous_vlm_action_attempt(
+                    SimpleNamespace(no_image=True), output_dir, _tracked_state(),
+                    _tracked_state()["objects"][0], [], None, {}, 1, scene_revision=12,
+                )
+        finally:
+            vlm_action.call_vlm_action_policy = original_call
+            vlm_action.resolve_action_references = original_resolve
+            vlm_action.normalize_action_fingerprint = original_fingerprint
+        self.assertIsNone(selected)
+        self.assertIsNone(report["decision"])
+        self.assertTrue(safety["backend_failure"])
+        self.assertTrue(preflight["backend_failure"])
+
+    def test_stop_does_not_require_object_reference(self):
+        stop = {
+            "action_type": "stop", "strategy_id": "safe_stop", "reason": "unsafe",
+            "scene_problem": "unsafe", "predicted_scene_benefit": "none",
+            "risk_assessment": "collision", "confidence": 0.9,
+        }
+        original_call = vlm_action.call_vlm_action_policy
+        original_resolve = vlm_action.resolve_action_references
+        vlm_action.call_vlm_action_policy = lambda *_args, **_kwargs: {"call_status": "parsed", "decision": stop}
+        vlm_action.resolve_action_references = lambda *_args, **_kwargs: self.fail("stop reference validation ran")
+        try:
+            with tempfile.TemporaryDirectory() as output_dir:
+                selected, report, safety, preflight = vlm_action.evaluate_autonomous_vlm_action_attempt(
+                    SimpleNamespace(no_image=True), output_dir, _tracked_state(),
+                    _tracked_state()["objects"][0], [], None, {}, 1, scene_revision=12,
+                )
+        finally:
+            vlm_action.call_vlm_action_policy = original_call
+            vlm_action.resolve_action_references = original_resolve
+        self.assertIsNone(selected)
+        self.assertEqual(report["action_type"], "stop")
+        self.assertEqual(safety["reason"], "policy_requested_stop")
+        self.assertEqual(preflight["control_action"], "stop")
 
     def test_fallback_uses_only_model_generated_untried_candidate(self):
         state = _tracked_state()

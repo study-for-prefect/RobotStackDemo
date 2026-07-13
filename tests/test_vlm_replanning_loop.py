@@ -13,6 +13,14 @@ from tools.workflows.stack_demo import scene as stack_scene
 
 
 class VlmReplanningLoopTests(unittest.TestCase):
+    def test_workspace_is_required_before_vlm_action(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            with self.assertRaisesRegex(RuntimeError, "WORKSPACE_CONFIGURATION_MISSING"):
+                vlm_action_loop.select_autonomous_vlm_action(
+                    SimpleNamespace(max_vlm_action_attempts=1), output_dir,
+                    {"objects": []}, {}, [], None, {}, 1,
+                )
+
     def test_reobserve_propagates_without_replanning(self):
         calls = []
 
@@ -26,7 +34,7 @@ class VlmReplanningLoopTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as output_dir:
                 selected, report, safety, preflight = vlm_action_loop.select_autonomous_vlm_action(
-                    SimpleNamespace(max_vlm_action_attempts=5), output_dir, {}, {}, [], None, {}, 1, scene_revision=8,
+                    SimpleNamespace(max_vlm_action_attempts=5), output_dir, _workspace_state(), {}, [], None, {}, 1, scene_revision=8,
                 )
         finally:
             vlm_action_loop.evaluate_autonomous_vlm_action_attempt = original
@@ -37,29 +45,29 @@ class VlmReplanningLoopTests(unittest.TestCase):
         self.assertEqual(preflight["control_action"], "reobserve")
         self.assertEqual(len(calls), 1)
 
-    def test_stop_propagates_without_replanning(self):
+    def test_premature_stop_is_rejected_then_reobserve_propagates(self):
         calls = []
 
         def fake_evaluate(*_args, **kwargs):
             calls.append(kwargs)
-            report = {"action_type": "stop", "reason": "scene is unsafe"}
-            return None, report, {"accepted": False, "reason": "policy_requested_stop"}, {}
+            action_type = "stop" if len(calls) == 1 else "reobserve"
+            report = {"action_type": action_type, "reason": "scene is unsafe"}
+            return None, report, {"accepted": False, "reason": "policy_requested_{}".format(action_type)}, {}
 
         original = vlm_action_loop.evaluate_autonomous_vlm_action_attempt
         vlm_action_loop.evaluate_autonomous_vlm_action_attempt = fake_evaluate
         try:
             with tempfile.TemporaryDirectory() as output_dir:
                 selected, report, _safety, preflight = vlm_action_loop.select_autonomous_vlm_action(
-                    SimpleNamespace(max_vlm_action_attempts=5), output_dir, {}, {}, [], None, {}, 1, scene_revision=8,
+                    SimpleNamespace(max_vlm_action_attempts=5), output_dir, _workspace_state(), {}, [], None, {}, 1, scene_revision=8,
                 )
         finally:
             vlm_action_loop.evaluate_autonomous_vlm_action_attempt = original
 
         self.assertIsNone(selected)
-        self.assertEqual(report["action_type"], "stop")
-        self.assertNotEqual(report.get("reason"), "no_valid_vlm_action_after_replanning")
-        self.assertEqual(preflight["control_action"], "stop")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(report["action_type"], "reobserve")
+        self.assertEqual(preflight["control_action"], "reobserve")
+        self.assertEqual(len(calls), 2)
 
     def test_push_flow_reobserve_branch_is_reachable(self):
         original_select = push_flow.select_autonomous_vlm_action
@@ -93,11 +101,11 @@ class VlmReplanningLoopTests(unittest.TestCase):
 
         self.assertEqual(selected["status"], "policy_requested_safe_stop")
 
-    def test_stack_semantic_failure_is_fed_back_before_second_order(self):
+    def test_unique_four_color_stack_binding_skips_redundant_vlm_confirmation(self):
         state = _stack_state()
         calls = []
 
-        def fake_call(_args, policy_input):
+        def fake_call(_args, policy_input, **_kwargs):
             calls.append(policy_input)
             order = [0, 1, 3] if len(calls) == 1 else [0, 1, 2, 3]
             return {
@@ -125,8 +133,8 @@ class VlmReplanningLoopTests(unittest.TestCase):
             stack_scene.call_vlm_stack_policy = original
 
         self.assertEqual(decision["full_stack_order"], [0, 1, 2, 3])
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[1]["failure_history"][0]["validation_stage"], "stack_semantic_validation")
+        self.assertEqual(decision["decision_source"], "stack_binding_deterministic_unique_fallback")
+        self.assertEqual(len(calls), 0)
 
     def test_first_hard_failure_is_fed_back_and_second_direction_passes(self):
         calls = []
@@ -153,7 +161,7 @@ class VlmReplanningLoopTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as output_dir:
                 selected, _report, safety, _preflight = vlm_action_loop.select_autonomous_vlm_action(
-                    SimpleNamespace(max_vlm_action_attempts=5), output_dir, {}, {}, [], 4, {}, 1, scene_revision=12,
+                    SimpleNamespace(max_vlm_action_attempts=5), output_dir, _workspace_state(), {}, [], 4, {}, 1, scene_revision=12,
                 )
                 with open(os.path.join(output_dir, "autonomous_action_history.json"), "r", encoding="utf-8") as handle:
                     history = json.load(handle)
@@ -177,7 +185,7 @@ class VlmReplanningLoopTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as output_dir:
                 selected, report, safety, _preflight = vlm_action_loop.select_autonomous_vlm_action(
-                    SimpleNamespace(max_vlm_action_attempts=2), output_dir, {}, {}, [], 4, {}, 1, scene_revision=3,
+                    SimpleNamespace(max_vlm_action_attempts=2), output_dir, _workspace_state(), {}, [], 4, {}, 1, scene_revision=3,
                 )
         finally:
             vlm_action_loop.evaluate_autonomous_vlm_action_attempt = original
@@ -270,6 +278,10 @@ def _push_flow_args(output_dir):
 
 def _flow_scene():
     return {"objects": [{"id": 1, "label": "blue", "geometry_center_m": [0.0, 0.0, 0.02], "dimensions_m": [0.03, 0.03, 0.04]}]}
+
+
+def _workspace_state():
+    return {"table_bounds": {"xmin": -0.3, "xmax": 0.3, "ymin": -0.3, "ymax": 0.3}, "objects": []}
 
 
 def _stack_state():

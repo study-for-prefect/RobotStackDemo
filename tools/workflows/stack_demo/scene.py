@@ -11,6 +11,13 @@ from robot_scene_pipeline.vlm_stack_policy import (
     validate_vlm_stack_decision,
 )
 from robot_scene_pipeline.vlm_replanning import VlmReplanningExhausted
+from robot_scene_pipeline.object_tracking import update_scene_tracks
+from robot_scene_pipeline.stack_binding import (
+    deterministic_unique_stack_binding,
+    missing_stack_colors,
+    order_fingerprint,
+    required_color_order,
+)
 from tools.planning.decision_to_execution import write_json
 from robot_scene_pipeline.stack_state import estimate_stack_state
 from tools.planning.build_geometry_pick_plan import find_object, set_stack_demo_yaw
@@ -71,16 +78,58 @@ def _write_initial_observation_report(args, output_dir, state, decision_error=No
 
 def _call_initial_vlm_stack_decision(args, state, output_dir):
     failure_history = []
+    state["scene_revision"] = int(state.get("scene_revision", 1))
+    _tracking_memory, track_assignment = update_scene_tracks(
+        {}, state.get("objects", []), state["scene_revision"],
+    )
+    write_json(os.path.join(output_dir, "track_assignment.json"), track_assignment)
+    missing_colors = missing_stack_colors(state, args.instruction)
+    if missing_colors:
+        raise RuntimeError("stack_binding_missing_color_candidate: {}".format(missing_colors))
+    deterministic = deterministic_unique_stack_binding(state, args.instruction)
+    if deterministic is not None:
+        write_json(os.path.join(output_dir, "vlm_stack_decision_validated.json"), deterministic)
+        write_json(os.path.join(output_dir, "vlm_stack_decision_history.json"), {
+            "attempts": [],
+            "selected_decision": deterministic,
+            "selection_status": "stack_binding_deterministic_unique_fallback",
+        })
+        return deterministic
+    failed_order_fingerprints = []
     max_attempts = max(1, int(getattr(args, "max_vlm_stack_attempts", 5)))
     for attempt in range(1, max_attempts + 1):
-        policy_input = build_vlm_stack_decision_input(state, args.instruction, failure_history)
-        raw_output = call_vlm_stack_policy(args, policy_input)
+        policy_input = build_vlm_stack_decision_input(
+            state,
+            args.instruction,
+            failure_history,
+            forbidden_order_fingerprints=failed_order_fingerprints,
+        )
+        raw_output = call_vlm_stack_policy(args, policy_input, artifact_dir=output_dir)
         prefix = "vlm_stack_attempt_{:02d}".format(attempt)
         write_json(os.path.join(output_dir, "{}_input.json".format(prefix)), policy_input)
         write_json(os.path.join(output_dir, "{}_output.json".format(prefix)), raw_output)
         if attempt == 1:
             write_json(os.path.join(output_dir, "vlm_stack_decision_input.json"), policy_input)
             write_json(os.path.join(output_dir, "vlm_stack_decision_raw.json"), raw_output)
+        if raw_output.get("call_status") != "parsed" or not isinstance(raw_output.get("decision"), dict):
+            error_type = raw_output.get("error_type") or raw_output.get("call_status") or "UNKNOWN"
+            raise RuntimeError("stack_binding_selection_failed: VLM_BACKEND_FAILED: {}".format(error_type))
+        fingerprint = order_fingerprint(
+            raw_output["decision"], required_color_order(args.instruction),
+        )
+        print("Order Attempt {}/{}\nfingerprint={}".format(attempt, max_attempts, fingerprint), flush=True)
+        if fingerprint in failed_order_fingerprints:
+            feedback = {
+                "validation_stage": "stack_binding_validation",
+                "passed": False,
+                "reason": "duplicate_failed_order",
+                "order_fingerprint": fingerprint,
+                "attempt": attempt,
+            }
+            failure_history.append(feedback)
+            write_json(os.path.join(output_dir, "{}_validation.json".format(prefix)), feedback)
+            print("result=duplicate", flush=True)
+            continue
         try:
             decision = validate_vlm_stack_decision(raw_output, state, args.instruction)
         except Exception as exc:
@@ -90,11 +139,16 @@ def _call_initial_vlm_stack_decision(args, state, output_dir):
                 "errors": [{"type": "stack_proposal_rejected", "message": str(exc)}],
             }
             feedback["attempt"] = attempt
+            feedback["order_fingerprint"] = fingerprint
+            failed_order_fingerprints.append(fingerprint)
             failure_history.append(feedback)
             write_json(os.path.join(output_dir, "{}_validation.json".format(prefix)), feedback)
+            write_json(os.path.join(output_dir, "failed_order_fingerprints.json"), failed_order_fingerprints)
+            print("result=semantic_mismatch", flush=True)
             continue
         validation = {"validation_stage": "stack_semantic_validation", "passed": True, "attempt": attempt}
         write_json(os.path.join(output_dir, "{}_validation.json".format(prefix)), validation)
+        print("result=valid", flush=True)
         write_json(os.path.join(output_dir, "vlm_stack_decision_validated.json"), decision)
         write_json(os.path.join(output_dir, "vlm_stack_decision_history.json"), {
             "attempts": failure_history,
@@ -107,7 +161,7 @@ def _call_initial_vlm_stack_decision(args, state, output_dir):
         "stop_reason": "no_valid_vlm_stack_order_after_replanning",
     })
     raise VlmReplanningExhausted(
-        "No valid VLM stack order after {} attempts.".format(max_attempts),
+        "stack_binding_selection_failed after {} order attempts.".format(max_attempts),
         failure_history,
     )
 

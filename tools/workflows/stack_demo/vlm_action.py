@@ -75,11 +75,46 @@ def evaluate_autonomous_vlm_action_attempt(
         replanning_context=replanning_context,
     )
     raw_output = (
-        {"call_status": "deterministic_vlm_candidate_fallback", "decision": dict(forced_decision)}
+        {"call_status": "parsed", "generation_source": "deterministic_vlm_candidate_fallback", "decision": dict(forced_decision)}
         if forced_decision is not None
-        else call_vlm_action_policy(args, policy_input)
+        else call_vlm_action_policy(args, policy_input, artifact_dir=cycle_dir)
     )
+    if raw_output.get("call_status") != "parsed" or not isinstance(raw_output.get("decision"), dict):
+        safety_report = {
+            "accepted": False,
+            "validation_stage": "vlm_generation",
+            "reason": raw_output.get("error_type") or raw_output.get("call_status") or "VLM_BACKEND_FAILED",
+            "failed_fields": [],
+            "checks": {},
+            "decision": None,
+            "backend_failure": True,
+        }
+        write_vlm_action_artifacts(
+            cycle_dir, policy_input, raw_output,
+            _validated_output(raw_output, None, safety_report), safety_report, attempt_index,
+        )
+        return None, raw_output, safety_report, {
+            "run_moveit_preflight": False,
+            "backend_failure": True,
+            "error_type": raw_output.get("error_type") or raw_output.get("call_status"),
+        }
     raw_decision = raw_output.get("decision") or {}
+    if str(raw_decision.get("action_type") or "").lower() in {"stop", "reobserve"}:
+        action_type = str(raw_decision["action_type"]).lower()
+        safety_report = {
+            "accepted": False,
+            "validation_stage": "policy_control_action",
+            "reason": "policy_requested_{}".format(action_type),
+            "failed_fields": [],
+            "checks": {},
+            "decision": raw_decision,
+        }
+        validated_output = _validated_output(raw_output, None, safety_report)
+        write_vlm_action_artifacts(cycle_dir, policy_input, raw_output, validated_output, safety_report, attempt_index)
+        return None, validated_output, safety_report, {
+            "run_moveit_preflight": False,
+            "control_action": action_type,
+        }
     decision, reference_error = resolve_action_references(raw_decision, current_state, scene_revision)
     if reference_error:
         safety_report = {"accepted": False, "validation_stage": "object_reference_validation", "reason": reference_error["reason"], "failed_fields": [reference_error.get("field", "object_reference")], "checks": {}, "decision": raw_decision}
@@ -301,6 +336,16 @@ def _apply_preflight_result(
 def _validated_output(raw_output: dict, selected: Optional[dict], safety_report: dict) -> dict:
     decision = raw_output.get("decision") or {}
     accepted = bool(safety_report.get("accepted"))
+    if safety_report.get("backend_failure"):
+        return {
+            "schema_version": "vlm_action_decision_validated_v2",
+            "selection_source": "ollama_policy_client",
+            "selection_status": "backend_failed",
+            "action_type": None,
+            "selected_action": None,
+            "reason": safety_report.get("reason"),
+            "safety_report": safety_report,
+        }
     return {
         "schema_version": "vlm_action_decision_validated_v1",
         "selection_source": "vlm_action_policy",

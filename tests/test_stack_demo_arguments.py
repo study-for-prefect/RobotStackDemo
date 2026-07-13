@@ -45,6 +45,16 @@ class StackDemoArgumentsTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     parse_args()
 
+    def test_qwen_reasoning_runtime_defaults_are_explicit(self):
+        with patch("sys.argv", ["stack_demo_pipeline.py"]):
+            args = parse_args()
+        self.assertEqual(args.vlm_think_mode, "auto")
+        self.assertEqual(args.vlm_read_timeout_sec, 1200.0)
+        self.assertEqual(args.vlm_keep_alive, "1h")
+        self.assertEqual(args.vlm_max_backend_retries, 3)
+        self.assertEqual(args.vlm_max_budget_retries, 3)
+        self.assertFalse(args.unload_model_after_task)
+
 
 if __name__ == "__main__":
     unittest.main()

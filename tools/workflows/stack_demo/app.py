@@ -15,6 +15,8 @@ from robot_scene_pipeline.scene_memory import (
 from robot_scene_pipeline.stack_state import verify_stack_growth
 from robot_scene_pipeline.xy_correction import load_xy_correction
 from robot_scene_pipeline.vlm_replanning import advance_scene_revision
+from robot_scene_pipeline.ollama_policy_client import unload_model, warm_model
+from robot_scene_pipeline.task_routing import route_task_type
 from tools.planning.decision_to_execution import write_json
 from tools.workflows.two_stage_visual_pick import build_tcp_error_corrected_plan
 
@@ -129,8 +131,19 @@ def main() -> int:
             raise RuntimeError("tcp_offset_tool_m must contain exactly three values.")
         args.tcp_offset_tool = [float(value) for value in tcp_offset]
 
+    warm_result = warm_model(args, args.output_dir)
+    if warm_result.transport_status != "ok":
+        raise RuntimeError("VLM_BACKEND_FAILED: {}".format(warm_result.error_type or "MODEL_WARMUP_FAILED"))
+
+    if route_task_type(args.instruction) == "stack_blocks":
+        args.legacy_linear_stack = True
+
     if not args.legacy_linear_stack:
-        return run_semantic_task_workflow(args)
+        try:
+            return run_semantic_task_workflow(args)
+        finally:
+            if args.unload_model_after_task:
+                unload_model(args, args.output_dir)
 
     memory = load_memory(args.memory_json, task="stack_blocks")
 
@@ -692,6 +705,8 @@ def main() -> int:
         if os.path.exists(failure_state_path(args)):
             os.remove(failure_state_path(args))
         print("\nStack demo {}: {}".format(summary["execution_status"], args.output_dir))
+        if args.unload_model_after_task:
+            unload_model(args, args.output_dir)
         return 0
     except Exception as exc:
         held_at_failure = runtime.get("held_object_id")
@@ -713,4 +728,6 @@ def main() -> int:
             file=sys.stderr,
             flush=True,
         )
+        if args.unload_model_after_task:
+            unload_model(args, args.output_dir)
         return 1

@@ -14,11 +14,13 @@ from .house_task_definition import (
     canonical_house_goal_spec,
 )
 from .llm_stack_blocks import object_label_contains
+from .house_grounded_adapter import expand_house_grounded_plan
 from .task_schemas import (
     GROUNDED_HOUSE_PLAN_SCHEMA,
     GROUNDED_ORGANIZE_PLAN_SCHEMA,
+    LEGACY_GROUNDED_HOUSE_PLAN_SCHEMA,
     ORIENTATION_OBSERVATION_SCHEMA,
-    TASK_CONTRACT_SCHEMA,
+    TASK_CONTRACT_SCHEMAS,
     validate_against_schema,
 )
 from .vlm_task_policy import TASK_TYPES
@@ -32,14 +34,22 @@ class TaskSemanticValidationError(ValueError):
         self.feedback = feedback
 
 
-def validate_task_contract(contract: dict, semantics_config: dict) -> dict:
+def validate_task_contract(
+    contract: dict, semantics_config: dict, expected_task_type: str = "",
+) -> dict:
     """Validate immutable task meaning without selecting scene object ids."""
     if not isinstance(contract, dict):
         _raise("unknown", [{"type": "contract_not_object"}])
-    schema_errors = validate_against_schema(contract, TASK_CONTRACT_SCHEMA)
     task_type = str(contract.get("task_type") or "")
     if task_type not in TASK_TYPES:
         _raise(task_type or "unknown", [{"type": "unsupported_task_type", "allowed": sorted(TASK_TYPES)}])
+    if expected_task_type and task_type != expected_task_type:
+        _raise(task_type, [{
+            "type": "task_type_instruction_mismatch",
+            "expected": expected_task_type,
+            "actual": task_type,
+        }])
+    schema_errors = validate_against_schema(contract, TASK_CONTRACT_SCHEMAS[task_type])
     if _contains_permanent_object_id(contract.get("goal_spec")):
         _raise(task_type, [{"type": "contract_must_not_bind_detection_object_id"}])
     goal_spec = contract.get("goal_spec")
@@ -67,12 +77,21 @@ def validate_grounded_task_plan(
 ) -> dict:
     """Validate temporary current-scene bindings; never repair VLM choices."""
     task_type = contract["task_type"]
-    if not isinstance(plan, dict) or str(plan.get("task_type")) != task_type:
+    if not isinstance(plan, dict):
         _raise(task_type, [{"type": "grounded_plan_task_type_mismatch"}])
-    schema = GROUNDED_HOUSE_PLAN_SCHEMA if task_type == "build_house" else GROUNDED_ORGANIZE_PLAN_SCHEMA
+    if task_type == "build_house" and plan.get("schema_version") == "grounded_house_plan_v1":
+        schema = GROUNDED_HOUSE_PLAN_SCHEMA
+    elif task_type == "build_house":
+        schema = LEGACY_GROUNDED_HOUSE_PLAN_SCHEMA
+    else:
+        schema = GROUNDED_ORGANIZE_PLAN_SCHEMA
     schema_errors = validate_against_schema(plan, schema)
     if schema_errors:
         _raise(task_type, schema_errors)
+    if task_type == "build_house" and plan.get("schema_version") == "grounded_house_plan_v1":
+        plan = expand_house_grounded_plan(plan, state)
+    elif str(plan.get("task_type")) != task_type:
+        _raise(task_type, [{"type": "grounded_plan_task_type_mismatch"}])
     if int(plan.get("scene_revision", -1)) != int(scene_revision):
         _raise(task_type, [{"type": "stale_scene_revision", "expected": scene_revision, "actual": plan.get("scene_revision")}])
     if task_type == "build_house":
@@ -81,7 +100,11 @@ def validate_grounded_task_plan(
         errors, normalized = _validate_organize_plan(plan, contract, state, semantics_config)
     if errors:
         _raise(task_type, errors)
-    normalized.update({"schema_version": "grounded_task_plan_v1", "task_type": task_type, "scene_revision": int(scene_revision)})
+    normalized.update({
+        "schema_version": "grounded_task_plan_v1", "task_type": task_type,
+        "scene_revision": int(scene_revision),
+        "reason": plan.get("reason"), "confidence": plan.get("confidence"),
+    })
     return normalized
 
 
@@ -115,15 +138,20 @@ def infer_object_shape(obj: dict) -> str:
     """Return the fused/detected task shape with concave checked before rectangle."""
     explicit = str(obj.get("fused_shape") or obj.get("shape") or "").strip().lower()
     if explicit:
-        return explicit
-    label = str(obj.get("label") or "").lower()
-    if "concave" in label and "rectangle" in label:
+        return normalize_semantic_shape(explicit)
+    return normalize_semantic_shape(str(obj.get("label") or ""))
+
+
+def normalize_semantic_shape(label: str) -> str:
+    """Normalize detector/VLM shape spellings to task-semantic names."""
+    value = str(label or "").strip().lower().replace("-", " ").replace("_", " ")
+    if "concave" in value:
         return "concave_rectangle"
-    if "triangle" in label:
+    if "triangle" in value:
         return "triangle"
-    if "rectangle" in label:
+    if "rectangle" in value:
         return "rectangle"
-    if "square" in label:
+    if "square" in value:
         return "square"
     return "unknown"
 
@@ -182,9 +210,9 @@ def _validate_organize_contract(goal: dict, config: dict) -> List[dict]:
     for key, value in defaults.items():
         goal.setdefault(key, value)
     errors = []
-    if goal.get("grouping_key") not in {"color", "shape", "category"}:
+    if goal.get("grouping_key") != "color":
         errors.append({"type": "unsupported_grouping_key"})
-    if goal.get("layout_type") not in {"rows", "columns", "grid"}:
+    if goal.get("layout_type") not in {"rows", "columns", "regions"}:
         errors.append({"type": "unsupported_layout_type"})
     if bool(goal.get("allow_stacking")):
         errors.append({"type": "organize_task_must_not_require_stacking"})
@@ -224,8 +252,7 @@ def _validate_house_plan(plan: dict, contract: dict, state: dict, config: dict) 
             errors.append({"type": "missing_required_role", "role_id": role_id})
     relations = contract["goal_spec"].get("required_relations", [])
     errors.extend(_validate_house_relations(relations, roles))
-    steps = plan.get("assembly_steps", [])
-    errors.extend(_validate_assembly_steps(steps))
+    steps = canonical_house_assembly_steps()
     roof = by_role.get("roof")
     if roof is not None and infer_object_shape(object_map[str(roof["selected_object_id"])]) == "rectangle":
         concave_ids = [obj.get("id") for obj in object_map.values() if infer_object_shape(obj) == "concave_rectangle"]
@@ -311,21 +338,6 @@ def _validate_house_relations(relations: list, roles: dict) -> List[dict]:
     if _has_cycle(support_edges): errors.append({"type": "support_relation_cycle"})
     roof_supports = [edge[0] for edge in support_edges if edge[1] == "roof"]
     if len(set(roof_supports)) < 2: errors.append({"type": "roof_requires_two_distinct_supports"})
-    return errors
-
-
-def _validate_assembly_steps(steps: list) -> List[dict]:
-    by_id = {item.get("step_id"): item for item in steps if isinstance(item, dict)}
-    edges = [(dependency, step_id) for step_id, item in by_id.items() for dependency in item.get("prerequisites", [])]
-    errors = [{"type": "invalid_assembly_dependency", "step_id": step, "missing_prerequisite": dep} for dep, step in edges if dep not in by_id]
-    if _has_cycle(edges): errors.append({"type": "assembly_dependency_cycle"})
-    expected = {item["step_id"]: item for item in canonical_house_assembly_steps()}
-    if set(by_id) != set(expected):
-        errors.append({"type": "house_assembly_steps_must_match_fixed_sequence"})
-    for step_id, expected_step in expected.items():
-        actual = by_id.get(step_id) or {}
-        if actual.get("role_id") != expected_step["role_id"] or set(actual.get("prerequisites", [])) != set(expected_step["prerequisites"]):
-            errors.append({"type": "invalid_fixed_assembly_step", "step_id": step_id})
     return errors
 
 

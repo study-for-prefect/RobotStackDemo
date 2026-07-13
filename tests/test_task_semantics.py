@@ -50,11 +50,10 @@ class TaskSemanticTests(unittest.TestCase):
             validate_grounded_task_plan(_house_plan(), contract, _house_state(), 4, CONFIG)
         self.assertIn("support_relation_cycle", {item["type"] for item in raised.exception.feedback["errors"]})
 
-    def test_roof_step_must_depend_on_both_upper_support_steps(self):
+    def test_model_assembly_steps_are_replaced_by_canonical_steps(self):
         plan = _house_plan(); plan["assembly_steps"][4]["prerequisites"] = ["step_03_left_upper"]
-        with self.assertRaises(TaskSemanticValidationError) as raised:
-            validate_grounded_task_plan(plan, _house_contract(), _house_state(), 4, CONFIG)
-        self.assertIn("invalid_fixed_assembly_step", {item["type"] for item in raised.exception.feedback["errors"]})
+        validated = validate_grounded_task_plan(plan, _house_contract(), _house_state(), 4, CONFIG)
+        self.assertEqual(validated["assembly_steps"][4]["prerequisites"], ["left_support_upper", "right_support_upper"])
 
     def test_roof_without_two_support_contacts_is_not_complete(self):
         from robot_scene_pipeline.orientation_fusion import fuse_house_orientation_observations

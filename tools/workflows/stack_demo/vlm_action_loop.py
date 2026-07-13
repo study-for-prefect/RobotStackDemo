@@ -28,6 +28,8 @@ def select_autonomous_vlm_action(
     scene_revision: int = 1,
 ) -> Tuple[Optional[dict], dict, dict, dict]:
     """Ask the VLM repeatedly until one proposal passes every safety gate."""
+    if current_state.get("table_bounds") is None and current_state.get("workspace_bounds") is None:
+        raise RuntimeError("WORKSPACE_CONFIGURATION_MISSING")
     failure_history = []
     failed_action_ledger = []
     fallback_pool = []
@@ -39,11 +41,6 @@ def select_autonomous_vlm_action(
     write_json(os.path.join(cycle_dir, "role_binding_history.json"), memory.get("role_binding_history", []))
     for attempt in range(1, max_attempts + 1):
         replanning_context = build_replanning_context(failed_action_ledger, attempt, max_attempts)
-        print("Attempt {}/{} forbidden_fingerprints={} required_strategy_change={}".format(
-            attempt, max_attempts,
-            len(replanning_context["hard_constraints"]["forbidden_action_fingerprints"]),
-            replanning_context["hard_constraints"]["required_strategy_change"],
-        ), flush=True)
         artifact_index = (max(1, int(step_index)) - 1) * max_attempts + attempt
         forced_decision = None
         if use_fallback_next:
@@ -68,6 +65,18 @@ def select_autonomous_vlm_action(
             replanning_context=replanning_context,
             forced_decision=forced_decision,
         )
+        if preflight_report.get("backend_failure"):
+            error_type = preflight_report.get("error_type") or "UNKNOWN"
+            if error_type in {"TOKEN_BUDGET_EXHAUSTED", "budget_exhausted"}:
+                raise RuntimeError("TOKEN_BUDGET_EXHAUSTED")
+            if error_type in {"FINALIZATION_FAILED", "finalization_failed"}:
+                raise RuntimeError("FINALIZATION_FAILED")
+            raise RuntimeError("VLM_BACKEND_FAILED: {}".format(error_type))
+        print("Action Attempt {}/{} forbidden_fingerprints={} required_strategy_change={}".format(
+            attempt, max_attempts,
+            len(replanning_context["hard_constraints"]["forbidden_action_fingerprints"]),
+            replanning_context["hard_constraints"]["required_strategy_change"],
+        ), flush=True)
         proposal = (safety_report.get("decision") or action_report) if isinstance(safety_report, dict) else action_report
         for candidate in proposal.get("alternative_actions") or []:
             if isinstance(candidate, dict):
@@ -75,12 +84,9 @@ def select_autonomous_vlm_action(
         control_action_type = str(
             action_report.get("action_type") or proposal.get("action_type") or ""
         ).strip().lower()
-        is_explicit_safe_stop = (
-            control_action_type == "stop"
-            and str(proposal.get("strategy_id") or "").strip().lower() == "safe_stop"
-        )
+        is_explicit_safe_stop = control_action_type == "stop"
         if is_explicit_safe_stop and not replanning_context["hard_constraints"]["safe_stop_allowed"]:
-            safety_report = {"accepted": False, "validation_stage": "graded_replanning", "reason": "safe_stop_not_yet_allowed", "failed_fields": ["action_type"], "checks": {}, "decision": proposal}
+            safety_report = {"accepted": False, "validation_stage": "graded_replanning", "reason": "premature_safe_stop", "failed_fields": ["action_type"], "checks": {}, "decision": proposal}
             control_action_type = ""
         if control_action_type in {"reobserve", "stop"}:
             attempts.append({
@@ -132,7 +138,7 @@ def select_autonomous_vlm_action(
             "duplicate_failed_action", "selected_object_reference_not_found",
             "selected_track_not_visible", "stale_or_invalid_object_ref",
             "legacy_object_id_requires_scene_revision", "strategy_change_required",
-            "safe_stop_not_yet_allowed",
+            "premature_safe_stop",
         }
         print("strategy={} action={} operated={} fingerprint={} result={}".format(
             fingerprint.get("strategy_id"), fingerprint.get("action_type"),

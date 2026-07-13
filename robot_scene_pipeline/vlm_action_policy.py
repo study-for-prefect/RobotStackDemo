@@ -6,9 +6,9 @@ import json
 import math
 from typing import Any, Dict, Iterable, List, Optional
 
-import requests
-
 from .io_utils import image_to_base64, parse_json_or_embedded
+from .ollama_policy_client import call_policy
+from .task_schemas import VLM_ACTION_SCHEMA
 from .vlm_action_validation import mark_moveit_result, validate_vlm_action_decision
 
 
@@ -148,7 +148,7 @@ def build_vlm_action_decision_input(
     }
 
 
-def call_vlm_action_policy(args: Any, policy_input: dict) -> dict:
+def call_vlm_action_policy(args: Any, policy_input: dict, artifact_dir: Optional[str] = None) -> dict:
     """Call the VLM and return raw plus parsed action decision."""
     prompt = build_vlm_action_prompt(policy_input)
     message = {"role": "user", "content": prompt}
@@ -156,59 +156,38 @@ def call_vlm_action_policy(args: Any, policy_input: dict) -> dict:
     if images:
         message["images"] = images
     attempt = int((policy_input.get("replanning_context") or {}).get("attempt", 1))
-    payload = {
-        "model": getattr(args, "model", "qwen2.5vl:7b-q4_K_M"),
-        "messages": [message],
-        "stream": False,
-        "format": "json",
-        "options": {
-            "temperature": 0.0 if attempt <= 1 else float(getattr(args, "replanning_temperature", 0.15)),
-            "top_p": float(getattr(args, "replanning_top_p", 0.85)),
-            "num_predict": min(512, int(getattr(args, "num_predict", 512))),
-        },
+    result = call_policy(
+        args,
+        "action_proposal" if attempt <= 1 else "action_replan",
+        [message],
+        VLM_ACTION_SCHEMA,
+        artifact_dir=artifact_dir,
+        reasoning_attempt=attempt,
+        temperature=0.0 if attempt <= 1 else float(getattr(args, "replanning_temperature", 0.15)),
+        top_p=float(getattr(args, "replanning_top_p", 0.85)),
+    )
+    decision = None
+    error = result.error_message
+    if result.parsed_decision is not None:
+        try:
+            decision = parse_vlm_action_decision_text(json.dumps(result.parsed_decision, ensure_ascii=False))
+        except (TypeError, ValueError) as exc:
+            error = str(exc)
+    error_type = result.error_type
+    call_status = "parsed" if decision is not None else result.generation_status
+    if result.parsed_decision is not None and decision is None:
+        error_type = "DECISION_PROTOCOL_INVALID"
+        call_status = "generation_failed"
+    return {
+        "schema_version": "vlm_action_decision_raw_v2",
+        "call_status": call_status,
+        "raw_content": result.content,
+        "thinking": result.thinking,
+        "error_type": error_type,
+        "error": error,
+        "diagnostics": result.to_dict(),
+        "decision": decision,
     }
-    try:
-        response = requests.post(
-            getattr(args, "ollama_url", "http://127.0.0.1:11434/api/chat"),
-            json=payload,
-            timeout=float(getattr(args, "timeout", 600)),
-        )
-        response.raise_for_status()
-        raw_content = response.json().get("message", {}).get("content", "")
-        decision = parse_vlm_action_decision_text(raw_content)
-        return {
-            "schema_version": "vlm_action_decision_raw_v1",
-            "call_status": "parsed",
-            "raw_content": raw_content,
-            "decision": decision,
-        }
-    except Exception as exc:
-        return {
-            "schema_version": "vlm_action_decision_raw_v1",
-            "call_status": "fail_safe_stop",
-            "raw_content": locals().get("raw_content", ""),
-            "error": str(exc),
-            "decision": {
-                "scene_problem": "VLM response could not be parsed or obtained.",
-                "action_type": "stop",
-                "object_id": None,
-                "object_label": None,
-                "object_center_base_m": None,
-                "target_object_id": None,
-                "target_object_label": None,
-                "target_object_center_base_m": None,
-                "contact_side": None,
-                "direction_base": None,
-                "distance_m": None,
-                "gripper_yaw_rad": None,
-                "safe_place_center_base_m": None,
-                "predicted_scene_benefit": "No motion; preserve the current scene fail-safe.",
-                "risk_assessment": str(exc),
-                "reason": "vlm_json_or_call_failed: {}".format(exc),
-                "confidence": 0.0,
-                "raw_decision": None,
-            },
-        }
 
 
 def build_vlm_action_prompt(policy_input: dict) -> str:

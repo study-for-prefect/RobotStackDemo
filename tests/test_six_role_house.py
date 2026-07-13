@@ -19,6 +19,7 @@ from robot_scene_pipeline.task_semantic_validation import (
     validate_task_contract,
 )
 from robot_scene_pipeline.task_schemas import GROUNDED_HOUSE_PLAN_SCHEMA
+from robot_scene_pipeline.ollama_policy_client import PolicyCallResult
 from robot_scene_pipeline.vlm_task_policy import _task_prompt, build_task_contract_input, call_vlm_task_policy
 from tools.workflows.stack_demo.task_execution import (
     execute_pick_place_and_reobserve,
@@ -58,14 +59,17 @@ class SixRoleContractTests(unittest.TestCase):
         self.assertGreaterEqual(prompt.count("wall、door"), 1)
 
     def test_ollama_receives_same_grounded_house_json_schema(self):
-        response = Mock(); response.raise_for_status.return_value = None; response.json.return_value = {"message": {"content": "{}"}}
         policy_input = {"task_contract": {"task_type": "build_house"}}
         args = Mock(no_image=True, ollama_url="http://local", model="test", num_predict=100, timeout=1)
-        with patch("robot_scene_pipeline.vlm_task_policy.requests.post", return_value=response) as post:
+        result = PolicyCallResult(
+            transport_status="ok", generation_status="parsed", policy_kind="grounded_task_plan",
+            model="test", content="{}", parsed_decision={}, schema_valid=True,
+        )
+        with patch("robot_scene_pipeline.vlm_task_policy.call_policy", return_value=result) as call:
             call_vlm_task_policy(args, policy_input, "grounded_task_plan")
-        self.assertEqual(post.call_args.kwargs["json"]["format"], GROUNDED_HOUSE_PLAN_SCHEMA)
-        self.assertEqual(post.call_args.kwargs["json"]["messages"][0]["role"], "system")
-        self.assertIn("triangle_top", post.call_args.kwargs["json"]["messages"][0]["content"])
+        self.assertEqual(call.call_args.args[3], GROUNDED_HOUSE_PLAN_SCHEMA)
+        self.assertEqual(call.call_args.args[2][0]["role"], "system")
+        self.assertIn("triangle_top", call.call_args.args[2][0]["content"])
 
 
 class GroundedHouseBindingTests(unittest.TestCase):

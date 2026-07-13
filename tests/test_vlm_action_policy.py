@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 
 from robot_scene_pipeline import vlm_action_policy
+from robot_scene_pipeline.ollama_policy_client import PolicyCallResult
 
 
 class _FakeResponse:
@@ -196,20 +197,25 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertIsNone(selected)
         self.assertIn("safe_place_avoids_visible_objects", safety["failed_fields"])
 
-    def test_illegal_json_fail_safe_stops(self):
-        original_post = vlm_action_policy.requests.post
+    def test_illegal_json_is_generation_failure_not_stop(self):
+        failure = PolicyCallResult(
+            transport_status="ok", generation_status="finalization_failed",
+            policy_kind="action_proposal", model="test",
+            error_type="FINALIZATION_FAILED", error_message="not json",
+        )
+        original_call = vlm_action_policy.call_policy
         try:
-            vlm_action_policy.requests.post = lambda *_args, **_kwargs: _FakeResponse("not json")
+            vlm_action_policy.call_policy = lambda *_args, **_kwargs: failure
             raw = vlm_action_policy.call_vlm_action_policy(
                 SimpleNamespace(model="test", ollama_url="http://test", timeout=1, num_predict=64, no_image=True),
                 {"objects": [], "target_object": {}},
             )
         finally:
-            vlm_action_policy.requests.post = original_post
+            vlm_action_policy.call_policy = original_call
 
-        self.assertEqual(raw["call_status"], "fail_safe_stop")
-        self.assertEqual(raw["decision"]["action_type"], "stop")
-        self.assertIn("vlm_json_or_call_failed", raw["decision"]["reason"])
+        self.assertEqual(raw["call_status"], "finalization_failed")
+        self.assertIsNone(raw["decision"])
+        self.assertEqual(raw["error_type"], "FINALIZATION_FAILED")
 
     def test_autonomous_action_parser_requires_problem_and_benefit(self):
         with self.assertRaises(ValueError):

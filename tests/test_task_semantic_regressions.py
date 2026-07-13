@@ -246,7 +246,7 @@ class DynamicProtectionAndSafetyTests(unittest.TestCase):
             {**adapt_task_action_to_legacy_action(proposal), "moveit_feasible": True},
         ]
         with tempfile.TemporaryDirectory() as output_dir:
-            with patch("tools.workflows.stack_demo.task_workflow.call_vlm_task_policy", side_effect=[{"decision": proposal}, {"decision": second_proposal}]), patch(
+            with patch("tools.workflows.stack_demo.task_workflow.call_vlm_task_policy", side_effect=[{"call_status": "parsed", "decision": proposal}, {"call_status": "parsed", "decision": second_proposal}]), patch(
                 "tools.workflows.stack_demo.task_workflow._preflight_task_action", side_effect=preflight_results,
             ) as preflight:
                 action, _report = _select_task_action(

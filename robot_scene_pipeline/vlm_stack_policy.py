@@ -6,10 +6,10 @@ import json
 import math
 from typing import Any, Dict, Iterable, List, Optional
 
-import requests
-
-from .io_utils import image_to_base64, parse_json_or_embedded
+from .io_utils import image_to_base64
 from .llm_stack_blocks import color_mentions, object_label_contains
+from .ollama_policy_client import call_policy
+from .stack_binding import STACK_BINDING_SCHEMA, required_color_order, validate_stack_binding
 from .vlm_replanning import StackSemanticValidationError, stack_feedback
 
 
@@ -18,7 +18,9 @@ ObjectDict = Dict[str, Any]
 
 def compact_stack_object(obj: ObjectDict) -> ObjectDict:
     return {
-        "id": obj.get("id"),
+        "object_ref": obj.get("object_ref"),
+        "track_id": obj.get("track_id"),
+        "detector_object_id": obj.get("id"),
         "label": obj.get("label"),
         "confidence": obj.get("confidence"),
         "bbox_xyxy_px": obj.get("bbox_xyxy_px"),
@@ -37,6 +39,7 @@ def build_vlm_stack_decision_input(
     state: dict,
     instruction: str,
     failure_history: Optional[List[dict]] = None,
+    forbidden_order_fingerprints: Optional[List[str]] = None,
 ) -> dict:
     objects = [
         obj for obj in state.get("objects", [])
@@ -47,6 +50,8 @@ def build_vlm_stack_decision_input(
     return {
         "schema_version": "vlm_stack_decision_input_v1",
         "instruction": instruction,
+        "scene_revision": int(state.get("scene_revision", 1)),
+        "required_color_order": required_color_order(instruction),
         "scene_rgb": state.get("snapshot_image"),
         "minimal_overlay": state.get("annotated_image"),
         "base_frame": state.get("base_frame", "base_link"),
@@ -58,59 +63,39 @@ def build_vlm_stack_decision_input(
             "object_ids_unique": not _duplicate_object_ids(objects),
             "duplicate_object_ids": _duplicate_object_ids(objects),
             "same_label_instance_groups": _label_instance_groups(objects),
-            "same_label_rule": "If several objects share a label/color, choose by object id, bbox, and base_link center; never by color alone.",
+            "same_label_rule": "If several objects share a color, choose by object_ref, track_id, bbox, and base_link center.",
         },
-        "output_schema": {
-            "full_stack_order": "the only authoritative list[int], bottom to top; first id is the base",
-            "object_bindings": "list of selected id + exact observed label + base_link center",
-            "structure_plan": "object",
-            "reason": "string",
-            "confidence": "0.0..1.0",
-        },
+        "output_schema": STACK_BINDING_SCHEMA,
         "policy_role_split": {
             "vlm": "structure_and_stack_order_decision",
             "code": "id_geometry_validation_and_execution",
         },
         "failure_history": list(failure_history or []),
+        "forbidden_order_fingerprints": list(forbidden_order_fingerprints or []),
     }
 
 
-def call_vlm_stack_policy(args: Any, policy_input: dict) -> dict:
+def call_vlm_stack_policy(args: Any, policy_input: dict, artifact_dir: Optional[str] = None) -> dict:
     prompt = build_vlm_stack_prompt(policy_input)
     message = {"role": "user", "content": prompt}
     images = _image_payloads(policy_input, include_images=not bool(getattr(args, "no_image", False)))
     if images:
         message["images"] = images
-    payload = {
-        "model": getattr(args, "model", "qwen2.5vl:7b-q4_K_M"),
-        "messages": [message],
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.0, "num_predict": min(1024, int(getattr(args, "num_predict", 1024)))},
+    result = call_policy(
+        args, "stack_order", [message], STACK_BINDING_SCHEMA,
+        artifact_dir=artifact_dir,
+        reasoning_attempt=len(policy_input.get("failure_history") or []) + 1,
+    )
+    return {
+        "schema_version": "vlm_stack_binding_raw_v2",
+        "call_status": "parsed" if result.parsed_decision is not None else result.generation_status,
+        "raw_content": result.content,
+        "thinking": result.thinking,
+        "error_type": result.error_type,
+        "error": result.error_message,
+        "diagnostics": result.to_dict(),
+        "decision": result.parsed_decision,
     }
-    try:
-        response = requests.post(
-            getattr(args, "ollama_url", "http://127.0.0.1:11434/api/chat"),
-            json=payload,
-            timeout=float(getattr(args, "timeout", 600)),
-        )
-        response.raise_for_status()
-        raw_content = response.json().get("message", {}).get("content", "")
-        decision = parse_json_or_embedded(raw_content)
-        return {
-            "schema_version": "vlm_stack_decision_raw_v1",
-            "call_status": "parsed",
-            "raw_content": raw_content,
-            "decision": decision,
-        }
-    except Exception as exc:
-        return {
-            "schema_version": "vlm_stack_decision_raw_v1",
-            "call_status": "fail_safe_stop",
-            "raw_content": locals().get("raw_content", ""),
-            "error": str(exc),
-            "decision": None,
-        }
 
 
 def validate_vlm_stack_decision(raw_output: dict, state: dict, instruction: str = "") -> dict:
@@ -120,6 +105,8 @@ def validate_vlm_stack_decision(raw_output: dict, state: dict, instruction: str 
     decision = raw_output.get("decision")
     if not isinstance(decision, dict):
         raise ValueError("VLM stack decision must be a JSON object.")
+    if decision.get("schema_version") == "stack_binding_v2":
+        return validate_stack_binding(decision, state, instruction)
     if decision.get("task_type") not in ("stack_blocks", "structure_plan"):
         raise ValueError("VLM stack decision task_type must be stack_blocks.")
     duplicate_ids = _duplicate_object_ids(state.get("objects", []))
@@ -176,22 +163,21 @@ def build_vlm_stack_prompt(policy_input: dict) -> str:
     text_input = {key: value for key, value in policy_input.items() if key not in ("scene_rgb", "minimal_overlay")}
     return (
         "你是 UR5 桌面积木堆叠任务的 VLM 结构决策模块。\n"
-        "你必须根据用户指令、快照图和检测后的精简 JSON 决定底座和堆叠顺序。\n"
-        "只能选择 objects 中已有的 object id；不要编造物体。不要输出相机内参、关节角、轨迹、速度或 ROS 命令。\n"
-        "只输出一个权威顺序 full_stack_order；它是从底到顶的完整顺序，第一个 id 自动成为底座。\n"
-        "禁止另外输出 base_object_id 或 stack_order，代码会从 full_stack_order 自动派生。\n\n"
-        "你负责理解用户任务语义并保证 JSON 顺序与目标一致；代码只检查 JSON 结构、物体 id 和几何是否可执行。\n\n"
-        "如果同一种颜色/label 有多个实例，必须用编号图、object id、bbox 和 base_link 坐标区分；不要只按颜色猜。\n\n"
-        "先为 full_stack_order 中每个 id 输出 object_bindings，并从 objects 原样复制 observed_label 和 "
-        "geometry_center_base_m；任何 id/label/中心不一致都会停止。\n\n"
+        "你必须为红、绿、蓝、黄四个固定颜色槽位选择当前场景实例。\n"
+        "只能使用 objects 中的 object_ref 和 track_id，不得输出裸 object id。\n"
+        "颜色顺序由 required_color_order 固定；若同色有多个实例，由你结合图像和几何自主选择。\n"
+        "禁止输出 forbidden_order_fingerprints 中相同的四 track 组合。\n"
         "只输出严格 JSON：\n"
         "{\n"
-        '  "task_type": "stack_blocks",\n'
-        '  "structure_plan": {"structure_type": "tower", "roles": [], "assembly_steps": [], "limitations": []},\n'
-        '  "full_stack_order": [0, 1, 2],\n'
-        '  "object_bindings": [\n'
-        '    {"object_id": 0, "observed_label": "exact detector label", "geometry_center_base_m": [0.0, 0.0, 0.0]}\n'
-        '  ],\n'
+        '  "schema_version": "stack_binding_v2",\n'
+        '  "structure": "tower",\n'
+        '  "strategy": "vertical_stack",\n'
+        '  "selected_by_color": {\n'
+        '    "red": {"object_ref": "scene_1:obj_1", "track_id": "track_red_01"},\n'
+        '    "green": {"object_ref": "scene_1:obj_2", "track_id": "track_green_01"},\n'
+        '    "blue": {"object_ref": "scene_1:obj_0", "track_id": "track_blue_01"},\n'
+        '    "yellow": {"object_ref": "scene_1:obj_4", "track_id": "track_yellow_01"}\n'
+        '  },\n'
         '  "reason": "...",\n'
         '  "confidence": 0.0\n'
         "}\n\n"

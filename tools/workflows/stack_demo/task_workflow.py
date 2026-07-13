@@ -16,6 +16,7 @@ from robot_scene_pipeline.task_semantic_validation import validate_grounded_task
 from robot_scene_pipeline.vlm_replanning import action_validation_feedback, advance_scene_revision
 from robot_scene_pipeline.action_fingerprint import build_replanning_context, ledger_entry, normalize_action_fingerprint
 from robot_scene_pipeline.object_tracking import resolve_action_references
+from robot_scene_pipeline.task_routing import route_task_type
 from robot_scene_pipeline.vlm_task_policy import build_grounded_task_plan_input, build_task_action_input, build_task_contract_input, call_vlm_task_policy
 from robot_scene_pipeline.scene_memory import default_memory, save_memory, update_from_detections
 from robot_scene_pipeline.vlm_action_validation import validate_vlm_action_decision
@@ -133,20 +134,37 @@ def run_semantic_task_workflow(args: Any) -> int:
 
 
 def _obtain_contract(args: Any, state: dict, config: dict) -> dict:
+    expected_task_type = route_task_type(args.instruction)
+    print('Task route:\ninstruction="{}"\nexpected_task_type={}\nschema={}'.format(
+        args.instruction,
+        expected_task_type,
+        "BUILD_HOUSE_CONTRACT_SCHEMA" if expected_task_type == "build_house" else "ORGANIZE_BLOCKS_CONTRACT_SCHEMA",
+    ), flush=True)
+    if expected_task_type == "stack_blocks":
+        raise RuntimeError("STACK_TASK_REQUIRES_LINEAR_STACK_WORKFLOW")
     if getattr(args, "task_contract_json", ""):
-        return validate_task_contract(load_json(args.task_contract_json), config)
+        return validate_task_contract(
+            load_json(args.task_contract_json), config,
+            expected_task_type=expected_task_type,
+        )
     history: List[dict] = []
     for attempt in range(1, max(1, int(getattr(args, "max_vlm_task_plan_attempts", 5))) + 1):
-        policy_input = build_task_contract_input(state, args.instruction, config)
+        policy_input = build_task_contract_input(
+            state, args.instruction, config,
+            expected_task_type=expected_task_type,
+        )
         policy_input["failure_history"] = history
-        raw = call_vlm_task_policy(args, policy_input, "task_contract")
+        raw = call_vlm_task_policy(args, policy_input, "task_contract", artifact_dir=args.output_dir)
         prefix = "task_contract_attempt_{:02d}".format(attempt)
         write_json(os.path.join(args.output_dir, "{}_input.json".format(prefix)), policy_input)
         write_json(os.path.join(args.output_dir, "{}_raw.json".format(prefix)), raw)
+        if raw.get("call_status") != "parsed":
+            _raise_policy_generation_failure(raw)
         try:
-            if raw.get("call_status") != "parsed":
-                raise RuntimeError(raw.get("error") or "task contract VLM call failed")
-            contract = validate_task_contract(raw.get("decision"), config)
+            contract = validate_task_contract(
+                raw.get("decision"), config,
+                expected_task_type=expected_task_type,
+            )
         except Exception as exc:
             feedback = getattr(exc, "feedback", None) or {"validation_stage": "task_semantic_validation", "passed": False, "errors": [{"type": "task_contract_invalid", "message": str(exc)}]}
             history.append(feedback); write_json(os.path.join(args.output_dir, "{}_validation.json".format(prefix)), feedback); continue
@@ -171,10 +189,12 @@ def _obtain_grounded_plan(
             state, contract, revision, config, goal_progress=goal_progress,
             previous_plan=previous_plan, failure_history=history,
         )
-        raw = call_vlm_task_policy(args, policy_input, "grounded_task_plan")
+        raw = call_vlm_task_policy(args, policy_input, "grounded_task_plan", artifact_dir=cycle_dir)
         prefix = "grounded_task_plan_attempt_{:02d}".format(attempt)
         write_json(os.path.join(cycle_dir, "{}_input.json".format(prefix)), policy_input)
         write_json(os.path.join(cycle_dir, "{}_raw.json".format(prefix)), raw)
+        if raw.get("call_status") != "parsed":
+            _raise_policy_generation_failure(raw)
         try:
             plan = validate_grounded_task_plan(raw.get("decision"), contract, state, revision, config)
             plan = _fuse_plan_orientation(plan, state, contract, config, previous_plan)
@@ -203,6 +223,8 @@ def _select_task_action(
     args: Any, state: dict, contract: dict, plan: dict, progress: dict,
     protection: dict, semantics_config: dict, cycle_dir: str, step_index: int,
 ) -> Tuple[Optional[dict], dict]:
+    if state.get("table_bounds") is None and state.get("workspace_bounds") is None:
+        raise RuntimeError("WORKSPACE_CONFIGURATION_MISSING")
     history = []
     ledger = []
     max_attempts = max(1, int(getattr(args, "max_vlm_action_attempts", 5)))
@@ -212,9 +234,12 @@ def _select_task_action(
             state, contract, plan, progress, state["scene_revision"], history,
             replanning_context=replanning,
         )
-        raw = call_vlm_task_policy(args, policy_input, "task_action")
+        raw = call_vlm_task_policy(args, policy_input, "task_action", artifact_dir=cycle_dir)
+        if raw.get("call_status") != "parsed" or not isinstance(raw.get("decision"), dict):
+            _raise_policy_generation_failure(raw)
         proposal = raw.get("decision") or {}
         action_type = str(proposal.get("action_type") or "").lower()
+        print("Action Attempt {}/{}".format(attempt, max_attempts), flush=True)
         preflight_state = state
         fingerprint = None
         try:
@@ -353,6 +378,15 @@ def _reobserve(args: Any, cycle_dir: str, runtime: dict) -> dict:
 def _load_semantics_config(args: Any) -> dict:
     path = getattr(args, "task_semantics_config", "config/task_semantics.json")
     with open(path, "r", encoding="utf-8") as handle: return json.load(handle)
+
+
+def _raise_policy_generation_failure(raw: dict) -> None:
+    error_type = str(raw.get("error_type") or raw.get("call_status") or "UNKNOWN")
+    if error_type in {"TOKEN_BUDGET_EXHAUSTED", "budget_exhausted"}:
+        raise RuntimeError("TOKEN_BUDGET_EXHAUSTED")
+    if error_type in {"FINALIZATION_FAILED", "finalization_failed"}:
+        raise RuntimeError("FINALIZATION_FAILED")
+    raise RuntimeError("VLM_BACKEND_FAILED: {}".format(error_type))
 
 
 def _update_role_binding_history(memory: dict, assignment: Any, scene_revision: int) -> None:

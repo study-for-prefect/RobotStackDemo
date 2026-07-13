@@ -167,6 +167,49 @@ VLM 决策日志：
 - `track_assignment.json` / `track_history.json` / `role_binding_history.json`
 - `gripper_collision_profile.json` / `controlled_contact_evaluation.json`
 
+### Ollama Thinking 与调用重试
+
+所有 stack order、任务合同、grounded plan、动作和场景分析调用统一经过
+`robot_scene_pipeline/ollama_policy_client.py`。Qwen3 在默认
+`--vlm-think-mode auto` 下发送 `think=true`；Qwen2.5-VL 不发送该字段，但两者响应都兼容
+`message.thinking` 存在或缺失。
+
+如果 Qwen3 已生成 thinking、但 content 为空或不是合法 Schema JSON，系统会保留原消息历史并执行
+`think=false` 的 Finalization Call。`done_reason=length` 只扩大生成预算并重新进行 reasoning，
+不会进入任务或动作失败账本。HTTP、超时、非法信封和空消息属于 Backend Retry，也不会被伪造成 stop。
+
+四种计数器相互独立：
+
+- `Backend Attempt`：连接、HTTP、超时、空模型消息；
+- `Budget Retry`：生成长度不足或 JSON 截断；
+- `Order Attempt`：四颜色实例绑定语义错误或重复绑定；
+- `Action Attempt`：取得合法动作 JSON 后的引用、语义、几何、碰撞和 MoveIt 重规划。
+
+相关参数：`--vlm-think-mode`、`--vlm-num-ctx`、`--vlm-num-predict`、
+`--vlm-finalizer-num-predict`、`--vlm-read-timeout-sec`、`--vlm-keep-alive`、
+`--vlm-max-backend-retries`、`--vlm-max-budget-retries` 和 `--unload-model-after-task`。
+每个调用在 `ollama_calls/` 下保存完整 request、response、thinking、content 和 diagnostics；
+任务根目录保存 `model_runtime_diagnostics.json`。
+
+### 任务路由与当前协议
+
+代码只根据指令确定任务家族：整理/分类指令选择独立的
+`ORGANIZE_BLOCKS_CONTRACT_SCHEMA`，搭房子选择 `BUILD_HOUSE_CONTRACT_SCHEMA`，明确堆叠指令进入
+stack workflow。整理任务提示词不携带任何房屋本体或六角色定义。
+
+房屋 grounded plan 的 VLM 输出只包含当前 `role_bindings`、`orientation_observations`、reason 和
+confidence。label、中心和尺寸由代码根据 `object_ref/track_id` 回填；固定六步
+`canonical_house_assembly_steps()` 由代码注入，模型不能声明 placed/completed。
+`concave`、`concave rectangle` 和 `concave_rectangle` 均归一为 `concave_rectangle`。
+
+明确的红绿蓝黄堆叠使用 `stack_binding_v2`：颜色槽位由指令确定，同色实例仍由 VLM 选择。
+OrderFingerprint 是四个颜色对应的 track 组合。每色只有一个合法实例时使用
+`stack_binding_deterministic_unique_fallback`；存在多个组合而模型未选择时返回
+`stack_binding_selection_failed`，不会随机绑定。
+
+任何动作规划前都必须存在代码提供的 `table_bounds` 或 `workspace_bounds`。缺失时直接返回
+`WORKSPACE_CONFIGURATION_MISSING`，不会归类为 VLM 失败，也不会让模型猜测边界。
+
 旧的代码侧动作发现/评分路径不再进入堆叠 workflow；初始堆叠 JSON 也不再由颜色规则
 解析器覆盖或修复。代码只检查 schema、引用 id 和执行所需几何，任务理解由 VLM 负责。
 
