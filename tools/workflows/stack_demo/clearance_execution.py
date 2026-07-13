@@ -11,7 +11,7 @@ from robot_scene_pipeline.scene_memory import mark_pushed, save_memory
 from robot_scene_pipeline.tool_swept_volume import check_tool_swept_volume
 from tools.planning.decision_to_execution import write_json
 
-from .commands import open_gripper_command, push_clear_command, push_preflight_command, run
+from .commands import open_gripper_command, plan_only_command, push_clear_command, push_preflight_command, run
 from .observation_scope import observe_empty_with_scope
 from .pick import build_offline_pick_plan, pick_command, place_command, plan_envelope
 from .push_context import observed_push_delta_m, protected_stack_templates
@@ -126,6 +126,11 @@ def preflight_nudge_action(
         output["preflight_failure_stage"] = "tool_swept_volume"
         output["moveit_preflight_error"] = "tool_swept_volume_rejected: {}".format(tool_report.get("reason"))
         return output
+    if not getattr(args, "execute", False) and not getattr(args, "moveit_plan_only", False):
+        output["moveit_feasible"] = False
+        output["executable_safe"] = False
+        output["moveit_preflight_skipped"] = "execution_disabled_without_moveit_plan_only"
+        return output
     try:
         run(push_preflight_command(args, plan_path))
     except Exception as exc:
@@ -147,21 +152,6 @@ def _recover_open_gripper(args: Any, cycle_dir: str, reason: str) -> dict:
         report["error"] = str(exc)
     write_json(os.path.join(cycle_dir, "gripper_open_recovery.json"), report)
     return report
-
-
-def _remove_command_flag(command: list, flag: str, value_count: int = 0) -> None:
-    while flag in command:
-        index = command.index(flag)
-        del command[index:index + 1 + int(value_count)]
-
-
-def _plan_only_motion_command(command: list) -> list:
-    output = list(command)
-    _remove_command_flag(output, "--execute")
-    _remove_command_flag(output, "--enable-gripper")
-    _remove_command_flag(output, "--skip-gripper-init")
-    _remove_command_flag(output, "--gripper-port", value_count=1)
-    return output
 
 
 def _build_pick_away_place_plan(current_state: dict, obstacle: dict, selected_action: dict, args: Any) -> dict:
@@ -268,9 +258,14 @@ def preflight_pick_away_action(
     output = dict(selected_action)
     output["pick_plan_path"] = pick_plan_path
     output["place_plan_path"] = place_plan_path
+    if not getattr(args, "execute", False) and not getattr(args, "moveit_plan_only", False):
+        output["moveit_feasible"] = False
+        output["executable_safe"] = False
+        output["moveit_preflight_skipped"] = "execution_disabled_without_moveit_plan_only"
+        return output
     try:
-        run(_plan_only_motion_command(pick_command(args, pick_plan_path)))
-        run(_plan_only_motion_command(place_command(args, place_plan_path)))
+        run(plan_only_command(pick_command(args, pick_plan_path)))
+        run(plan_only_command(place_command(args, place_plan_path)))
     except Exception as exc:
         output["moveit_feasible"] = False
         output["executable_safe"] = False

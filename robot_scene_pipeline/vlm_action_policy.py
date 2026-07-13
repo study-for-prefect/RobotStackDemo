@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .io_utils import image_to_base64, parse_json_or_embedded
 from .ollama_policy_client import call_policy
-from .task_schemas import VLM_ACTION_SCHEMA
+from .task_schemas import VLM_ACTION_OUTPUT_SCHEMA
 from .vlm_action_validation import mark_moveit_result, validate_vlm_action_decision
 
 
@@ -160,7 +160,7 @@ def call_vlm_action_policy(args: Any, policy_input: dict, artifact_dir: Optional
         args,
         "action_proposal" if attempt <= 1 else "action_replan",
         [message],
-        VLM_ACTION_SCHEMA,
+        VLM_ACTION_OUTPUT_SCHEMA,
         artifact_dir=artifact_dir,
         reasoning_attempt=attempt,
         temperature=0.0 if attempt <= 1 else float(getattr(args, "replanning_temperature", 0.15)),
@@ -195,8 +195,10 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         key: value for key, value in policy_input.items()
         if key not in ("scene_rgb", "depth_visualization", "minimal_overlay")
     }
+    recovery_directive = _recovery_directive(policy_input)
     return (
         "你是 UR5 桌面积木任务的自主视觉动作决策模块。\n"
+        + recovery_directive +
         "你直接根据原始快照、带编号图、base_link 场景几何和任务目标判断当前问题并提出下一步动作。\n"
         "不要输出关节角、轨迹、速度、ROS 控制命令或相机内参。\n\n"
         "必须独立完成五项判断：当前问题、抓还是推、操作哪个物体、推的方向和距离、操作后的场景收益。\n"
@@ -214,6 +216,8 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         "同颜色/label 多实例必须用track_id、object_ref、bbox和base_link中心区分，禁止只按颜色猜。\n"
         "对于可执行动作，object_label/object_center_base_m 和 target_object_label/target_object_center_base_m "
         "必须从 objects 对应 reference 原样复制；reference、label、中心不一致会被拒绝。\n"
+        "与 action_type 无关的运动字段必须为 null：pick 的 contact_side、direction_base、distance_m、"
+        "gripper_yaw_rad、safe_place_center_base_m 全部为 null；不要用虚构参数填满 Schema。\n"
         "nudge 必须自主给出 contact_side、direction_base、distance_m 和 gripper_yaw_rad。"
         "接触侧应位于 direction_base 反方向，并垂直接近；必须根据 manipulator_geometry "
         "确认该接触侧和工具扫掠走廊没有其他物体。不要把推动当成精确堆叠手段。\n"
@@ -248,6 +252,30 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         "}\n\n"
         "输入：\n"
         + json.dumps(text_input, ensure_ascii=False, indent=2)
+    )
+
+
+def _recovery_directive(policy_input: dict) -> str:
+    """Put the latest code-observed blockage before the long scene prompt."""
+    history = policy_input.get("failure_history") or []
+    if not history:
+        return ""
+    latest = history[-1] if isinstance(history[-1], dict) else {}
+    grasp_check = next((
+        item for item in latest.get("failed_checks", [])
+        if isinstance(item, dict) and item.get("type") == "selected_object_grasp_feasible"
+    ), None)
+    if grasp_check and grasp_check.get("all_grasps_blocked"):
+        blockers = grasp_check.get("blocking_objects") or []
+        return (
+            "最高优先级重规划指令：上次 direct pick 已由代码证明所有抓取角度被阻挡，禁止重复 pick 目标。\n"
+            "必须从以下 loose_movable blocking_objects 中自主选择一个安全的 nudge 或 pick_away 清障；"
+            "若图像不足才 reobserve。target reference 仍填写受益的原抓取目标。\n"
+            "blocking_objects={}\n".format(json.dumps(blockers, ensure_ascii=False))
+        )
+    return (
+        "最高优先级重规划指令：必须实质修正 failure_history[-1]，并遵守 "
+        "replanning_context.hard_constraints；禁止重复上次动作。\n"
     )
 
 

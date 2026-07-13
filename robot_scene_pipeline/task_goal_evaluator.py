@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from .geometry_relations import get_center, get_size
 from .house_task_definition import HOUSE_ROLE_IDS
 from .llm_stack_blocks import object_label_contains
+from .organize_scope import organize_scope_objects
 from .task_geometry import (
     footprint_area,
     footprint_boundary_distance,
@@ -213,7 +214,8 @@ def evaluate_organize_groups(state: dict, contract: dict, plan: dict) -> dict:
     """Evaluate non-empty groups using full footprints, spacing, regions, and layout."""
     goal_spec = contract["goal_spec"]
     regions = {item.get("region_id"): item.get("bounds_base_m") for item in plan.get("target_regions", [])}
-    all_objects, diagnostics, satisfied, unsatisfied, grouped_ids = _objects(state), [], [], [], set()
+    all_objects = organize_scope_objects(state)
+    diagnostics, satisfied, unsatisfied, grouped_ids = [], [], [], set()
     for group in plan.get("groups", []):
         group_id = str(group.get("group_id"))
         members = [obj for obj in all_objects if _group_match(obj, group, goal_spec.get("grouping_key"))]

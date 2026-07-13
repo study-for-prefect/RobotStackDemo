@@ -26,6 +26,8 @@ from robot_scene_pipeline.orientation_fusion import fuse_house_orientation_obser
 from robot_scene_pipeline.vlm_action_validation import validate_vlm_action_decision
 from tools.workflows.stack_demo.execution_safety import validate_execution_source
 from tools.workflows.stack_demo.task_workflow import (
+    _execute_task_action,
+    _reobserve,
     _select_task_action,
     _state_with_dynamic_protection,
     run_semantic_task_workflow,
@@ -48,6 +50,18 @@ CONFIG["house_semantics"] = copy.deepcopy(HOUSE_CONFIG["house_semantics"])
 
 
 class ActionSchemaTests(unittest.TestCase):
+    def test_pick_action_schema_requires_target_pose(self):
+        proposal = _organize_action()
+        proposal.pop("target_pose_base")
+        _action, report = validate_task_action(
+            proposal, _organize_state(), _organize_contract(), _organize_plan(), {},
+        )
+        self.assertEqual(report["reason"], "task_action_json_schema_invalid")
+        self.assertTrue(any(
+            error["type"] == "json_schema_one_of_mismatch"
+            for error in report["schema_errors"]
+        ))
+
     def test_adapter_copies_selected_id_without_changing_action(self):
         action = {"action_type": "nudge", "selected_object_id": 7, "distance_m": 0.02}
         adapted = adapt_task_action_to_legacy_action(action)
@@ -118,6 +132,12 @@ class OrganizeActionTests(unittest.TestCase):
         proposal = _organize_action(); proposal["target_pose_base"]["position_m"][0] = 0.295
         _action, report = validate_task_action(proposal, _organize_state(), _organize_contract(), _organize_plan(), {})
         self.assertEqual(report["reason"], "target_pose_outside_group_region")
+        detail = report["checks"]["target_pose_base"]["detail"]
+        self.assertEqual(detail["target_region_bounds_base_m"], {
+            "xmin": 0.15, "xmax": 0.30, "ymin": -0.05, "ymax": 0.05,
+        })
+        self.assertAlmostEqual(detail["allowed_center_x_m"][1], 0.285)
+        self.assertEqual(detail["suggested_interval_midpoint_position_m"], [0.225, 0.0, 0.02])
 
     def test_layout_violation_is_rejected_without_pose_correction(self):
         state = _organize_state(); state["objects"].append(_object(3, "square red", [0.18, 0.0, 0.02]))
@@ -125,6 +145,17 @@ class OrganizeActionTests(unittest.TestCase):
         _action, report = validate_task_action(proposal, state, _organize_contract(), _organize_plan(), {})
         self.assertEqual(report["reason"], "target_pose_violates_group_layout")
         self.assertEqual(proposal["target_pose_base"]["position_m"], [0.25, 0.03, 0.02])
+
+    def test_first_member_can_enter_empty_target_row_progressively(self):
+        state = _organize_state()
+        state["objects"].append(_object(3, "square red", [0.50, 0.20, 0.02]))
+        proposal = _organize_action()
+        proposal["target_pose_base"]["position_m"] = [0.25, 0.03, 0.02]
+        action, report = validate_task_action(
+            proposal, state, _organize_contract(), _organize_plan(), {},
+        )
+        self.assertTrue(report["accepted"])
+        self.assertEqual(action["selected_object_id"], 1)
 
     def test_disappeared_temporary_object_requests_reselection(self):
         state = _organize_state(); state["objects"] = [state["objects"][1]]
@@ -182,6 +213,20 @@ class GeometryAndCompletionTests(unittest.TestCase):
 
 
 class DynamicProtectionAndSafetyTests(unittest.TestCase):
+    def test_clearance_execution_requires_separate_authorization(self):
+        args = SimpleNamespace(execute=True, execute_push_clearing=False)
+        with self.assertRaisesRegex(RuntimeError, "CLEARANCE_EXECUTION_NOT_AUTHORIZED"):
+            _execute_task_action(
+                args, "unused", {}, {}, {}, {"action_type": "nudge"}, 1,
+            )
+
+    def test_offline_reobserve_fails_without_calling_live_perception(self):
+        args = SimpleNamespace(offline_scene_state="fixed_scene.json")
+        with patch("tools.workflows.stack_demo.task_workflow.capture_scene_observation") as capture:
+            with self.assertRaisesRegex(RuntimeError, "OFFLINE_REOBSERVE_UNAVAILABLE"):
+                _reobserve(args, "/tmp/cycle", {})
+        capture.assert_not_called()
+
     def test_satisfied_current_roles_become_protected(self):
         state = _house_state(); progress = _house_progress(state)
         protection = derive_dynamic_protection(state, _house_contract(), progress, progress["selected_role_assignment"])
@@ -217,6 +262,10 @@ class DynamicProtectionAndSafetyTests(unittest.TestCase):
     def test_mock_perception_execution_is_forbidden(self):
         with self.assertRaises(RuntimeError):
             validate_execution_source(SimpleNamespace(execute=True, mock_perception=True))
+
+    def test_execute_and_moveit_plan_only_are_mutually_exclusive(self):
+        with self.assertRaisesRegex(RuntimeError, "mutually exclusive"):
+            validate_execution_source(SimpleNamespace(execute=True, moveit_plan_only=True))
 
     def test_semantic_workflow_cannot_bypass_offline_execution_guard(self):
         with tempfile.TemporaryDirectory() as output_dir:
@@ -255,6 +304,34 @@ class DynamicProtectionAndSafetyTests(unittest.TestCase):
                 )
         self.assertTrue(action["moveit_feasible"])
         self.assertEqual(preflight.call_count, 2)
+
+    def test_grounding_metadata_correction_is_not_blocked_as_duplicate_action(self):
+        proposal = {
+            "strategy_id": "place_lower", "action_type": "pick_place",
+            "role_id": "left_support_lower", "selected_object_id": 1,
+            "object_label": "square red", "object_center_base_m": [0.45, 0.20, 0.02],
+            "scene_revision": 4,
+            "target_pose_base": {"position_m": [0.25, -0.08, 0.02], "yaw_rad": 0.0},
+        }
+        corrected = copy.deepcopy(proposal)
+        corrected["object_center_base_m"] = [0.30, 0.0, 0.02]
+        args = SimpleNamespace(max_vlm_action_attempts=2, execute=False, moveit_plan_only=False)
+        with tempfile.TemporaryDirectory() as output_dir:
+            with patch(
+                "tools.workflows.stack_demo.task_workflow.call_vlm_task_policy",
+                side_effect=[
+                    {"call_status": "parsed", "decision": proposal},
+                    {"call_status": "parsed", "decision": corrected},
+                ],
+            ), patch(
+                "tools.workflows.stack_demo.task_workflow._preflight_task_action",
+                side_effect=lambda _args, _cycle, _state, action, _step: action,
+            ):
+                action, _report = _select_task_action(
+                    args, _house_state(), _house_contract(), _house_plan(), {}, {}, CONFIG,
+                    output_dir, 1,
+                )
+        self.assertEqual(action["object_center_base_m"], [0.30, 0.0, 0.02])
 
 
 def _object(object_id, label, center, size=None):

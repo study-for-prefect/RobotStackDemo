@@ -177,8 +177,11 @@ def evaluate_autonomous_vlm_action_attempt(
         "failures": [],
     }
     run_clearance_preflight = bool(
-        getattr(args, "execute", False)
-        and getattr(args, "execute_push_clearing", False)
+        getattr(args, "moveit_plan_only", False)
+        or (
+            getattr(args, "execute", False)
+            and getattr(args, "execute_push_clearing", False)
+        )
     )
     if selected is not None and selected.get("action_type") in ("nudge", "pick_away"):
         preflight_report["run_moveit_preflight"] = run_clearance_preflight

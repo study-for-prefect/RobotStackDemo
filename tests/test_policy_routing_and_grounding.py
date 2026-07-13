@@ -6,6 +6,7 @@ from robot_scene_pipeline.task_routing import route_task_type
 from robot_scene_pipeline.task_schemas import (
     BUILD_HOUSE_CONTRACT_SCHEMA,
     GROUNDED_HOUSE_PLAN_SCHEMA,
+    GROUNDED_ORGANIZE_PLAN_SCHEMA,
     ORGANIZE_BLOCKS_CONTRACT_SCHEMA,
     schema_for_policy,
     validate_against_schema,
@@ -19,16 +20,76 @@ from robot_scene_pipeline.task_semantic_validation import (
     validate_task_contract,
 )
 from robot_scene_pipeline.vlm_task_policy import (
-    _task_prompt, build_grounded_task_plan_input, build_task_contract_input,
+    _task_prompt, build_grounded_task_plan_input, build_task_action_input,
+    build_task_contract_input, compact_goal_progress,
 )
 from tests.test_task_semantics import CONFIG, _house_contract, _house_state
 
 
 class PolicyRoutingAndGroundingTests(unittest.TestCase):
+    def test_house_action_input_lists_only_roles_whose_prerequisites_are_ready(self):
+        progress = compact_goal_progress({
+            "task_type": "build_house",
+            "satisfied_predicates": [
+                "left_support_lower.on_table", "right_support_lower.on_table",
+                "columns.height_aligned",
+            ],
+            "unsatisfied_predicates": [
+                "left_support_lower.supports.left_support_upper",
+                "right_support_lower.supports.right_support_upper",
+                "left_column.vertical_aligned", "right_column.vertical_aligned",
+                "roof.orientation_correct", "roof.supports.triangle_top",
+            ],
+        })
+        self.assertEqual(
+            progress["eligible_role_ids_for_next_action"],
+            ["left_support_upper", "right_support_upper"],
+        )
+
+    def test_action_prompt_omits_combinatorial_role_assignment_audit_log(self):
+        progress = {
+            "task_complete": False,
+            "unsatisfied_predicates": ["roof.supports.triangle_top"],
+            "selected_role_assignment": {"roof": {"id": 1}},
+            "role_assignment_candidates": [{"large": "x" * 100000}],
+        }
+        payload = build_task_action_input(
+            {"objects": [], "scene_revision": 1},
+            _house_contract(),
+            {"task_type": "build_house"},
+            progress,
+            1,
+        )
+        self.assertNotIn("role_assignment_candidates", payload["current_goal_progress"])
+        self.assertIn("selected_role_assignment", payload["current_goal_progress"])
+        self.assertNotIn("orientation_results", payload["current_goal_progress"])
+        self.assertNotIn("x" * 1000, _task_prompt(payload, "task_action"))
+
+    def test_action_prompt_removes_grounded_plan_fields_duplicated_by_fused_results(self):
+        payload = build_task_action_input(
+            {"objects": [], "scene_revision": 1}, _house_contract(), {
+                "task_type": "build_house",
+                "role_assignments": [],
+                "assembly_steps": [{"step_id": "fixed"}],
+                "orientation_observations": [{"reason": "duplicate"}],
+                "fused_orientation_results": [{"role_id": "roof"}],
+                "reason": "verbose",
+            }, {"unsatisfied_predicates": []}, 1,
+        )
+        compact = payload["grounded_task_plan"]
+        self.assertNotIn("assembly_steps", compact)
+        self.assertNotIn("orientation_observations", compact)
+        self.assertNotIn("reason", compact)
+        self.assertIn("fused_orientation_results", compact)
+
     def test_instruction_routes_to_one_task_family(self):
         self.assertEqual(route_task_type("按颜色整理积木"), "organize_blocks")
         self.assertEqual(route_task_type("请搭房子"), "build_house")
         self.assertEqual(route_task_type("红绿蓝黄依次向上堆叠"), "stack_blocks")
+        self.assertEqual(route_task_type(
+            "以红色积木为底，把绿色积木放到红色上面，再把蓝色积木放到绿色上面，"
+            "再把黄色积木放到蓝色上面"
+        ), "stack_blocks")
 
     def test_organize_contract_prompt_has_no_house_ontology(self):
         payload = build_task_contract_input({}, "按颜色整理积木", CONFIG)
@@ -56,6 +117,43 @@ class PolicyRoutingAndGroundingTests(unittest.TestCase):
         self.assertNotIn("house_semantics", prompt)
         self.assertNotIn("left_support_lower", prompt)
         self.assertNotIn("triangle_top", prompt)
+        self.assertIn("organize_plan_rules", payload)
+        self.assertIn("水平带", prompt)
+
+    def test_organize_grounded_schema_defines_groups_and_regions(self):
+        group = GROUNDED_ORGANIZE_PLAN_SCHEMA["properties"]["groups"]["items"]
+        region = GROUNDED_ORGANIZE_PLAN_SCHEMA["properties"]["target_regions"]["items"]
+        self.assertEqual(
+            set(group["required"]),
+            {"group_id", "group_value", "object_ids", "target_region_id"},
+        )
+        self.assertEqual(
+            set(region["properties"]["bounds_base_m"]["required"]),
+            {"xmin", "xmax", "ymin", "ymax"},
+        )
+
+    def test_organize_prompt_offers_future_destination_row_slots(self):
+        contract = {
+            "task_type": "organize_blocks", "goal_spec": {
+                "grouping_key": "color", "layout_type": "rows",
+                "include_scope": "all_detected_blocks", "allow_stacking": False,
+            },
+        }
+        state = {
+            "workspace_bounds": {"xmin": 0.2, "xmax": 0.5, "ymin": 0.0, "ymax": 0.4},
+            "objects": [
+                {"id": 1, "label": "square red", "geometry_center_m": [0.3, 0.1, 0.0], "dimensions_m": [0.02, 0.02, 0.02]},
+                {"id": 2, "label": "square blue", "geometry_center_m": [0.4, 0.2, 0.0], "dimensions_m": [0.02, 0.02, 0.02]},
+            ],
+        }
+        payload = build_grounded_task_plan_input(state, contract, 1, CONFIG)
+        self.assertEqual(len(payload["layout_slot_candidates"]), 2)
+        self.assertEqual(payload["layout_slot_candidates"][0]["bounds_base_m"]["ymax"], 0.2)
+        self.assertEqual(
+            [slot["assigned_color"] for slot in payload["layout_slot_candidates"]],
+            ["red", "blue"],
+        )
+        self.assertIn("未来放置区", _task_prompt(payload, "grounded_task_plan"))
 
     def test_contract_schemas_are_task_specific(self):
         self.assertIs(schema_for_policy("task_contract", "build_house"), BUILD_HOUSE_CONTRACT_SCHEMA)
@@ -67,6 +165,26 @@ class PolicyRoutingAndGroundingTests(unittest.TestCase):
         with self.assertRaises(TaskSemanticValidationError) as raised:
             validate_task_contract(_house_contract(), CONFIG, expected_task_type="organize_blocks")
         self.assertIn("task_type_instruction_mismatch", {item["type"] for item in raised.exception.feedback["errors"]})
+
+    def test_validated_organize_contract_can_be_loaded_and_validated_again(self):
+        raw = {
+            "schema_version": "task_contract_v1", "task_type": "organize_blocks",
+            "goal_spec": {
+                "grouping_key": "color", "layout_type": "rows",
+                "include_scope": "all_detected_blocks", "allow_stacking": False,
+            },
+            "reason": "group colors", "confidence": 0.9,
+        }
+        config = {
+            **CONFIG,
+            "organize_defaults": {
+                **CONFIG["organize_defaults"],
+                "row_color_order": ["red", "green", "blue", "yellow"],
+            },
+        }
+        first = validate_task_contract(raw, config, expected_task_type="organize_blocks")
+        second = validate_task_contract(first, config, expected_task_type="organize_blocks")
+        self.assertEqual(second["goal_spec"]["row_color_order"], ["red", "green", "blue", "yellow"])
 
     def test_concave_aliases_normalize_and_match_roof(self):
         role = {"requirements": {"shape_any": ["concave_rectangle", "rectangle"]}}

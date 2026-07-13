@@ -48,7 +48,10 @@ def build_replanning_context(ledger: Iterable[dict], attempt: int, max_attempts:
     for item in entries:
         action_type = str(item.get("action", {}).get("action_type") or "")
         counts[action_type] = counts.get(action_type, 0) + 1
-    forbidden_types = sorted(key for key, count in counts.items() if key and count >= 2) if attempt >= 3 else []
+    forbidden_types = sorted(
+        key for key, count in counts.items()
+        if key and key not in {"pick_place", "pick_reorient_place"} and count >= 2
+    ) if attempt >= 3 else []
     strategies = {item.get("strategy_id") for item in entries if item.get("strategy_id")}
     return {
         "attempt": int(attempt), "max_attempts": int(max_attempts),

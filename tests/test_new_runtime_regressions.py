@@ -9,6 +9,7 @@ from robot_scene_pipeline.stack_binding import (
     stack_binding_selection_is_ambiguous,
 )
 from robot_scene_pipeline.task_routing import route_task_type
+from robot_scene_pipeline.organize_scope import organize_scope_objects
 from robot_scene_pipeline.task_semantic_validation import infer_object_shape
 
 
@@ -54,6 +55,25 @@ class NewRuntimeRegressionTests(unittest.TestCase):
         old = _load(path)["decision"]
         self.assertEqual(old["task_type"], "build_house")
         self.assertEqual(route_task_type("按颜色整理积木"), "organize_blocks")
+
+    def test_latest_organize_excludes_edge_and_non_color_false_detections(self):
+        state = _state("organize_blocks_qwen3_30b_20260713_095215", "initial_task_scene")
+        state["workspace_bounds"] = {
+            "xmin": 0.235, "xmax": 0.443, "ymin": 0.03,
+            "ymax": 0.322, "zmin": -0.03, "zmax": 0.25,
+        }
+        selected = organize_scope_objects(state)
+        self.assertEqual([obj["id"] for obj in selected], [0, 1, 2, 3, 4, 5])
+
+    def test_latest_organize_deduplicates_same_color_same_geometry(self):
+        state = _state("organize_blocks_fixed_20260713_102035", "initial_task_scene")
+        state["workspace_bounds"] = {
+            "xmin": 0.235, "xmax": 0.443, "ymin": 0.03,
+            "ymax": 0.322, "zmin": -0.03, "zmax": 0.25,
+        }
+        selected = organize_scope_objects(state)
+        self.assertNotIn(9, [obj["id"] for obj in selected])
+        self.assertIn(8, [obj["id"] for obj in selected])
 
 
 def _state(runtime_name, observation_dir):

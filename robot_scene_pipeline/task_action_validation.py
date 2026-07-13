@@ -78,9 +78,22 @@ def validate_house_pick_place(
     grounding_failure = _grounding_failure(obj, proposal, report)
     if grounding_failure:
         return None, grounding_failure
-    dependency_failure = _dependency_failure(role_id, progress)
-    if dependency_failure:
-        return None, _fail(report, dependency_failure, "role_id")
+    missing_prerequisites = _missing_role_prerequisites(role_id, progress)
+    if missing_prerequisites:
+        failed = _fail(report, "role_prerequisites_not_satisfied", "role_id")
+        failed["checks"]["role_id"]["detail"].update({
+            "rejected_role_id": role_id,
+            "missing_prerequisites": missing_prerequisites,
+            "eligible_role_ids": [
+                candidate for candidate in (
+                    "left_support_lower", "right_support_lower",
+                    "left_support_upper", "right_support_upper", "roof", "triangle_top",
+                )
+                if not _missing_role_prerequisites(candidate, progress)
+            ],
+            "correction": "choose an eligible role; a role assignment does not mean its structural predicates are satisfied",
+        })
+        return None, failed
     orientation = next(
         (item for item in grounded_plan.get("fused_orientation_results", []) if item.get("role_id") == role_id and str(item.get("selected_object_id")) == str(obj.get("id"))),
         None,
@@ -117,8 +130,32 @@ def validate_house_pick_place(
     elif role_id in {"left_support_upper", "right_support_upper"}:
         lower_role = role_id.replace("upper", "lower")
         lower = current.get(lower_role)
-        if lower is None or not _supports_target(lower, moved, vertical_tolerance, minimum_overlap):
-            failed_predicates.append(_predicate("{}.supports.{}".format(lower_role, role_id), "upper_support_not_aligned_on_lower_support"))
+        if lower is None:
+            failed_predicates.append(_predicate(
+                "{}.supports.{}".format(lower_role, role_id),
+                "current_lower_support_unavailable",
+            ))
+        elif not _supports_target(lower, moved, vertical_tolerance, minimum_overlap):
+            expected_position = [
+                float(get_center(lower)[0]),
+                float(get_center(lower)[1]),
+                _top_z(lower) + 0.5 * float(get_size(moved)[2]),
+            ]
+            failed = _fail(report, "upper_support_not_aligned_on_lower_support", "target_pose_base")
+            failed["failed_predicates"] = [_predicate(
+                "{}.supports.{}".format(lower_role, role_id),
+                "upper_support_not_aligned_on_lower_support",
+            )]
+            failed["checks"]["target_pose_base"]["detail"].update({
+                "received_position_m": get_center(moved),
+                "support_role_id": lower_role,
+                "support_center_base_m": get_center(lower),
+                "support_dimensions_m": get_size(lower),
+                "moved_dimensions_m": get_size(moved),
+                "expected_aligned_position_m": expected_position,
+                "correction": "place the upper center directly above its bound lower support at contact height",
+            })
+            return None, failed
     elif role_id == "roof":
         left, right = current.get("left_support_upper"), current.get("right_support_upper")
         if left is None or right is None:
@@ -183,7 +220,31 @@ def validate_organize_pick_place(
         return None, grounding_failure
     moved = _object_at_pose(obj, proposal["target_pose_base"])
     if not footprint_inside_region(object_footprint_polygon(moved), regions[region_id]):
-        return None, _fail(report, "target_pose_outside_group_region", "target_pose_base")
+        region = regions[region_id]
+        size = get_size(moved)
+        yaw = float(moved.get("yaw_rad", 0.0))
+        half_x = 0.5 * (
+            abs(math.cos(yaw)) * float(size[0]) + abs(math.sin(yaw)) * float(size[1])
+        )
+        half_y = 0.5 * (
+            abs(math.sin(yaw)) * float(size[0]) + abs(math.cos(yaw)) * float(size[1])
+        )
+        failed = _fail(report, "target_pose_outside_group_region", "target_pose_base")
+        failed["checks"]["target_pose_base"]["detail"].update({
+            "received_position_m": get_center(moved),
+            "target_region_bounds_base_m": region,
+            "object_dimensions_m": size,
+            "target_yaw_rad": yaw,
+            "allowed_center_x_m": [float(region["xmin"]) + half_x, float(region["xmax"]) - half_x],
+            "allowed_center_y_m": [float(region["ymin"]) + half_y, float(region["ymax"]) - half_y],
+            "suggested_interval_midpoint_position_m": [
+                round(0.5 * (float(region["xmin"]) + float(region["xmax"])), 6),
+                round(0.5 * (float(region["ymin"]) + float(region["ymax"])), 6),
+                round(float(get_center(moved)[2]), 6),
+            ],
+            "correction": "choose a new XY inside both allowed center intervals; do not copy the source center",
+        })
+        return None, failed
     workspace = state.get("table_bounds") or state.get("workspace_bounds")
     if not object_inside_workspace(moved, workspace):
         return None, _fail(report, "target_pose_outside_workspace", "target_pose_base")
@@ -194,12 +255,25 @@ def validate_organize_pick_place(
             continue
         other_footprint = object_footprint_polygon(other)
         if footprint_overlap(object_footprint_polygon(moved), other_footprint):
+            report.setdefault("checks", {})["target_pose_base"] = {"detail": {
+                "reason": "target_pose_overlaps_planned_object",
+                "blocking_object_id": other.get("id"),
+                "blocking_object_label": other.get("label"),
+                "blocking_object_center_base_m": get_center(other),
+            }}
             return None, _fail(report, "target_pose_overlaps_planned_object", "target_pose_base")
         if _object_belongs_to_group(other, group, grouping_key):
-            group_members.append(other)
             distance = footprint_boundary_distance(object_footprint_polygon(moved), other_footprint)
             if distance < minimum_spacing:
+                report.setdefault("checks", {})["target_pose_base"] = {"detail": {
+                    "reason": "target_pose_group_spacing_too_small",
+                    "near_object_id": other.get("id"),
+                    "boundary_distance_m": distance,
+                    "minimum_spacing_m": minimum_spacing,
+                }}
                 return None, _fail(report, "target_pose_group_spacing_too_small", "target_pose_base")
+            if footprint_inside_region(other_footprint, regions[region_id]):
+                group_members.append(other)
     layout_type = str(contract.get("goal_spec", {}).get("layout_type") or "")
     tolerance = float(contract.get("goal_spec", {}).get("alignment_tolerance_m", 0.012))
     if not evaluate_layout(group_members, layout_type, tolerance):
@@ -234,7 +308,18 @@ def _validate_common(proposal: dict, state: dict) -> Optional[dict]:
         valid = valid and (yaw_valid or quaternion_valid or proposal.get("role_id") in {"roof", "triangle_top"})
     except (TypeError, ValueError):
         valid = False
-    return None if valid else _fail(report, "invalid_target_pose_base", "target_pose_base")
+    if valid:
+        return None
+    failed = _fail(report, "invalid_target_pose_base", "target_pose_base")
+    failed["checks"]["target_pose_base"]["detail"].update({
+        "received_target_pose_base": proposal.get("target_pose_base"),
+        "required_format": {
+            "position_m": ["x_m", "y_m", "z_m"],
+            "yaw_rad": "finite number; roof/triangle may omit because code supplies orientation",
+        },
+        "correction": "output a complete target_pose_base; the source object center is not a placement target",
+    })
+    return failed
 
 
 def _accepted_action(proposal: dict, obj: dict, report: dict) -> Tuple[dict, dict]:
@@ -248,14 +333,28 @@ def _accepted_action(proposal: dict, obj: dict, report: dict) -> Tuple[dict, dic
 
 def _grounding_failure(obj: dict, proposal: dict, report: dict) -> Optional[dict]:
     if str(proposal.get("object_label") or "").lower() != str(obj.get("label") or "").lower():
-        return _fail(report, "object_binding_grounding_mismatch", "object_label")
+        failed = _fail(report, "object_binding_grounding_mismatch", "object_label")
+        failed["checks"]["object_label"]["detail"].update({
+            "expected_object_label": obj.get("label"),
+            "received_object_label": proposal.get("object_label"),
+            "correction": "copy the selected object's label exactly from objects",
+        })
+        return failed
     observed = get_center(obj)
     proposed = proposal.get("object_center_base_m")
     try:
         valid = isinstance(proposed, list) and len(proposed) == 3 and math.dist(proposed, observed[:3]) <= 0.005
     except (TypeError, ValueError):
         valid = False
-    return None if valid else _fail(report, "object_binding_grounding_mismatch", "object_center_base_m")
+    if valid:
+        return None
+    failed = _fail(report, "object_binding_grounding_mismatch", "object_center_base_m")
+    failed["checks"]["object_center_base_m"]["detail"].update({
+        "expected_object_center_base_m": observed[:3],
+        "received_object_center_base_m": proposed,
+        "correction": "copy the selected object's geometry_center_base_m exactly; do not copy target_pose_base",
+    })
+    return failed
 
 
 def _protected_pose_failures(moved: dict, source: dict, protection: dict, state: dict, role_id: str) -> List[dict]:
@@ -286,6 +385,10 @@ def _object_at_pose(obj: dict, pose: dict) -> dict:
 
 
 def _dependency_failure(role_id: str, progress: dict) -> Optional[str]:
+    return "role_prerequisites_not_satisfied" if _missing_role_prerequisites(role_id, progress) else None
+
+
+def _missing_role_prerequisites(role_id: str, progress: dict) -> List[str]:
     satisfied = set(progress.get("satisfied_predicates") or [])
     required = {
         "left_support_upper": {"left_support_lower.on_table"},
@@ -301,9 +404,7 @@ def _dependency_failure(role_id: str, progress: dict) -> Optional[str]:
             "roof.straight_edge_up", "roof.orientation_correct",
         },
     }.get(role_id, set())
-    if required.issubset(satisfied):
-        return None
-    return "role_prerequisites_not_satisfied"
+    return sorted(required - satisfied)
 
 
 def _build_code_oriented_action(
@@ -431,6 +532,7 @@ def _report(stage: str, proposal: dict, reason: str, fields: Optional[List[str]]
 def _fail(report: dict, reason: str, field: str) -> dict:
     report["reason"] = reason
     report.setdefault("failed_fields", []).append(field)
+    report.setdefault("checks", {}).setdefault(field, {"detail": {"reason": reason}})
     return report
 
 

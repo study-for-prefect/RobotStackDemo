@@ -14,6 +14,7 @@ from .house_task_definition import (
     canonical_house_goal_spec,
 )
 from .llm_stack_blocks import object_label_contains
+from .organize_scope import organize_scope_objects
 from .house_grounded_adapter import expand_house_grounded_plan
 from .task_schemas import (
     GROUNDED_HOUSE_PLAN_SCHEMA,
@@ -288,7 +289,8 @@ def _validate_organize_plan(plan: dict, contract: dict, state: dict, _config: di
     groups, regions = plan.get("groups"), plan.get("target_regions")
     if not isinstance(groups, list) or not isinstance(regions, list):
         return [{"type": "missing_groups_or_target_regions"}], {}
-    objects = _objects(state); object_map = {str(obj.get("id")): obj for obj in objects}; assigned = set(); errors = []
+    objects = organize_scope_objects(state)
+    object_map = {str(obj.get("id")): obj for obj in objects}; assigned = set(); errors = []
     region_map = {item.get("region_id"): item for item in regions if isinstance(item, dict)}
     for group in groups:
         region = region_map.get(group.get("target_region_id"))

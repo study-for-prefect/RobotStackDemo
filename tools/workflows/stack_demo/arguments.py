@@ -20,9 +20,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task-contract-json", default="", help="Optional offline task_contract_v1 JSON.")
     parser.add_argument("--grounded-task-plan-json", default="", help="Optional current-scene grounded_task_plan_v1 JSON.")
     parser.add_argument("--task-semantics-config", default="config/task_semantics.json")
+    parser.add_argument(
+        "--workspace-bounds-json",
+        default="config/workspace_bounds.json",
+        help="Calibrated six-direction workspace bounds in base_link meters.",
+    )
     parser.add_argument("--max-vlm-task-plan-attempts", type=int, default=5)
     parser.add_argument("--max-task-steps", type=int, default=12)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument(
+        "--moveit-plan-only",
+        action="store_true",
+        help="Run real MoveIt preflight without executing trajectories or operating the gripper.",
+    )
     parser.add_argument(
         "--execute-push-clearing",
         action="store_true",
@@ -72,14 +82,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--conda-env", default="yolo")
     parser.add_argument("--ros-python", default="/usr/bin/python3")
-    parser.add_argument("--model", default="qwen2.5vl:7b-q4_K_M")
+    parser.add_argument("--model", default="qwen3-vl:8b-instruct")
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434/api/chat")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--num-predict", type=int, default=1024)
     parser.add_argument("--vlm-think-mode", choices=("auto", "on", "off"), default="auto")
     parser.add_argument("--vlm-num-ctx", type=int, default=0, help="Override policy-specific Ollama context budget; 0 uses policy defaults.")
     parser.add_argument("--vlm-num-predict", type=int, default=0, help="Override policy-specific generation budget; 0 uses policy defaults.")
-    parser.add_argument("--vlm-finalizer-num-predict", type=int, default=4096)
+    parser.add_argument(
+        "--vlm-num-gpu", type=int, default=-1,
+        help="Ollama GPU layers: -1 uses backend default; 0 forces CPU for power-safe diagnostics.",
+    )
+    parser.add_argument("--vlm-finalizer-num-predict", type=int, default=2048)
     parser.add_argument("--vlm-read-timeout-sec", type=float, default=1200.0)
     parser.add_argument("--vlm-keep-alive", default="1h")
     parser.add_argument("--vlm-max-backend-retries", type=int, default=3)

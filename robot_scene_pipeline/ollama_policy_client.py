@@ -13,13 +13,13 @@ from .task_schemas import validate_against_schema
 
 
 POLICY_GENERATION_CONFIG = {
-    "stack_order": {"num_ctx": 16384, "num_predict": 8192},
-    "task_contract": {"num_ctx": 16384, "num_predict": 8192},
-    "grounded_task_plan": {"num_ctx": 24576, "num_predict": 12288},
-    "action_proposal": {"num_ctx": 24576, "num_predict": 12288},
-    "action_replan": {"num_ctx": 24576, "num_predict": 12288},
-    "orientation_analysis": {"num_ctx": 32768, "num_predict": 16384},
-    "final_json_generation": {"num_ctx": 24576, "num_predict": 4096},
+    "stack_order": {"num_ctx": 12288, "num_predict": 4096},
+    "task_contract": {"num_ctx": 8192, "num_predict": 2048},
+    "grounded_task_plan": {"num_ctx": 16384, "num_predict": 4096},
+    "action_proposal": {"num_ctx": 16384, "num_predict": 3072},
+    "action_replan": {"num_ctx": 16384, "num_predict": 3072},
+    "orientation_analysis": {"num_ctx": 24576, "num_predict": 8192},
+    "final_json_generation": {"num_ctx": 12288, "num_predict": 2048},
 }
 _MODEL_RUNTIME: Dict[str, dict] = {}
 
@@ -66,11 +66,36 @@ def call_policy(
     top_p: float = 0.85,
 ) -> PolicyCallResult:
     """Run one logical policy call with backend, budget, and finalization retries."""
-    model = str(getattr(args, "model", "qwen2.5vl:7b-q4_K_M"))
+    model = str(getattr(args, "model", "qwen3-vl:8b-instruct"))
+    replacement = _structured_instruct_replacement(model)
+    if replacement and policy_kind != "orientation_analysis":
+        return PolicyCallResult(
+            transport_status="model_rejected",
+            generation_status="model_variant_unsuitable",
+            policy_kind=policy_kind,
+            model=model,
+            error_type="THINKING_MODEL_UNSUITABLE_FOR_STRUCTURED_POLICY",
+            error_message=(
+                "{} is an Ollama thinking variant and may consume the entire JSON budget; use {}"
+            ).format(model, replacement),
+        )
     think_mode = str(getattr(args, "vlm_think_mode", "auto"))
     think_requested = _think_enabled(think_mode, model)
+    if think_mode == "auto" and policy_kind != "orientation_analysis":
+        think_requested = False
     num_ctx, num_predict = _generation_budget(args, policy_kind)
-    num_ctx = max(num_ctx, _estimate_input_tokens(messages) + num_predict + 2048)
+    estimated_input_tokens = _estimate_input_tokens(messages)
+    if estimated_input_tokens + num_predict + 2048 > num_ctx:
+        return PolicyCallResult(
+            transport_status="input_rejected",
+            generation_status="input_context_exceeded",
+            policy_kind=policy_kind,
+            model=model,
+            error_type="INPUT_CONTEXT_BUDGET_EXCEEDED",
+            error_message=(
+                "estimated input {} + output {} + reserve 2048 exceeds fixed num_ctx {}"
+            ).format(estimated_input_tokens, num_predict, num_ctx),
+        )
     max_backend = max(1, int(getattr(args, "vlm_max_backend_retries", 3)))
     max_budget = max(1, int(getattr(args, "vlm_max_budget_retries", 3)))
     budget_attempt = 0
@@ -90,7 +115,11 @@ def call_policy(
                 return result
             old_predict = num_predict
             num_predict = _next_num_predict(num_predict)
-            num_ctx = max(num_ctx, num_predict + _estimate_input_tokens(messages) + 2048)
+            if estimated_input_tokens + num_predict + 2048 > num_ctx:
+                result.generation_status = "budget_exhausted"
+                result.error_type = "TOKEN_BUDGET_EXHAUSTED"
+                result.error_message = "retry output budget would exceed fixed num_ctx {}".format(num_ctx)
+                return result
             print("Budget Retry {}/{}\nold_num_predict={}\nnew_num_predict={}".format(
                 budget_attempt, max_budget, old_predict, num_predict,
             ), flush=True)
@@ -137,7 +166,8 @@ def _backend_retry_call(
     max_backend: int, think_requested: bool, num_ctx: int, num_predict: int,
     temperature: float, top_p: float, budget_attempt: int,
 ) -> Tuple[PolicyCallResult, bool]:
-    model = str(getattr(args, "model", "qwen2.5vl:7b-q4_K_M"))
+    model = str(getattr(args, "model", "qwen3-vl:8b-instruct"))
+    omit_think_parameter = False
     for backend_attempt in range(1, max_backend + 1):
         print("Backend Attempt {}/{}\npolicy={}\nmodel={}\nthink={}\nnum_ctx={}\nnum_predict={}".format(
             backend_attempt, max_backend, policy_kind, model,
@@ -146,6 +176,7 @@ def _backend_retry_call(
         payload = _request_payload(
             args, messages, response_schema, think_requested,
             num_ctx, num_predict, temperature, top_p,
+            include_think_parameter=not omit_think_parameter,
         )
         result = _single_http_call(
             args, policy_kind, payload, reasoning_attempt,
@@ -157,8 +188,9 @@ def _backend_retry_call(
             num_ctx, num_predict,
         )
         _record_model_runtime(args, result, num_ctx, num_predict)
-        if result.error_type == "THINK_PARAMETER_UNSUPPORTED" and think_requested:
+        if result.error_type == "THINK_PARAMETER_UNSUPPORTED" and "think" in payload:
             think_requested = False
+            omit_think_parameter = True
             continue
         if result.transport_status == "ok":
             print("Reasoning result:\nthinking_chars={}\ncontent_chars={}\ndone_reason={}".format(
@@ -296,9 +328,10 @@ def _finalize_policy(
 def _request_payload(
     args: Any, messages: List[dict], response_schema: dict, think_requested: bool,
     num_ctx: int, num_predict: int, temperature: float, top_p: float,
+    include_think_parameter: bool = True,
 ) -> dict:
     payload = {
-        "model": getattr(args, "model", "qwen2.5vl:7b-q4_K_M"),
+        "model": getattr(args, "model", "qwen3-vl:8b-instruct"),
         "messages": messages,
         "stream": False,
         "format": response_schema,
@@ -308,7 +341,14 @@ def _request_payload(
             "num_ctx": int(num_ctx), "num_predict": int(num_predict),
         },
     }
-    if think_requested:
+    num_gpu = int(getattr(args, "vlm_num_gpu", -1))
+    if num_gpu >= 0:
+        payload["options"]["num_gpu"] = num_gpu
+    model_name = str(payload["model"]).lower()
+    if "qwen3" in model_name and include_think_parameter:
+        # Ollama's Qwen3 default may still reason when the field is omitted.
+        payload["think"] = bool(think_requested)
+    elif think_requested and include_think_parameter:
         payload["think"] = True
     return payload
 
@@ -385,10 +425,12 @@ def _looks_truncated(content: str, eval_count: Optional[int], num_predict: int) 
 
 
 def _next_num_predict(current: int) -> int:
-    if current < 12288:
-        return 12288
-    if current < 16384:
-        return 16384
+    if current < 4096:
+        return 4096
+    if current < 6144:
+        return 6144
+    if current < 8192:
+        return 8192
     return current + 4096
 
 
@@ -403,6 +445,18 @@ def _think_enabled(mode: str, model: str) -> bool:
     if mode == "off":
         return False
     return "qwen3" in model.lower()
+
+
+def _structured_instruct_replacement(model: str) -> Optional[str]:
+    normalized = str(model or "").strip().lower()
+    return {
+        "qwen3-vl": "qwen3-vl:8b-instruct",
+        "qwen3-vl:latest": "qwen3-vl:8b-instruct",
+        "qwen3-vl:8b": "qwen3-vl:8b-instruct",
+        "qwen3-vl:8b-thinking": "qwen3-vl:8b-instruct",
+        "qwen3-vl:30b": "qwen3-vl:30b-a3b-instruct",
+        "qwen3-vl:30b-a3b-thinking": "qwen3-vl:30b-a3b-instruct",
+    }.get(normalized)
 
 
 def _think_unsupported(body: str) -> bool:

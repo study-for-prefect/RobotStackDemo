@@ -10,6 +10,7 @@ from urllib.request import urlopen
 from tools.workflows.two_stage_visual_pick import camera_optical_vector_to_base
 
 from .constants import PROJECT_ROOT
+from .workspace import attach_configured_workspace
 
 DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_POINT_MODE = "direct"
@@ -34,6 +35,24 @@ def load_json(path):
 def run(command):
     print("\n$ {}".format(" ".join(command)), flush=True)
     subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+
+
+def plan_only_command(command):
+    """Strip every trajectory/gripper execution option from a MoveIt command."""
+    output = list(command)
+    for flag, value_count in (
+        ("--execute", 0),
+        ("--enable-gripper", 0),
+        ("--skip-gripper-init", 0),
+        ("--close-gripper-for-push", 0),
+        ("--gripper-open-only", 0),
+        ("--gripper-close-only", 0),
+        ("--gripper-port", 1),
+    ):
+        while flag in output:
+            index = output.index(flag)
+            del output[index:index + value_count + 1]
+    return output
 
 
 def tf_lookup_command(args, require_tool=True):
@@ -110,8 +129,8 @@ def close_gripper_command(args):
 
 def init_ready_pose(args):
     """Put the empty-gripper robot in the configured observation pose."""
-    print("\ninit_ready_pose: moving to ready pose", flush=True)
     if args.execute:
+        print("\ninit_ready_pose: moving to ready pose", flush=True)
         if not args.ready_pose_json or not os.path.isfile(args.ready_pose_json):
             raise RuntimeError(
                 "Ready pose JSON not found: {}. Set --ready-pose-json/READY_POSE_JSON to an existing init pose.".format(
@@ -119,12 +138,16 @@ def init_ready_pose(args):
                 )
             )
         run(pose_command(args, args.ready_pose_json))
+    else:
+        print("\ninit_ready_pose: motion skipped (execution disabled)", flush=True)
 
-    print("init_ready_pose: opening gripper", flush=True)
     if args.execute:
+        print("init_ready_pose: opening gripper", flush=True)
         run(open_gripper_command(args))
         if args.init_stable_wait_s > 0:
             time.sleep(float(args.init_stable_wait_s))
+    else:
+        print("init_ready_pose: gripper open skipped (execution disabled)", flush=True)
     print("init_ready_pose: stable, start snapshot", flush=True)
 
 
@@ -135,7 +158,9 @@ def capture_empty_observation(args, output_dir, held_object_id):
     if args.offline_scene_state:
         return None
     capture_scene_observation(args, output_dir)
-    return load_json(os.path.join(output_dir, "private_scene_state.json"))
+    return attach_configured_workspace(
+        load_json(os.path.join(output_dir, "private_scene_state.json")), args,
+    )
 
 
 def capture_empty_current_pose(args, output_dir, held_object_id, allow_holding=False, refresh_tf=False):
@@ -148,7 +173,9 @@ def capture_empty_current_pose(args, output_dir, held_object_id, allow_holding=F
     if refresh_tf:
         run(tf_lookup_command(args))
     capture_scene_observation(args, output_dir)
-    return load_json(os.path.join(output_dir, "private_scene_state.json"))
+    return attach_configured_workspace(
+        load_json(os.path.join(output_dir, "private_scene_state.json")), args,
+    )
 
 
 def perception_server_snapshot(args, output_dir):

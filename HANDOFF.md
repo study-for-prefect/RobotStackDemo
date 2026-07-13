@@ -4,20 +4,41 @@
 
 ## 1. 当前仓库状态
 
-- 工作目录：`/Users/wujl/Code/RobotStackDemo`
+- 工作目录：`/home/wxm/code/RobotStackDemo`
 - 当前分支：`llm-decision-explore`
-- 当前提交：`74fb4b7 explore llm decision`
-- `HEAD` 与 `origin/llm-decision-explore` 一致。
-- 写本交接文档之前工作树是干净的；`HANDOFF.md` 是本次新增文件。
-- 最近一次完整测试：
+- 2026-07-13 已在真实 Ubuntu/UR5 主机继续修改，工作树包含本轮未提交修复。
+- 本轮聚焦回归测试已通过 121 项；完整 discovery 共运行 238 项并通过，1 项依赖
+  gitignored 旧 runtime 的可选回放测试自动跳过。
+- 真实工作区已明确为 `base_link` 米制边界；用户确认 `xmax=0.65 m`、
+  `y=-0.10..0.40 m`，其余方向保留标定配置。
+- 三个任务的首个 pick/place（或清障恢复决策）均已跨过初始观测后的策略、语义和
+  MoveIt 安全链；真实 MoveIt 验证全部为 plan-only，未执行轨迹或夹爪：
+  - stack：`runtime/stack_qwen3_8b_clearance_real_planonly_20260713`
+  - organize：`runtime/organize_qwen3_8b_post_safetyfix_real_planonly_20260713`
+  - house：`runtime/build_house_qwen3_8b_instruct_posefeedback_real_planonly`
+- 重启后 ROS driver、RealSense、TF、MoveIt 和 perception server 均已恢复；
+  `base_link -> tool0` 已验证连续可用。
+- 房子动作已能根据下层支撑中心和块体半高修正上层目标，且 pick/place 全路径已通过
+  真实 MoveIt plan-only；不再卡在 roof 越过未完成 prerequisites 或错误上层位姿。
+- 上一次启动日志没有 OOM、NVIDIA Xid、panic 或正常 shutdown，表现为 GPU 负载期间
+  的突然断电/硬复位。RTX 3090 默认 370W，当前由用户临时限制到 250W，调试完成前不要恢复。
+- 8B instruct 的真实动作调用总耗时约 3.9–8.0 秒；实际 prompt 约 4.1K–9.0K token，
+  输出约 226–400 token。原先三四分钟的主要成因（thinking 变体和过大预算）已消除。
+- Ollama `qwen3-vl:8b` 与 `qwen3-vl:30b` 是 thinking 变体，即使请求
+  `think:false` 仍可能把 3K/4K/6K 全耗在 thinking。应使用官方 instruct 变体
+  `qwen3-vl:8b-instruct` 和 `qwen3-vl:30b-a3b-instruct` 做结构化规划。8B instruct
+  已验证；30B A3B instruct 正在安装/待对比，不能用现有 `qwen3-vl:30b` thinking
+  标签替代。
+- 最近一次聚焦测试：
 
   ```text
-  python3 -m unittest discover -s tests
-  Ran 208 tests
+  python3 -m unittest tests.test_vlm_nudge_preflight \
+    tests.test_workspace_configuration tests.test_task_semantic_regressions \
+    tests.test_policy_routing_and_grounding tests.test_task_semantics \
+    tests.test_six_role_house tests.test_vlm_replanning_loop
+  Ran 121 tests
   OK
   ```
-
-- 测试时会出现 macOS Python/LibreSSL 的 `urllib3 NotOpenSSLWarning`，当前不是测试失败原因。
 
 ## 2. 我们在做什么
 
@@ -158,13 +179,13 @@ Qwen3/Qwen2.5 兼容：
 默认预算：
 
 ```text
-stack_order          num_ctx=16384  num_predict=8192
-task_contract        num_ctx=16384  num_predict=8192
-grounded_task_plan   num_ctx=24576  num_predict=12288
-action_proposal      num_ctx=24576  num_predict=12288
-action_replan        num_ctx=24576  num_predict=12288
-orientation_analysis num_ctx=32768  num_predict=16384
-final_json_generation               num_predict=4096
+stack_order          num_ctx=12288  num_predict=4096
+task_contract        num_ctx=8192   num_predict=2048
+grounded_task_plan   num_ctx=16384  num_predict=4096
+action_proposal      num_ctx=16384  num_predict=3072
+action_replan        num_ctx=16384  num_predict=3072
+orientation_analysis num_ctx=24576  num_predict=8192
+final_json_generation               num_predict=2048
 ```
 
 新增参数：
@@ -332,28 +353,24 @@ WORKSPACE_CONFIGURATION_MISSING
 
 ## 5. 当前卡在哪里
 
-代码和离线单元测试已经完成，当前卡点在外部运行条件，不是已知单元测试失败：
+当前在真实机器人 PC 上，workspace、ROS、TF、MoveIt、感知以及三个任务首动作的
+Qwen3-VL 8B instruct + MoveIt plan-only 已打通。剩余工作：
 
-1. 六个旧运行目录的 scene state 都没有 `table_bounds`/`workspace_bounds`。
-2. 当前 Mac 环境不是机器人 PC，没有 Ubuntu 22.04、ROS 2 Humble、真实 MoveIt planning scene、UR5 驱动和 GF225 实机。
-3. 旧 Qwen3 运行没有保存原始 `message.thinking`，只能从空 content 和旧失败状态诊断，无法恢复当时的 thinking 文本。
-4. 尚未连接在线 Qwen3/Qwen2.5 Ollama 服务重新完整跑三个任务。
-5. 因此尚未证明三个任务都能在真实机器人环境稳定进入“首个合法动作的 MoveIt plan-only”阶段。
+1. 用 `qwen3-vl:30b-a3b-instruct` 对相同固定场景做离线策略对比，不能使用 thinking
+   变体 `qwen3-vl:30b`。
+2. 主机曾在 3090 高负载期间出现无 OOM/Xid/panic 的硬复位；当前 250W 功耗上限必须
+   保留，30B 验证期间尤其不能恢复 370W。
+3. 完整 discovery 238 项通过（1 项可选旧 runtime 回放跳过）；核心 121 项回归通过。
+4. 下一安全阶段才是低风险真实单步执行；在明确复核场景、急停、速度和控制器状态前
+   不得添加 `--execute`。
 
 ## 6. 下一步计划（严格按顺序）
 
-### 第一步：配置真实 workspace
+### 第一步：完成 30B instruct 对比
 
-- 从现有标定/机器人工作区配置中提供可信 `table_bounds` 或 `workspace_bounds`。
-- 不要从检测物体包围盒临时推断工作区，也不要让 VLM 输出边界。
-- 先确认六个方向和单位均为 `base_link`、米。
-
-### 第二步：在线 Ollama dry-run
-
-分别运行：
-
-1. Qwen3-VL 30B：stack、build_house、organize_blocks。
-2. Qwen2.5-VL 7B：相同三任务作为回归基准。
+8B instruct 已完成三个任务验证。安装并运行 Qwen3-VL 30B A3B instruct；保持 250W
+GPU 上限。优先复用本节列出的已保存 scene/contract/grounded plan，只验证动作 JSON，
+避免重复感知和无意义地重跑固定合同。
 
 检查：
 
@@ -365,19 +382,14 @@ WORKSPACE_CONFIGURATION_MISSING
 - 房屋 VLM 是否只输出精简 role bindings。
 - stack 多实例时是否输出完整四槽绑定。
 
-### 第三步：离线动作链和 dry-run
+### 第二步：复核三个任务 plan-only 产物
 
-- 不加 `--execute`。
-- 确认三个任务都能形成合法首个动作。
-- 确认 workspace、object_ref、track_id、ActionFingerprint、碰撞和 controlled contact 日志完整。
+- 三个任务已完成，均不加 `--execute`。
+- stack 与 organize 的 pick/place 全路径可规划；house 上层支撑 pick/place 全路径可规划。
+- organize 的恢复链已验证：目标区域越界 → 修正目标 → grounding 错配 → 保持物理动作并
+  修正源中心 → 接受，不会被重复动作指纹误杀。
 
-### 第四步：机器人 PC 上 MoveIt plan-only
-
-- 仍然不驱动真实 UR5。
-- 确认每个任务至少一个首动作通过真实 TF、IK、planning scene 和轨迹 plan-only。
-- 任何一个任务不稳定，都回到日志修复，不得直接试真实动作。
-
-### 第五步：真实硬件（需要用户再次明确授权）
+### 第三步：真实硬件（用户已授权，但仍受安全门控）
 
 - 只有三个任务都稳定通过首动作 MoveIt plan-only 后再考虑。
 - 真实执行必须显式 `--execute`，清障还必须显式 `--execute-push-clearing`。
@@ -425,7 +437,7 @@ WORKSPACE_CONFIGURATION_MISSING
 ## 8. 新会话开始时建议先做的检查
 
 ```bash
-cd /Users/wujl/Code/RobotStackDemo
+cd /home/wxm/code/RobotStackDemo
 git branch --show-current
 git status --short
 python3 -m unittest discover -s tests
@@ -437,7 +449,7 @@ rg -n "fail_safe_stop|vlm_json_or_call_failed" robot_scene_pipeline tools --glob
 
 - 分支为 `llm-decision-explore`。
 - 除交接文档或用户后续改动外，工作树应清晰可解释。
-- 208 项测试通过。
+- 核心 121 项通过；完整 discovery 为 238 项通过、1 项可选旧 runtime 回放跳过。
 - `requests.post` 只出现在 `ollama_policy_client.py`。
 - `fail_safe_stop` 只能代表合法 JSON 后的安全终止，不能出现在调用异常转换路径。
 
@@ -452,4 +464,7 @@ rg -n "fail_safe_stop|vlm_json_or_call_failed" robot_scene_pipeline tools --glob
 
 ## 10. 最重要的一句话
 
-下一阶段不是继续重构，而是：**围绕“从散落积木中取出所需积木并完成搭房子/按颜色整理，抓取角度或空间不足时先清障”这一最终任务，先提供可信 workspace，在在线 Ollama 上跑三个任务的 dry-run，再到机器人 PC 做 MoveIt plan-only；任何异常都根据统一调用诊断和四类计数器做局部修复，绝不绕过安全链路直接执行真实 UR5。**
+下一阶段不是继续重构，而是：**保持 RTX 3090 的 250W 上限，用 30B A3B instruct 对
+已通过的 8B 固定场景做策略对比；随后在明确复核场景、急停、低速和控制器状态后，才
+考虑一次低风险真实单步。任何异常都根据统一调用诊断和四类计数器做局部修复，绝不
+绕过安全链路直接执行真实 UR5。**

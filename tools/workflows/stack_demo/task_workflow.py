@@ -32,6 +32,7 @@ from .clearance_execution import (
     preflight_pick_away_action,
 )
 from .push_clearing import object_by_string_id
+from .workspace import attach_configured_workspace
 
 
 def run_semantic_task_workflow(args: Any) -> int:
@@ -117,7 +118,15 @@ def run_semantic_task_workflow(args: Any) -> int:
             if checked.get("action_type") == "pick_reorient_place" and getattr(args, "execute", False):
                 pending_post_place_log = execution_log_path
             if not getattr(args, "execute", False):
-                write_json(os.path.join(args.output_dir, "task_demo_summary.json"), {"execution_status": "planned_only", "task_contract": contract, "task_goal_progress": progress})
+                plan_only = bool(getattr(args, "moveit_plan_only", False))
+                write_json(os.path.join(args.output_dir, "task_demo_summary.json"), {
+                    "execution_status": "planned_only" if plan_only else "dry_run_only",
+                    "task_contract": contract,
+                    "task_goal_progress": progress,
+                    "selected_action": checked,
+                    "moveit_feasible": bool(checked.get("moveit_feasible")) if plan_only else None,
+                    "gripper_enabled": False,
+                })
                 return 0
             advance_scene_revision(runtime, state)
             memory = update_from_detections(memory, state.get("objects", []), scene_revision=state["scene_revision"]); save_memory(memory, args.memory_json)
@@ -237,7 +246,11 @@ def _select_task_action(
         raw = call_vlm_task_policy(args, policy_input, "task_action", artifact_dir=cycle_dir)
         if raw.get("call_status") != "parsed" or not isinstance(raw.get("decision"), dict):
             _raise_policy_generation_failure(raw)
-        proposal = raw.get("decision") or {}
+        proposal = {
+            key: value for key, value in (raw.get("decision") or {}).items()
+            if value is not None
+        }
+        raw["decision"] = proposal
         action_type = str(proposal.get("action_type") or "").lower()
         print("Action Attempt {}/{}".format(attempt, max_attempts), flush=True)
         preflight_state = state
@@ -286,7 +299,8 @@ def _select_task_action(
                 else adapt_task_action_to_legacy_action(action)
             )
             checked = _preflight_task_action(args, cycle_dir, preflight_state, legacy_action, step_index)
-            if not getattr(args, "execute", False) or checked.get("moveit_feasible"):
+            plan_only = bool(getattr(args, "moveit_plan_only", False))
+            if (not getattr(args, "execute", False) and not plan_only) or checked.get("moveit_feasible"):
                 write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), report)
                 return checked, proposal
             report = {
@@ -298,11 +312,16 @@ def _select_task_action(
                 "moveit_preflight_error": checked.get("moveit_preflight_error"),
             }
         feedback = action_validation_feedback(proposal, report, state["scene_revision"], attempt); history.append(feedback)
-        fingerprint = fingerprint or normalize_action_fingerprint(proposal, state, state["scene_revision"])
-        ledger.append(ledger_entry(
-            attempt, fingerprint, proposal, str(feedback.get("validation_stage") or "semantic"),
-            [str(report.get("reason") or "proposal_rejected")], state["scene_revision"],
-        ))
+        correctable_protocol_reasons = {
+            "object_binding_grounding_mismatch", "task_action_json_schema_invalid",
+            "invalid_target_pose_base",
+        }
+        if str(report.get("reason")) not in correctable_protocol_reasons:
+            fingerprint = fingerprint or normalize_action_fingerprint(proposal, state, state["scene_revision"])
+            ledger.append(ledger_entry(
+                attempt, fingerprint, proposal, str(feedback.get("validation_stage") or "semantic"),
+                [str(report.get("reason") or "proposal_rejected")], state["scene_revision"],
+            ))
         write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), feedback)
         write_json(os.path.join(cycle_dir, "failure_ledger.json"), ledger)
         write_json(os.path.join(cycle_dir, "replanning_context.json"), build_replanning_context(ledger, min(attempt + 1, max_attempts), max_attempts))
@@ -365,14 +384,26 @@ def _state_with_dynamic_protection(state: dict, protection: dict) -> Tuple[dict,
 
 
 def _initial_state(args: Any) -> dict:
-    if getattr(args, "offline_scene_state", ""): return load_json(args.offline_scene_state)
+    if getattr(args, "offline_scene_state", ""):
+        return attach_configured_workspace(load_json(args.offline_scene_state), args)
     initial_dir = os.path.join(args.output_dir, "initial_task_scene"); capture_scene_observation(args, initial_dir)
-    return load_json(os.path.join(initial_dir, "private_scene_state.json"))
+    return attach_configured_workspace(
+        load_json(os.path.join(initial_dir, "private_scene_state.json")), args,
+    )
 
 
 def _reobserve(args: Any, cycle_dir: str, runtime: dict) -> dict:
+    if getattr(args, "offline_scene_state", ""):
+        raise RuntimeError(
+            "OFFLINE_REOBSERVE_UNAVAILABLE: offline_scene_state is a fixed replay; "
+            "rerun with live perception or provide a newer offline scene"
+        )
     observation_dir = os.path.join(cycle_dir, "observation_after_vlm_reobserve"); capture_scene_observation(args, observation_dir)
-    state = load_json(os.path.join(observation_dir, "private_scene_state.json")); advance_scene_revision(runtime, state); return state
+    state = attach_configured_workspace(
+        load_json(os.path.join(observation_dir, "private_scene_state.json")), args,
+    )
+    advance_scene_revision(runtime, state)
+    return state
 
 
 def _load_semantics_config(args: Any) -> dict:
@@ -422,9 +453,20 @@ def _preflight_task_action(args: Any, cycle_dir: str, state: dict, action: dict,
 def _execute_task_action(args: Any, cycle_dir: str, runtime: dict, memory: dict, state: dict, action: dict, step_index: int) -> Tuple[dict, dict]:
     if action["action_type"] in {"pick_place", "pick_reorient_place"}:
         return execute_pick_place_and_reobserve(args, cycle_dir, runtime, state, action, step_index)
+    if getattr(args, "execute", False) and not getattr(args, "execute_push_clearing", False):
+        raise RuntimeError(
+            "CLEARANCE_EXECUTION_NOT_AUTHORIZED: nudge/pick_away requires --execute-push-clearing"
+        )
     target = object_by_string_id(state.get("objects", []), action.get("target_object_id"))
     if action["action_type"] == "nudge":
         next_state, _memory, _held = execute_nudge_and_reobserve(args, cycle_dir, runtime, memory, state, target, target, action, None, {}, None, step_index)
     else:
         next_state, _memory, _held = execute_pick_away_and_reobserve(args, cycle_dir, runtime, memory, state, target, action, None, {}, None, step_index)
+    if not getattr(args, "execute", False):
+        return next_state, {
+            "status": "planned_only" if getattr(args, "moveit_plan_only", False) else "dry_run_only",
+            "action_type": action["action_type"],
+            "moveit_feasible": bool(action.get("moveit_feasible")),
+            "scene_changed": False,
+        }
     return next_state, {"status": "executed_and_reobserved", "action_type": action["action_type"]}

@@ -133,6 +133,62 @@ class TaskSemanticTests(unittest.TestCase):
         self.assertNotIn("object_id", selected)
         self.assertEqual(selected["target_pose_base"], proposal["target_pose_base"])
 
+    def test_grounding_feedback_includes_exact_observed_center(self):
+        plan = validate_grounded_task_plan(_house_plan(), _house_contract(), _house_state(), 4, CONFIG)
+        proposal = {
+            "action_type": "pick_place", "role_id": "left_support_lower",
+            "selected_object_id": 1, "object_label": "square red",
+            "object_center_base_m": [0.45, 0.2, 0.02], "scene_revision": 4,
+            "target_pose_base": {"position_m": [0.28, -0.08, 0.02], "yaw_rad": 0.0},
+        }
+        selected, report = validate_task_action(
+            proposal, _house_state(), _house_contract(), plan, {},
+        )
+        self.assertIsNone(selected)
+        detail = report["checks"]["object_center_base_m"]["detail"]
+        self.assertEqual(detail["expected_object_center_base_m"], [0.30, 0.0, 0.02])
+        self.assertEqual(detail["received_object_center_base_m"], [0.45, 0.2, 0.02])
+
+    def test_prerequisite_feedback_lists_missing_predicates_and_eligible_roles(self):
+        plan = validate_grounded_task_plan(_house_plan(), _house_contract(), _house_state(), 4, CONFIG)
+        proposal = {
+            "action_type": "pick_place", "role_id": "roof", "selected_object_id": 5,
+            "object_label": "concave_rectangle yellow",
+            "object_center_base_m": [0.35, 0.0, 0.09], "scene_revision": 4,
+            "target_pose_base": {"position_m": [0.35, 0.0, 0.09], "yaw_rad": 0.0},
+        }
+        progress = {"satisfied_predicates": [
+            "left_support_lower.on_table", "right_support_lower.on_table",
+        ]}
+        selected, report = validate_task_action(
+            proposal, _house_state(), _house_contract(), plan, progress,
+        )
+        self.assertIsNone(selected)
+        detail = report["checks"]["role_id"]["detail"]
+        self.assertIn("left_support_lower.supports.left_support_upper", detail["missing_prerequisites"])
+        self.assertIn("left_support_upper", detail["eligible_role_ids"])
+        self.assertNotIn("roof", detail["eligible_role_ids"])
+
+    def test_upper_pose_feedback_includes_exact_support_aligned_target(self):
+        plan = validate_grounded_task_plan(_house_plan(), _house_contract(), _house_state(), 4, CONFIG)
+        proposal = {
+            "action_type": "pick_place", "role_id": "left_support_upper",
+            "selected_object_id": 3, "object_label": "square green",
+            "object_center_base_m": [0.30, 0.0, 0.06], "scene_revision": 4,
+            "target_pose_base": {"position_m": [0.50, 0.10, 0.02], "yaw_rad": 0.0},
+        }
+        progress = {
+            "satisfied_predicates": ["left_support_lower.on_table"],
+            "role_observations": {"left_support_lower": {"observed_object_id": 1}},
+        }
+        selected, report = validate_task_action(
+            proposal, _house_state(), _house_contract(), plan, progress,
+        )
+        self.assertIsNone(selected)
+        detail = report["checks"]["target_pose_base"]["detail"]
+        self.assertEqual(detail["support_role_id"], "left_support_lower")
+        self.assertEqual(detail["expected_aligned_position_m"], [0.30, 0.0, 0.06])
+
 
 def _house_contract():
     return house_contract()

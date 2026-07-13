@@ -5,7 +5,8 @@
     "include_scope": "all_detected_blocks",
     "allow_stacking": false,
     "minimum_spacing_m": 0.015,
-    "alignment_tolerance_m": 0.012
+    "alignment_tolerance_m": 0.012,
+    "row_color_order": ["red", "green", "blue", "yellow"]
   },
   "house_semantics": {
     "structure_variant": "two_column_two_level_roof_triangle",

@@ -316,6 +316,26 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertIn("contact_rule", payload["manipulator_geometry"])
         self.assertIn("没有代码生成的候选动作", prompt)
 
+    def test_blocked_grasp_feedback_becomes_high_priority_clearing_directive(self):
+        payload = vlm_action_policy.build_vlm_action_decision_input(
+            "/tmp/scene.png", "/tmp/overlay.png", _scene(), _target(),
+            protected_ids=[3], base_id=3, memory={}, step_index=1,
+            failure_history=[{
+                "failed_checks": [{
+                    "type": "selected_object_grasp_feasible",
+                    "all_grasps_blocked": True,
+                    "blocking_objects": [{
+                        "id": 4, "label": "square yellow",
+                        "blocker_category": "loose_movable",
+                    }],
+                }],
+            }],
+        )
+        prompt = vlm_action_policy.build_vlm_action_prompt(payload)
+        self.assertIn("禁止重复 pick 目标", prompt)
+        self.assertIn("square yellow", prompt)
+        self.assertIn("nudge 或 pick_away", prompt)
+
     def test_action_input_lists_same_label_instances_by_stable_reference(self):
         scene = _scene()
         scene["objects"].append(

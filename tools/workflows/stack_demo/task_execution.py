@@ -8,7 +8,7 @@ from typing import Any, List, Tuple
 
 from tools.planning.decision_to_execution import write_json
 
-from .commands import capture_empty_observation, moveit_frame_args, run
+from .commands import capture_empty_observation, moveit_frame_args, plan_only_command, run
 from .pick import build_offline_pick_plan, pick_command, place_command, plan_envelope
 from .push_clearing import object_by_string_id
 
@@ -17,14 +17,14 @@ def preflight_pick_place_action(args: Any, cycle_dir: str, state: dict, action: 
     """Use existing pick/place MoveIt commands in plan-only mode for a VLM pose."""
     pick_path, place_path = build_pick_place_plans(args, cycle_dir, state, action, step_index)
     output = dict(action); output.update({"pick_plan_path": pick_path, "place_plan_path": place_path})
-    if not getattr(args, "execute", False):
+    if not getattr(args, "execute", False) and not getattr(args, "moveit_plan_only", False):
         output.update({"moveit_feasible": False, "executable_safe": False}); return output
     try:
-        run(_plan_only(_pick_command(args, pick_path, action)))
+        run(plan_only_command(_pick_command(args, pick_path, action)))
         if action.get("action_type") == "pick_reorient_place":
             for waypoint in action.get("reorientation_plan", {}).get("waypoints", []):
-                run(_plan_only(_reorientation_waypoint_command(args, waypoint)))
-        run(_plan_only(_place_command(args, place_path, action)))
+                run(plan_only_command(_reorientation_waypoint_command(args, waypoint)))
+        run(plan_only_command(_place_command(args, place_path, action)))
     except Exception as exc:
         output.update({"moveit_feasible": False, "executable_safe": False, "moveit_preflight_error": str(exc)}); return output
     if output.get("reorientation_plan"):
@@ -88,7 +88,8 @@ def build_pick_place_plans(args: Any, cycle_dir: str, state: dict, action: dict,
         write_json(pick_path, pick_plan)
     pose = action["target_pose_base"]; position = [float(value) for value in pose["position_m"]]
     step = {
-        "step": 1, "action": "place_relative", "object_id": obj.get("id"), "object_label": obj.get("label"),
+        "step": 1, "action": "place_relative", "status": "planned",
+        "object_id": obj.get("id"), "object_label": obj.get("label"),
         "coordinate_frame": "base_link", "coordinate_source": "vlm_task_action_target_pose_base",
         "target_position_m": position, "approach_position_m": [position[0], position[1], position[2] + float(args.approach_height_m)],
         "target_yaw_deg": (float(pose["yaw_rad"]) * 180.0 / 3.141592653589793 if pose.get("yaw_rad") is not None else None),
@@ -97,7 +98,6 @@ def build_pick_place_plans(args: Any, cycle_dir: str, state: dict, action: dict,
         "target_orientation_xyzw": (
             (action.get("reorientation_plan") or {}).get("target_tool_orientation_xyzw")
             or action.get("target_tool_orientation_xyzw")
-            or pose.get("orientation_xyzw")
         ),
         "exact_tool_yaw_required": pose.get("yaw_rad") is not None,
         "yaw_frame": "base_link", "yaw_source": "vlm_task_action" if pose.get("yaw_rad") is not None else "house_frame_code_geometry",
@@ -106,17 +106,13 @@ def build_pick_place_plans(args: Any, cycle_dir: str, state: dict, action: dict,
     return pick_path, place_path
 
 
-def _plan_only(command: list) -> list:
-    output = list(command)
-    for flag, count in (("--execute", 0), ("--enable-gripper", 0), ("--skip-gripper-init", 0), ("--gripper-port", 1)):
-        while flag in output:
-            index = output.index(flag); del output[index:index + count + 1]
-    return output
-
-
 def _place_command(args: Any, place_path: str, action: dict) -> List[str]:
     command = place_command(args, place_path)
-    if (action.get("target_pose_base") or {}).get("orientation_xyzw") is not None:
+    code_tool_orientation = (
+        (action.get("reorientation_plan") or {}).get("target_tool_orientation_xyzw")
+        or action.get("target_tool_orientation_xyzw")
+    )
+    if code_tool_orientation is not None:
         command[command.index("--orientation-mode") + 1] = "step-quaternion"
     return command
 

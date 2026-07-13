@@ -82,6 +82,26 @@ python3 tools/workflows/stack_demo_pipeline.py --instruction "搭一个房子"
 python3 tools/workflows/stack_demo_pipeline.py --instruction "按颜色整理积木"
 ```
 
+动作安全检查使用 `config/workspace_bounds.json`。该文件必须明确写出 `base_link`、
+米制单位以及 `xmin/xmax/ymin/ymax/zmin/zmax` 六个方向；也可用
+`--workspace-bounds-json` 指向重新标定后的文件。当前默认值结合 D435i/桌面平面标定与
+实机确认边界（`xmax=0.65 m`、`y=-0.10..0.40 m`），不从积木检测框推断。每次在线观测和重新观测都会把这份边界注入
+scene state，文件缺失、frame/unit 错误或边界倒置都会在动作规划前停止。
+
+`--moveit-plan-only` 会调用机器人端真实 MoveIt 检查首动作，但会移除轨迹执行和夹爪参数；
+它与仅生成计划 JSON 的默认 dry-run 不同，也不会像 `--execute` 那样驱动 UR5。
+`--moveit-plan-only` 与 `--execute` 互斥，同时出现会在任何动作前立即拒绝。
+
+Ollama 各策略上下文有固定硬上限，不会根据 prompt 体积自动扩展。`--vlm-num-gpu 0`
+可在显卡供电诊断期间强制 CPU 推理；默认 `-1` 仍由 Ollama 自动选择 GPU。
+语义任务默认使用 `qwen3-vl:8b-instruct`；质量对照使用
+`--model qwen3-vl:30b-a3b-instruct`。不要用同名的 thinking 标签执行严格 JSON
+动作规划，它可能把整个输出预算消耗在 thinking 而不生成 content。
+
+本机 RTX 3090 曾在模型推理期间发生没有 OOM/Xid/panic 日志的硬复位。实机调试期间
+先执行 `sudo nvidia-smi -pl 250` 并确认 `nvidia-smi` 显示 250W；该限制在重启或
+驱动重载后可能需要重新设置。三个任务稳定前不要直接恢复默认 370W。
+
 旧线性堆叠仅作为兼容路径保留，必须显式启用 `--legacy-linear-stack`。
 详细自主 VLM 策略见
 [`tools/workflows/stack_demo/README.md`](tools/workflows/stack_demo/README.md)：
@@ -190,6 +210,10 @@ VLM 决策日志：
 `--vlm-max-backend-retries`、`--vlm-max-budget-retries` 和 `--unload-model-after-task`。
 每个调用在 `ollama_calls/` 下保存完整 request、response、thinking、content 和 diagnostics；
 任务根目录保存 `model_runtime_diagnostics.json`。
+
+默认生成预算按调用复杂度分级：task contract 为 2K，action 为 3K，stack/grounded 为 4K，
+orientation analysis 为 8K；上下文分别为 8K、12K、16K、24K。遇到明确截断时按
+4K→6K→8K→12K 渐进扩容，避免正常调用直接占用 12K–20K 输出预算。
 
 ### 任务路由与当前协议
 

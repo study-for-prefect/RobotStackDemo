@@ -23,6 +23,7 @@ from robot_scene_pipeline.stack_state import estimate_stack_state
 from tools.planning.build_geometry_pick_plan import find_object, set_stack_demo_yaw
 
 from .commands import capture_scene_observation, load_json, relative_translate_command, run
+from .workspace import attach_configured_workspace
 
 
 def _parse_base_offsets(raw_value):
@@ -182,7 +183,7 @@ def require_geometry_object(obj):
 
 def load_or_capture_initial(args):
     if args.offline_scene_state:
-        state = load_json(args.offline_scene_state)
+        state = attach_configured_workspace(load_json(args.offline_scene_state), args)
         if args.stack_decision_json:
             decision = load_json(args.stack_decision_json)
         elif args.base_object_id is not None and args.stack_order:
@@ -207,7 +208,9 @@ def load_or_capture_initial(args):
                 time.sleep(float(args.initial_observation_stable_wait_s))
             _move_to_initial_recovery_offset(args, attempt)
         capture_scene_observation(args, initial_dir)
-        state = load_json(os.path.join(initial_dir, "private_scene_state.json"))
+        state = attach_configured_workspace(
+            load_json(os.path.join(initial_dir, "private_scene_state.json")), args,
+        )
         objects = [obj for obj in state.get("objects", []) if not obj.get("is_workspace")]
         decision_ok, decision_error = _initial_decision_valid(args, state)
         _write_initial_observation_report(args, initial_dir, state, decision_error=decision_error)
@@ -226,7 +229,9 @@ def load_or_capture_initial(args):
         )
     reasoning_dir = os.path.join(args.output_dir, "initial_order_vlm")
     capture_scene_observation(args, reasoning_dir)
-    state = load_json(os.path.join(reasoning_dir, "private_scene_state.json"))
+    state = attach_configured_workspace(
+        load_json(os.path.join(reasoning_dir, "private_scene_state.json")), args,
+    )
     _write_initial_observation_report(args, reasoning_dir, state, decision_error=None)
     try:
         decision = _call_initial_vlm_stack_decision(args, state, reasoning_dir)

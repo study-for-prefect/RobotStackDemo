@@ -8,8 +8,10 @@ from typing import Any, Dict, List
 
 
 ACTION_CHANGE_FIELDS = [
+    "strategy_id",
     "object_id",
     "action_type",
+    "target_pose_base",
     "direction_base",
     "distance_m",
     "contact_side",
@@ -101,9 +103,10 @@ def compact_action(proposal: Dict[str, Any]) -> Dict[str, Any]:
     return {
         key: proposal.get(key)
         for key in (
-            "action_type", "object_id", "target_object_id", "contact_side",
+            "strategy_id", "action_type", "object_id", "target_object_id", "contact_side",
+            "selected_object_ref", "selected_track_id", "group_id", "target_region_id", "role_id",
             "direction_base", "push_direction_base", "distance_m", "push_distance_m",
-            "gripper_yaw_rad", "safe_place_center_base_m", "reason",
+            "gripper_yaw_rad", "safe_place_center_base_m", "target_pose_base", "reason",
         )
         if proposal.get(key) is not None
     }

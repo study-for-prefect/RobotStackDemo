@@ -47,6 +47,21 @@ class ActionIdentityAndContactTests(unittest.TestCase):
         self.assertTrue(fourth["required_strategy_change"])
         self.assertTrue(fifth["safe_stop_allowed"])
 
+    def test_pick_place_pose_corrections_do_not_forbid_the_required_action_type(self):
+        state = _tracked_state()
+        action = {
+            "strategy_id": "place_upper", "action_type": "pick_place",
+            "selected_object_id": 1, "role_id": "left_support_upper",
+            "target_pose_base": {"position_m": [0.3, 0.0, 0.05]},
+        }
+        fingerprint = normalize_action_fingerprint(action, state, 12)
+        ledger = [
+            ledger_entry(index, fingerprint, action, "action_semantic_validation", ["bad_pose"], 12)
+            for index in (1, 2)
+        ]
+        constraints = build_replanning_context(ledger, 3, 5)["hard_constraints"]
+        self.assertNotIn("pick_place", constraints["forbidden_action_types"])
+
     def test_track_survives_detector_id_and_order_changes(self):
         memory = {}
         first = [_object(1, "square green", 0.0), _object(2, "square green", 0.10)]
@@ -222,6 +237,8 @@ class ActionIdentityAndContactTests(unittest.TestCase):
 
     def test_linear_stack_runtime_repeated_nudge_has_one_fingerprint_and_is_semantically_invalid(self):
         cycle = os.path.join(ROOT, "runtime", "linear_stack_20260712_164342", "cycle_01_object_1")
+        if not os.path.isdir(cycle):
+            self.skipTest("optional recorded runtime fixture is not present")
         with open(os.path.join(cycle, "scene_state_before_action.json"), encoding="utf-8") as handle:
             state = json.load(handle)
         state["scene_revision"] = 1
@@ -247,9 +264,14 @@ class ActionIdentityAndContactTests(unittest.TestCase):
             ("organize_blocks_20260712_164734", "initial_task_scene/private_scene_state.json"),
             ("build_house_20260712_165331", "initial_task_scene/private_scene_state.json"),
         ]
+        checked = 0
         for runtime_name, state_path in relative_states:
             with self.subTest(runtime=runtime_name):
                 path = os.path.join(ROOT, "runtime", runtime_name, state_path)
+                # runtime/ is intentionally not a portable source fixture.  Replay
+                # whichever recordings are present without failing a clean clone.
+                if not os.path.isfile(path):
+                    continue
                 with open(path, encoding="utf-8") as handle:
                     state = json.load(handle)
                 objects = state.get("objects", [])
@@ -259,6 +281,8 @@ class ActionIdentityAndContactTests(unittest.TestCase):
                 self.assertEqual(len(track_ids), len(set(track_ids)))
                 self.assertEqual(len(assignments), len(objects))
                 self.assertEqual(len(memory["track_history"]), 1)
+                checked += 1
+        self.assertGreater(checked, 0, "no recorded runtime scene fixture is available")
 
 
 def _object(object_id, label, x, y=0.0, size=None):

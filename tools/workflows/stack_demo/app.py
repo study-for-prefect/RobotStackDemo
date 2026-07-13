@@ -26,6 +26,7 @@ from .commands import (
     failure_state_path,
     init_ready_pose,
     load_json,
+    plan_only_command,
     retry_close_observation,
     run,
 )
@@ -133,7 +134,10 @@ def main() -> int:
 
     warm_result = warm_model(args, args.output_dir)
     if warm_result.transport_status != "ok":
-        raise RuntimeError("VLM_BACKEND_FAILED: {}".format(warm_result.error_type or "MODEL_WARMUP_FAILED"))
+        raise RuntimeError("VLM_BACKEND_FAILED: {}: {}".format(
+            warm_result.error_type or "MODEL_WARMUP_FAILED",
+            warm_result.error_message or "model warmup failed",
+        ))
 
     if route_task_type(args.instruction) == "stack_blocks":
         args.legacy_linear_stack = True
@@ -271,6 +275,21 @@ def main() -> int:
                 base_template=base_object,
                 future_place_regions=future_stack_place_regions(base_object, previous_stack_xy, args),
             )
+            planned_clearance = current_state.pop("_moveit_plan_only_clearance_action", None)
+            if planned_clearance is not None:
+                summary = {
+                    "task_type": "stack_blocks",
+                    "execution_status": "planned_only",
+                    "planned_action": planned_clearance,
+                    "moveit_feasible": bool(planned_clearance.get("moveit_feasible")),
+                    "scene_changed": False,
+                    "gripper_enabled": False,
+                    "next_required_step": "execute_clearance_then_reobserve_before_pick",
+                }
+                write_json(os.path.join(args.output_dir, "stack_demo_summary.json"), summary)
+                if os.path.exists(failure_state_path(args)):
+                    os.remove(failure_state_path(args))
+                return 0
             selected_pick_template = copy.deepcopy(held_object)
             pre_pick_excluded_ids, pre_pick_excluded_xy = target_exclusion_for_pre_pick(held_object)
             current_base_object, stack_state = estimate_current_stack(
@@ -473,6 +492,27 @@ def main() -> int:
                 "yaw_deg": place_step["chosen_place_yaw_deg"],
                 "source": place_step["coordinate_source"],
             }
+
+            if args.moveit_plan_only and not args.execute:
+                runtime["current_stage"] = "linear_stack_moveit_plan_only"
+                run(plan_only_command(pick_command(args, pick_plan_path)))
+                run(plan_only_command(place_command(args, place_plan_path)))
+                summary = {
+                    "task_type": "stack_blocks",
+                    "execution_status": "planned_only",
+                    "base_object_id": base_id,
+                    "full_stack_order": decision.get("full_stack_order", [base_id] + list(order)),
+                    "stack_order": order,
+                    "planned_object_id": held_object.get("id"),
+                    "pick_plan": pick_plan_path,
+                    "place_plan": place_plan_path,
+                    "moveit_feasible": True,
+                    "gripper_enabled": False,
+                }
+                write_json(os.path.join(args.output_dir, "stack_demo_summary.json"), summary)
+                if os.path.exists(failure_state_path(args)):
+                    os.remove(failure_state_path(args))
+                return 0
 
             print(
                 "\nCycle {} pick plan ready; grasp immediately before base approach: "

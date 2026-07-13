@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from .io_utils import image_to_base64
 from .house_task_definition import HOUSE_DEFINITION_PROMPT, HOUSE_ROLE_IDS, canonical_house_goal_spec
 from .ollama_policy_client import call_policy
+from .organize_scope import color_value_from_label, organize_scope_objects
 from .task_schemas import schema_for_policy
 from .task_routing import route_task_type
 
@@ -81,8 +82,8 @@ def build_grounded_task_plan_input(
         "minimal_overlay": state.get("annotated_image"),
         "scene_revision": int(scene_revision),
         "task_contract": task_contract,
-        "goal_progress": goal_progress or {},
-        "previous_plan": previous_plan or {},
+        "goal_progress": compact_goal_progress(goal_progress),
+        "previous_plan": compact_grounded_task_plan(previous_plan),
         "failure_history": list(failure_history or []),
         "workspace_bounds": state.get("table_bounds") or state.get("workspace_bounds"),
         "semantics_config": (
@@ -90,7 +91,13 @@ def build_grounded_task_plan_input(
             if task_contract.get("task_type") == "build_house"
             else {"organize_defaults": semantics_config.get("organize_defaults", {})}
         ),
-        "objects": [compact_task_object(obj) for obj in _scene_objects(state)],
+        "objects": [
+            compact_task_object(obj) for obj in (
+                organize_scope_objects(state)
+                if task_contract.get("task_type") == "organize_blocks"
+                else _scene_objects(state)
+            )
+        ],
         "binding_rules": [
             "All object_ref values are valid only for this scene_revision.",
             "Assignments must be temporary and replaceable when the contract allows it.",
@@ -107,6 +114,24 @@ def build_grounded_task_plan_input(
         value["binding_rules"].append(
             "For roof and triangle_top output semantic orientation_observations only; code computes target orientation."
         )
+    else:
+        organize_objects = organize_scope_objects(state)
+        value["objects"] = [compact_task_object(obj) for obj in organize_objects]
+        value["layout_slot_candidates"] = _organize_layout_slots(
+            state.get("table_bounds") or state.get("workspace_bounds"), organize_objects,
+        )
+        value["organize_plan_rules"] = [
+            "Create exactly one group for each color value present in the detector labels.",
+            "object_ids are current-scene detector_object_id values, not persistent identities.",
+            "Assign every color-labeled block exactly once and never include a non-block false detection.",
+            "Create exactly one target region per group and link it with target_region_id.",
+            "Every region must be inside workspace_bounds and regions must not overlap.",
+            "For rows, allocate separated horizontal bands: members share y within alignment_tolerance_m and spread along x.",
+            "Size each region for all member footprints plus minimum_spacing_m; do not use the current group centroid as the region definition.",
+            "Finish the bounded construction once; do not repeatedly reconsider what target_regions means.",
+            "Target regions are future destinations and do not need to contain the objects at their current positions.",
+            "Copy each layout_slot_candidates bounds exactly once for its assigned_color; do not change assignments or recalculate bounds.",
+        ]
     return value
 
 
@@ -119,16 +144,104 @@ def build_task_action_input(
     value = {
         "schema_version": "task_action_input_v1", "scene_rgb": state.get("snapshot_image"),
         "minimal_overlay": state.get("annotated_image"), "scene_revision": int(scene_revision),
-        "task_contract": task_contract, "grounded_task_plan": grounded_plan,
-        "current_goal_progress": goal_progress, "failure_history": list(failure_history or []),
+        "task_contract": task_contract,
+        "grounded_task_plan": compact_grounded_task_plan(grounded_plan),
+        "current_goal_progress": compact_goal_progress(goal_progress),
+        "failure_history": list(failure_history or []),
         "replanning_context": replanning_context or {},
         "workspace_bounds": state.get("table_bounds") or state.get("workspace_bounds"),
-        "objects": [compact_task_object(obj) for obj in _scene_objects(state)],
+        "objects": [
+            compact_task_object(obj) for obj in (
+                organize_scope_objects(state)
+                if task_contract.get("task_type") == "organize_blocks"
+                else _scene_objects(state)
+            )
+        ],
         "output_schema": schema_for_policy("task_action", task_contract.get("task_type", "")),
     }
     if task_contract.get("task_type") == "build_house":
         value["build_house_definition"] = HOUSE_DEFINITION_PROMPT
     return value
+
+
+def compact_goal_progress(goal_progress: Optional[dict]) -> dict:
+    """Keep policy-relevant progress without the combinatorial assignment audit log."""
+    if not isinstance(goal_progress, dict):
+        return {}
+    policy_keys = {
+        "schema_version", "task_type", "scene_revision",
+        "satisfied_predicates", "unsatisfied_predicates",
+        "task_complete", "repair_required", "selected_role_assignment",
+        "group_diagnostics", "scene_events",
+    }
+    compact = {key: value for key, value in goal_progress.items() if key in policy_keys}
+    if compact.get("task_type") == "build_house":
+        compact["eligible_role_ids_for_next_action"] = _eligible_house_action_roles(compact)
+    return compact
+
+
+def _eligible_house_action_roles(progress: dict) -> List[str]:
+    """Expose validator-derived role eligibility without choosing an action."""
+    satisfied = set(progress.get("satisfied_predicates") or [])
+    unsatisfied = set(progress.get("unsatisfied_predicates") or [])
+    prerequisites = {
+        "left_support_lower": set(),
+        "right_support_lower": set(),
+        "left_support_upper": {"left_support_lower.on_table"},
+        "right_support_upper": {"right_support_lower.on_table"},
+        "roof": {
+            "left_support_lower.supports.left_support_upper",
+            "right_support_lower.supports.right_support_upper",
+            "left_column.vertical_aligned", "right_column.vertical_aligned",
+            "columns.height_aligned",
+        },
+        "triangle_top": {
+            "left_support_upper.supports.roof", "right_support_upper.supports.roof",
+            "roof.bridges.upper_supports", "roof.correct_face_up", "roof.opening_down",
+            "roof.straight_edge_up", "roof.orientation_correct",
+        },
+    }
+    role_predicate_prefixes = {
+        "left_support_lower": ("left_support_lower.",),
+        "right_support_lower": ("right_support_lower.",),
+        "left_support_upper": (
+            "left_support_lower.supports.left_support_upper", "left_column.vertical_aligned",
+        ),
+        "right_support_upper": (
+            "right_support_lower.supports.right_support_upper", "right_column.vertical_aligned",
+        ),
+        "roof": (
+            "left_support_upper.supports.roof", "right_support_upper.supports.roof", "roof.",
+        ),
+        "triangle_top": ("roof.supports.triangle_top", "triangle_top."),
+    }
+    eligible = []
+    for role_id, required in prerequisites.items():
+        prefixes = role_predicate_prefixes[role_id]
+        if role_id in {"left_support_lower", "right_support_lower"}:
+            needs_work = "{}.on_table".format(role_id) in unsatisfied
+        else:
+            needs_work = any(any(item.startswith(prefix) for prefix in prefixes) for item in unsatisfied)
+        if needs_work and required.issubset(satisfied):
+            eligible.append(role_id)
+    return eligible
+
+
+def compact_grounded_task_plan(plan: Optional[dict]) -> dict:
+    """Remove fixed or duplicated house-plan fields before the next policy call."""
+    if not isinstance(plan, dict):
+        return {}
+    redundant = {
+        "assembly_steps", "orientation_observations", "reason", "confidence",
+    }
+    compact = {key: value for key, value in plan.items() if key not in redundant}
+    if compact.get("task_type") == "organize_blocks":
+        compact["groups"] = [
+            {key: value for key, value in group.items() if key != "object_ids"}
+            for group in compact.get("groups", []) if isinstance(group, dict)
+        ]
+        compact["note"] = "previous detector object_ids were removed because they are stale after reobservation"
+    return compact
 
 
 def call_vlm_task_policy(
@@ -199,15 +312,46 @@ def _task_prompt(policy_input: dict, policy_kind: str) -> str:
                 "roof 与 triangle_top 只输出图像语义姿态观察，不输出最终旋转轴或角度。"
             )
         else:
-            instruction = "根据按颜色整理合同输出当前场景的分组绑定和目标区域，不得输出任何房屋角色或房屋结构。"
+            instruction = (
+                "根据按颜色整理合同一次性输出当前场景分组和目标区域，不得输出任何房屋角色或房屋结构。"
+                "严格执行 organize_plan_rules：按标签颜色分组；object_ids 直接复制当前 detector_object_id；"
+                "在 workspace_bounds 内为每组分配互不重叠且容量足够的矩形。rows 表示每个颜色组各占一条水平带。"
+                "target_regions 是未来放置区，不要求覆盖积木当前坐标。直接复制 layout_slot_candidates 的边界，"
+                "严格使用每个 slot 的 assigned_color；禁止根据当前物体 y 坐标重排颜色或重算区域。"
+            )
     else:
+        recovery_directive = _task_action_recovery_directive(policy_input)
         instruction = (
+            recovery_directive
+            +
             "基于固定任务合同和当前未满足谓词输出一个动作。所有可执行动作必须使用 selected_object_ref 或 selected_track_id，禁止裸整数 object_id/selected_object_id。"
             "房子 pick_place 给 role_id；整理 pick_place 给 group_id 和 target_region_id；并给 scene_revision、准确 grounding 和目标位姿。"
+            "object_label 和 object_center_base_m 必须逐值复制所选 objects 条目的 label 和 geometry_center_base_m，绝不能复制 target_pose_base。"
             "需要改变 roof/triangle 正反面时选择 pick_reorient_place；仅 yaw 不能代替翻面，具体轴角由代码计算。"
             "nudge/pick_away 也使用统一引用和完整物理参数。禁止输出 replanning_context 中的失败指纹，不能只修改 reason、confidence 或小数尾数。"
             "nudge 只能用于桌面平面清障，不能形成 on_top_of；堆叠必须 pick_place。只能选择当前可见引用；不要自动宣称任务完成。"
         )
+        if (policy_input.get("task_contract") or {}).get("task_type") == "build_house":
+            instruction += (
+                "严格按 current_goal_progress.satisfied_predicates 判断装配先决条件，角色已绑定不等于结构已完成。"
+                "先放 left_support_lower/right_support_lower，再放各自 upper，之后 roof，最后 triangle_top；"
+                "只选择其全部先决谓词已在 satisfied_predicates 中的角色，不得提前选择屋顶或三角形。"
+                "role_id 必须从 current_goal_progress.eligible_role_ids_for_next_action 中选择；"
+                "每个 pick_place/pick_reorient_place 都必须完整输出 selected_object_id、object_label、"
+                "object_center_base_m、scene_revision 和 target_pose_base；target_pose_base 至少包含"
+                "position_m:[x,y,z]，普通支撑块还必须包含 yaw_rad。它是结构中的放置中心，绝不能省略，"
+                "也不能直接照抄源物体 object_center_base_m。放置 upper 时，目标 XY 等于其绑定 lower 的中心 XY，"
+                "目标 Z=lower_center_z+(lower_height+upper_height)/2，尺寸从 objects.dimensions_m 获取。"
+            )
+        if (policy_input.get("task_contract") or {}).get("task_type") == "organize_blocks":
+            instruction += (
+                "整理目标搬运优先使用 pick_place，不要因为检测框重叠就先 nudge。pick_place 必须完整输出 strategy_id、"
+                "selected_object_ref/selected_track_id、group_id、target_region_id、object_label、object_center_base_m、"
+                "scene_revision 和 target_pose_base。目标完整足迹不得与任何当前物体重叠；必须检查所有物体中心，"
+                "不要机械地选择区域中心。失败反馈给出 blocking_object 时必须更换 XY。"
+                "若失败反馈给出 allowed_center_x_m/allowed_center_y_m，下一次 target_pose_base.position_m 的 XY"
+                "必须直接选在这两个闭区间内，禁止再次复制源物体中心。"
+            )
     ontology = "\n{}\n".format(HOUSE_DEFINITION_PROMPT) if (
         policy_input.get("expected_task_type") == "build_house"
         or (policy_input.get("task_contract") or {}).get("task_type") == "build_house"
@@ -217,10 +361,76 @@ def _task_prompt(policy_input: dict, policy_kind: str) -> str:
     )
 
 
+def _task_action_recovery_directive(policy_input: dict) -> str:
+    history = policy_input.get("failure_history") or []
+    if not history:
+        return ""
+    latest = history[-1] if isinstance(history[-1], dict) else {}
+    target_check = next((
+        item for item in latest.get("failed_checks", [])
+        if isinstance(item, dict) and item.get("type") == "target_pose_base"
+    ), None)
+    if target_check and target_check.get("suggested_interval_midpoint_position_m"):
+        return (
+            "最高优先级位姿纠错：上次 target_pose_base 已被拒绝。下一动作必须改变 target_pose_base，"
+            "先直接采用 suggested_interval_midpoint_position_m={}；绝不能再次输出 rejected_action 中的旧位置。"
+            "该点仍会接受重叠、间距和布局安全校验。".format(
+                target_check["suggested_interval_midpoint_position_m"]
+            )
+        )
+    grounding_check = next((
+        item for item in latest.get("failed_checks", [])
+        if isinstance(item, dict) and item.get("type") in {"object_center_base_m", "object_label"}
+    ), None)
+    if grounding_check:
+        if grounding_check.get("expected_object_center_base_m") is not None:
+            return (
+                "最高优先级 grounding 纠错：保持上次物理动作和 target_pose_base，但 "
+                "object_center_base_m 必须逐值改为源物体中心 {}，绝不能填目标中心。".format(
+                    grounding_check["expected_object_center_base_m"]
+                )
+            )
+        if grounding_check.get("expected_object_label") is not None:
+            return (
+                "最高优先级 grounding 纠错：保持上次物理动作和 target_pose_base，但 "
+                "object_label 必须逐字改为源物体标签 {!r}。".format(
+                    grounding_check["expected_object_label"]
+                )
+            )
+    return ""
+
+
 def _scene_objects(state: dict) -> Iterable[dict]:
     return [
         obj for obj in state.get("objects", [])
         if isinstance(obj, dict) and not obj.get("is_workspace") and str(obj.get("label", "")).lower() != "workspace"
+    ]
+
+
+def _organize_layout_slots(workspace: object, objects: List[dict]) -> List[dict]:
+    """Offer equal non-overlapping row slots; the VLM still assigns colors to slots."""
+    present = {color_value_from_label(obj.get("label")) for obj in objects} - {None}
+    canonical_order = ("red", "green", "blue", "yellow")
+    colors = [color for color in canonical_order if color in present]
+    if not isinstance(workspace, dict) or not colors:
+        return []
+    try:
+        xmin, xmax = float(workspace["xmin"]), float(workspace["xmax"])
+        ymin, ymax = float(workspace["ymin"]), float(workspace["ymax"])
+    except (KeyError, TypeError, ValueError):
+        return []
+    height = (ymax - ymin) / len(colors)
+    return [
+        {
+            "slot_id": "row_slot_{:02d}".format(index + 1),
+            "assigned_color": colors[index],
+            "bounds_base_m": {
+                "xmin": round(xmin, 6), "xmax": round(xmax, 6),
+                "ymin": round(ymin + index * height, 6),
+                "ymax": round(ymin + (index + 1) * height, 6),
+            },
+        }
+        for index in range(len(colors))
     ]
 
 

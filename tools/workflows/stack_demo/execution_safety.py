@@ -15,6 +15,10 @@ OFFLINE_SOURCE_FIELDS = (
 
 def validate_execution_source(args: Any) -> None:
     """Forbid robot motion when perception is supplied by an offline source."""
+    if bool(getattr(args, "execute", False)) and bool(getattr(args, "moveit_plan_only", False)):
+        raise RuntimeError(
+            "--execute and --moveit-plan-only are mutually exclusive; remove --execute for plan-only validation."
+        )
     if not bool(getattr(args, "execute", False)):
         return
     enabled = [field for field in OFFLINE_SOURCE_FIELDS if getattr(args, field, None)]

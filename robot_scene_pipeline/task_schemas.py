@@ -80,6 +80,12 @@ ORGANIZE_BLOCKS_CONTRACT_SCHEMA = {
                 "allow_stacking": {"const": False},
                 "minimum_spacing_m": {"type": "number"},
                 "alignment_tolerance_m": {"type": "number"},
+                "row_color_order": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["red", "green", "blue", "yellow"]},
+                    "minItems": 1,
+                    "maxItems": 4,
+                },
             },
             "additionalProperties": False,
         },
@@ -161,6 +167,37 @@ LEGACY_GROUNDED_HOUSE_PLAN_SCHEMA = {
     "additionalProperties": True,
 }
 
+ORGANIZE_GROUP_SCHEMA = {
+    "type": "object",
+    "required": ["group_id", "group_value", "object_ids", "target_region_id"],
+    "properties": {
+        "group_id": {"type": "string"},
+        "group_value": {"type": "string"},
+        "object_ids": {"type": "array", "items": {"type": ["integer", "string"]}},
+        "target_region_id": {"type": "string"},
+        "minimum_required_count": {"type": "integer", "minimum": 1},
+    },
+    "additionalProperties": False,
+}
+
+ORGANIZE_REGION_SCHEMA = {
+    "type": "object",
+    "required": ["region_id", "bounds_base_m"],
+    "properties": {
+        "region_id": {"type": "string"},
+        "bounds_base_m": {
+            "type": "object",
+            "required": ["xmin", "xmax", "ymin", "ymax"],
+            "properties": {
+                "xmin": {"type": "number"}, "xmax": {"type": "number"},
+                "ymin": {"type": "number"}, "ymax": {"type": "number"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "additionalProperties": False,
+}
+
 GROUNDED_ORGANIZE_PLAN_SCHEMA = {
     "type": "object",
     "required": ["schema_version", "task_type", "scene_revision", "groups", "target_regions"],
@@ -168,15 +205,38 @@ GROUNDED_ORGANIZE_PLAN_SCHEMA = {
         "schema_version": {"const": "grounded_task_plan_v1"},
         "task_type": {"const": "organize_blocks"},
         "scene_revision": {"type": "integer"},
-        "groups": {"type": "array"},
-        "target_regions": {"type": "array"},
+        "groups": {"type": "array", "items": ORGANIZE_GROUP_SCHEMA, "minItems": 1},
+        "target_regions": {"type": "array", "items": ORGANIZE_REGION_SCHEMA, "minItems": 1},
+        "reason": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
     },
-    "additionalProperties": True,
+    "additionalProperties": False,
 }
 
 TASK_ACTION_SCHEMA = {
     "type": "object",
     "required": ["action_type"],
+    "oneOf": [
+        {
+            "properties": {
+                "action_type": {"type": "string", "enum": ["pick_place", "pick_reorient_place"]},
+            },
+            "required": [
+                "selected_object_id", "object_label", "object_center_base_m",
+                "scene_revision", "target_pose_base",
+            ],
+        },
+        {
+            "properties": {
+                "action_type": {"type": "string", "enum": ["nudge", "pick_away"]},
+            },
+        },
+        {
+            "properties": {
+                "action_type": {"type": "string", "enum": ["reobserve", "stop"]},
+            },
+        },
+    ],
     "properties": {
         "strategy_id": {"type": "string"},
         "action_type": {"type": "string", "enum": ["pick_place", "pick_reorient_place", "nudge", "pick_away", "reobserve", "stop"]},
@@ -222,6 +282,45 @@ TASK_ACTION_SCHEMA = {
     "additionalProperties": True,
 }
 
+# Ollama/llama.cpp currently does not reliably enforce required fields nested
+# below oneOf.  Keep the semantic schema above for code-side branch validation,
+# but give constrained generation a flat set of required keys.  Fields that do
+# not apply to reobserve/stop or to the other task family are explicitly null.
+TASK_ACTION_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": [
+        "strategy_id", "action_type", "selected_object_ref", "selected_track_id",
+        "selected_object_id", "role_id", "group_id", "target_region_id",
+        "object_label", "object_center_base_m", "scene_revision",
+        "target_pose_base", "reason", "confidence",
+    ],
+    "properties": {
+        "strategy_id": {"type": "string"},
+        "action_type": TASK_ACTION_SCHEMA["properties"]["action_type"],
+        "selected_object_ref": {"type": ["string", "null"]},
+        "selected_track_id": {"type": ["string", "null"]},
+        "selected_object_id": {"type": ["integer", "string", "null"]},
+        "role_id": {"type": ["string", "null"], "enum": list(HOUSE_ROLE_IDS) + [None]},
+        "group_id": {"type": ["string", "null"]},
+        "target_region_id": {"type": ["string", "null"]},
+        "object_label": {"type": ["string", "null"]},
+        "object_center_base_m": {
+            "type": ["array", "null"], "items": {"type": "number"},
+            "minItems": 3, "maxItems": 3,
+        },
+        "scene_revision": {"type": "integer"},
+        "target_pose_base": {
+            "type": ["object", "null"],
+            "properties": TASK_ACTION_SCHEMA["properties"]["target_pose_base"]["properties"],
+            "required": ["position_m"],
+            "additionalProperties": False,
+        },
+        "reason": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    },
+    "additionalProperties": False,
+}
+
 VLM_ACTION_SCHEMA = {
     "type": "object",
     "required": [
@@ -256,6 +355,59 @@ VLM_ACTION_SCHEMA = {
     "additionalProperties": True,
 }
 
+# As with TASK_ACTION_OUTPUT_SCHEMA, constrained generation needs top-level
+# required keys because required fields inside conditional branches are not
+# reliably honored by the local Ollama/llama.cpp build.  Non-applicable motion
+# fields are null for pick/reobserve/stop and are checked semantically afterward.
+VLM_ACTION_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": [
+        "strategy_id", "action_type", "scene_problem",
+        "object_ref", "object_track_id", "object_label", "object_center_base_m",
+        "target_object_ref", "target_object_track_id", "target_object_label",
+        "target_object_center_base_m", "contact_side", "direction_base",
+        "distance_m", "gripper_yaw_rad", "safe_place_center_base_m",
+        "predicted_scene_benefit", "risk_assessment", "reason", "confidence",
+        "alternative_actions",
+    ],
+    "properties": {
+        "strategy_id": {"type": "string"},
+        "action_type": VLM_ACTION_SCHEMA["properties"]["action_type"],
+        "scene_problem": {"type": "string"},
+        "object_ref": {"type": ["string", "null"]},
+        "object_track_id": {"type": ["string", "null"]},
+        "object_label": {"type": ["string", "null"]},
+        "object_center_base_m": {
+            "type": ["array", "null"], "items": {"type": "number"},
+            "minItems": 3, "maxItems": 3,
+        },
+        "target_object_ref": {"type": ["string", "null"]},
+        "target_object_track_id": {"type": ["string", "null"]},
+        "target_object_label": {"type": ["string", "null"]},
+        "target_object_center_base_m": {
+            "type": ["array", "null"], "items": {"type": "number"},
+            "minItems": 3, "maxItems": 3,
+        },
+        "contact_side": {"type": ["string", "null"]},
+        "direction_base": {
+            "type": ["array", "null"], "items": {"type": "number"},
+            "minItems": 3, "maxItems": 3,
+        },
+        "distance_m": {"type": ["number", "null"]},
+        "gripper_yaw_rad": {"type": ["number", "null"]},
+        "safe_place_center_base_m": {
+            "type": ["array", "null"], "items": {"type": "number"},
+            "minItems": 3, "maxItems": 3,
+        },
+        "predicted_scene_benefit": {"type": "string"},
+        "risk_assessment": {"type": "string"},
+        "reason": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "alternative_actions": {"type": "array", "items": {"type": "object"}},
+    },
+    "additionalProperties": False,
+}
+
 
 def schema_for_policy(policy_kind: str, task_type: str = "") -> Dict[str, object]:
     """Return the exact schema supplied to Ollama for one task-policy call."""
@@ -263,7 +415,7 @@ def schema_for_policy(policy_kind: str, task_type: str = "") -> Dict[str, object
         return TASK_CONTRACT_SCHEMAS.get(task_type, BUILD_HOUSE_CONTRACT_SCHEMA)
     if policy_kind == "grounded_task_plan":
         return GROUNDED_HOUSE_PLAN_SCHEMA if task_type == "build_house" else GROUNDED_ORGANIZE_PLAN_SCHEMA
-    return TASK_ACTION_SCHEMA
+    return TASK_ACTION_OUTPUT_SCHEMA
 
 
 def validate_against_schema(value: object, schema: dict, path: str = "$") -> list:
@@ -277,6 +429,14 @@ def validate_against_schema(value: object, schema: dict, path: str = "$") -> lis
         errors.append({"type": "json_schema_const_mismatch", "path": path, "expected": schema["const"]})
     if "enum" in schema and value not in schema["enum"]:
         errors.append({"type": "json_schema_enum_mismatch", "path": path, "allowed": schema["enum"]})
+    if "oneOf" in schema:
+        branch_errors = [validate_against_schema(value, branch, path) for branch in schema["oneOf"]]
+        matching = [index for index, item in enumerate(branch_errors) if not item]
+        if len(matching) != 1:
+            errors.append({
+                "type": "json_schema_one_of_mismatch", "path": path,
+                "matching_branches": matching, "branch_errors": branch_errors,
+            })
     if isinstance(value, dict):
         for key in schema.get("required", []):
             if key not in value:

@@ -7,6 +7,36 @@ from tools.workflows.stack_demo import vlm_action
 
 
 class VlmNudgePreflightTests(unittest.TestCase):
+    def test_geometry_only_dry_run_does_not_call_moveit(self):
+        args = _args()
+        args.execute = False
+        args.moveit_plan_only = False
+        scene = _scene_with_blocked_contact_side()
+        scene["objects"] = scene["objects"][:2]
+        original_run = clearance_execution.run
+        clearance_execution.run = lambda _command: self.fail("plain dry-run must not contact MoveIt")
+        try:
+            with tempfile.TemporaryDirectory() as output_dir:
+                result = clearance_execution.preflight_nudge_action(
+                    args,
+                    output_dir,
+                    scene,
+                    {
+                        "action_type": "nudge", "action_id": "nudge_2",
+                        "object_id": 2, "obstacle_id": 2, "target_object_id": 1,
+                        "direction_base": [1.0, 0.0, 0.0], "distance_m": 0.02,
+                        "contact_side": "-x", "gripper_yaw_rad": 0.0,
+                    },
+                    1,
+                )
+        finally:
+            clearance_execution.run = original_run
+
+        self.assertEqual(
+            result["moveit_preflight_skipped"],
+            "execution_disabled_without_moveit_plan_only",
+        )
+
     def test_neighbor_on_contact_side_rejects_before_moveit(self):
         original_run = clearance_execution.run
         clearance_execution.run = lambda _command: self.fail("MoveIt must not run after tool sweep rejection")

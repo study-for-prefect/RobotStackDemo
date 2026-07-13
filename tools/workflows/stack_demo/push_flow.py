@@ -382,6 +382,17 @@ def handle_vlm_action_before_pick(
         )
         return current_state, memory, held_object
 
+    if getattr(args, "moveit_plan_only", False) and not getattr(args, "execute", False):
+        planned_state = copy.deepcopy(current_state)
+        planned_state["_moveit_plan_only_clearance_action"] = _action_summary(selected_action)
+        mark_autonomous_execution_result(cycle_dir, {
+            "status": "planned_only",
+            "action_type": selected_action.get("action_type"),
+            "moveit_feasible": selected_action.get("moveit_feasible"),
+            "scene_changed": False,
+        })
+        return planned_state, memory, held_object
+
     if selected_action.get("action_type") == "pick_away":
         next_state, memory, next_held = execute_pick_away_and_reobserve(
             args,
