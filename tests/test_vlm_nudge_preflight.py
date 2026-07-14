@@ -1,12 +1,42 @@
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from tools.workflows.stack_demo import clearance_execution
 from tools.workflows.stack_demo import vlm_action
 
 
 class VlmNudgePreflightTests(unittest.TestCase):
+    def test_successful_moveit_preflight_marks_nudge_executable_safe(self):
+        args = _args()
+        args.execute = True
+        scene = _scene_with_blocked_contact_side()
+        scene["objects"] = scene["objects"][:2]
+        with patch.object(clearance_execution, "run", return_value=None), patch.object(
+            clearance_execution, "check_tool_swept_volume",
+            return_value={
+                "feasible": True, "reason": "tool_swept_volume_clear",
+                "contact_status": "clear", "controlled_contacts": [],
+                "gripper_collision_profile": [],
+            },
+        ), patch.object(
+            clearance_execution, "push_preflight_command", return_value=["true"],
+        ):
+            with tempfile.TemporaryDirectory() as output_dir:
+                result = clearance_execution.preflight_nudge_action(
+                    args, output_dir, scene,
+                    {
+                        "action_type": "nudge", "action_id": "nudge_2",
+                        "object_id": 2, "obstacle_id": 2, "target_object_id": 1,
+                        "direction_base": [1.0, 0.0, 0.0], "distance_m": 0.02,
+                        "contact_side": "-x", "gripper_yaw_rad": 0.0,
+                    },
+                    1,
+                )
+        self.assertTrue(result["moveit_feasible"])
+        self.assertTrue(result["executable_safe"])
+
     def test_geometry_only_dry_run_does_not_call_moveit(self):
         args = _args()
         args.execute = False

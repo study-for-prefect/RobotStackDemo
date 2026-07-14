@@ -14,6 +14,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=os.path.join(PROJECT_ROOT, "runtime"))
     parser.add_argument("--stack-decision-json", default="")
     parser.add_argument("--offline-scene-state", default="")
+    parser.add_argument(
+        "--resume-reference-state-json", default="",
+        help="Prior live scene state used only to recover VLM-confirmed detector misses after an interrupted action.",
+    )
+    parser.add_argument(
+        "--resume-reference-action-json", default="",
+        help="Validated action that was executed before --resume-reference-state-json became stale.",
+    )
+    parser.add_argument(
+        "--resume-reference-execution-json", default="",
+        help=(
+            "Optional executed_and_reobserved log proving the resume action completed. "
+            "When supplied, recovery uses the known action result instead of asking the VLM "
+            "to confirm an object that may now be outside the camera view."
+        ),
+    )
     parser.add_argument("--base-object-id", type=int, default=None)
     parser.add_argument("--stack-order", nargs="+", type=int, default=None)
     parser.add_argument("--legacy-linear-stack", action="store_true", help="Use the old stack_blocks-only compatibility workflow.")
@@ -66,6 +82,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--push-tool-safety-margin-m", type=float, default=0.005)
     parser.add_argument("--grasp-gripper-side-clearance-m", type=float, default=0.006)
+    parser.add_argument(
+        "--grasp-min-feasible-yaw-span-deg",
+        type=float,
+        default=10.0,
+        help="Minimum continuous collision-free yaw interval accepted for a real grasp.",
+    )
     parser.add_argument("--gripper-closed-tip-width-m", type=float, default=0.025)
     parser.add_argument("--gripper-closed-upper-width-m", type=float, default=0.062)
     parser.add_argument("--gripper-tip-height-m", type=float, default=0.025)
@@ -77,7 +99,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controlled-contact-max-objects", type=int, default=2)
     parser.add_argument("--replanning-temperature", type=float, default=0.15)
     parser.add_argument("--replanning-top-p", type=float, default=0.85)
-    parser.add_argument("--max-vlm-action-attempts", type=int, default=5)
+    parser.add_argument(
+        "--max-vlm-action-attempts",
+        type=int,
+        default=8,
+        help="Per-observation action proposals; allows coordinate correction before physical clearing alternatives.",
+    )
     parser.add_argument("--max-vlm-stack-attempts", type=int, default=5)
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--conda-env", default="yolo")
@@ -99,6 +126,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vlm-max-backend-retries", type=int, default=3)
     parser.add_argument("--vlm-max-budget-retries", type=int, default=3)
     parser.add_argument("--unload-model-after-task", action="store_true")
+    parser.add_argument(
+        "--unload-vlm-before-execution",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Release the Ollama model before each physical action so post-action YOLO "
+            "observation does not overlap a resident VLM GPU workload."
+        ),
+    )
     parser.add_argument("--no-image", action="store_true")
     parser.add_argument("--detector-weight", default="models/yolo/weights/best.pt")
     parser.add_argument(
@@ -113,6 +149,15 @@ def parse_args() -> argparse.Namespace:
         help="Allow legacy snapshot_pipeline subprocess if the persistent perception server is unavailable.",
     )
     parser.add_argument("--score-thresh", type=float, default=0.5)
+    parser.add_argument(
+        "--initial-detector-recovery-score-thresh",
+        type=float,
+        default=0.05,
+        help=(
+            "Secondary initial-observation YOLO threshold. Candidates absent from the normal "
+            "observation are accepted only after VLM image confirmation; 0 disables recovery."
+        ),
+    )
     parser.add_argument("--detector-imgsz", type=int, default=960)
     parser.add_argument("--detector-iou", type=float, default=0.45)
     parser.add_argument("--detector-device", default="cuda:0")
@@ -226,8 +271,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tcp-offset-tool", nargs=3, type=float, default=[0.0, 0.0, 0.15])
     parser.add_argument("--velocity", type=float, default=0.08)
     parser.add_argument("--acceleration", type=float, default=0.08)
-    parser.add_argument("--pre-rotate-velocity", type=float, default=0.20)
-    parser.add_argument("--pre-rotate-acceleration", type=float, default=0.20)
+    parser.add_argument(
+        "--pre-rotate-velocity",
+        type=float,
+        default=None,
+        help="End-effector Z pre-rotation velocity scale. Default: 3x --velocity (clamped to 1.0).",
+    )
+    parser.add_argument(
+        "--pre-rotate-acceleration",
+        type=float,
+        default=None,
+        help="End-effector Z pre-rotation acceleration scale. Default: 3x --acceleration (clamped to 1.0).",
+    )
     parser.add_argument("--ready-max-joint-delta", type=float, default=1.30)
     parser.add_argument("--ready-joint-tolerance", type=float, default=0.15)
     parser.add_argument("--place-velocity", type=float, default=0.03)
@@ -245,4 +300,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Resume existing scene memory instead of starting from current run.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Wrist-only Z pre-rotation is performed at the safe approach height.  Keep
+    # object approach/reset on the conservative main scale, but make this
+    # in-place rotation three times faster by default as requested on the real
+    # robot.  Explicit CLI overrides remain authoritative.
+    if args.pre_rotate_velocity is None:
+        args.pre_rotate_velocity = min(1.0, 3.0 * args.velocity)
+    if args.pre_rotate_acceleration is None:
+        args.pre_rotate_acceleration = min(1.0, 3.0 * args.acceleration)
+    return args

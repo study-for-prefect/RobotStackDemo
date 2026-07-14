@@ -1,0 +1,12 @@
+[Unit]
+Description=Limit NVIDIA GPU power for RobotStackDemo
+After=nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/robot-stack-set-nvidia-power-limit 300
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

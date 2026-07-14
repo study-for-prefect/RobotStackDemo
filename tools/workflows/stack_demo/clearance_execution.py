@@ -113,6 +113,12 @@ def preflight_nudge_action(
             "max_side_intrusion_m": float(getattr(args, "controlled_contact_max_intrusion_m", 0.005)),
             "max_expected_passive_displacement_m": float(getattr(args, "controlled_contact_max_displacement_m", 0.015)),
             "max_contacted_objects": int(getattr(args, "controlled_contact_max_objects", 2)),
+            # Organize clearance intentionally creates space inside a cluster
+            # of lightweight loose blocks.  Contacts with protected/placed
+            # structure remain hard failures in tool_swept_volume.
+            "allow_loose_chain_contact": bool(
+                getattr(args, "execute_push_clearing", False)
+            ),
         },
     )
     output = dict(selected_action)
@@ -139,6 +145,7 @@ def preflight_nudge_action(
         output["moveit_preflight_error"] = str(exc)
         return output
     output["moveit_feasible"] = True
+    output["executable_safe"] = True
     return output
 
 

@@ -178,17 +178,18 @@ def capture_empty_current_pose(args, output_dir, held_object_id, allow_holding=F
     )
 
 
-def perception_server_snapshot(args, output_dir):
+def perception_server_snapshot(args, output_dir, score_thresh=None):
     base_url = str(getattr(args, "perception_server_url", "") or "").rstrip("/")
     if not base_url:
         raise RuntimeError("No --perception-server-url configured.")
-    query = urlencode(
-        {
-            "output_dir": output_dir,
-            "instruction": getattr(args, "instruction", ""),
-            "camera_frame": perception_camera_frame(args),
-        }
-    )
+    query_values = {
+        "output_dir": output_dir,
+        "instruction": getattr(args, "instruction", ""),
+        "camera_frame": perception_camera_frame(args),
+    }
+    if score_thresh is not None:
+        query_values["score_thresh"] = float(score_thresh)
+    query = urlencode(query_values)
     url = "{}/snapshot?{}".format(base_url, query)
     with urlopen(url, timeout=float(getattr(args, "perception_server_timeout_s", 10.0))) as response:
         payload = json.loads(response.read().decode("utf-8"))
@@ -197,9 +198,13 @@ def perception_server_snapshot(args, output_dir):
     return payload
 
 
-def capture_scene_observation(args, output_dir):
+def capture_scene_observation(args, output_dir, score_thresh=None):
+    # The wrist camera moves with every robot trajectory.  The background TF
+    # bridge may still contain a transform sampled during the return motion,
+    # so force one post-motion lookup before the persistent server consumes it.
+    run(tf_lookup_command(args))
     try:
-        payload = perception_server_snapshot(args, output_dir)
+        payload = perception_server_snapshot(args, output_dir, score_thresh=score_thresh)
         print(
             "Perception server snapshot: output={} objects={} frame_seq={}".format(
                 output_dir,

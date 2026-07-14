@@ -1,470 +1,445 @@
-# RobotStackDemo 交接文档
+# RobotStackDemo 新会话交接文档
 
-更新时间：2026-07-13（Asia/Shanghai）
+更新时间：2026-07-14（Asia/Shanghai）
 
-## 1. 当前仓库状态
+这是一份给“完全没有此前对话上下文”的新会话使用的权威交接。旧交接中“只做过
+plan-only、尚未实机”的结论已经过时；以本文为准。
 
-- 工作目录：`/home/wxm/code/RobotStackDemo`
-- 当前分支：`llm-decision-explore`
-- 2026-07-13 已在真实 Ubuntu/UR5 主机继续修改，工作树包含本轮未提交修复。
-- 本轮聚焦回归测试已通过 121 项；完整 discovery 共运行 238 项并通过，1 项依赖
-  gitignored 旧 runtime 的可选回放测试自动跳过。
-- 真实工作区已明确为 `base_link` 米制边界；用户确认 `xmax=0.65 m`、
-  `y=-0.10..0.40 m`，其余方向保留标定配置。
-- 三个任务的首个 pick/place（或清障恢复决策）均已跨过初始观测后的策略、语义和
-  MoveIt 安全链；真实 MoveIt 验证全部为 plan-only，未执行轨迹或夹爪：
-  - stack：`runtime/stack_qwen3_8b_clearance_real_planonly_20260713`
-  - organize：`runtime/organize_qwen3_8b_post_safetyfix_real_planonly_20260713`
-  - house：`runtime/build_house_qwen3_8b_instruct_posefeedback_real_planonly`
-- 重启后 ROS driver、RealSense、TF、MoveIt 和 perception server 均已恢复；
-  `base_link -> tool0` 已验证连续可用。
-- 房子动作已能根据下层支撑中心和块体半高修正上层目标，且 pick/place 全路径已通过
-  真实 MoveIt plan-only；不再卡在 roof 越过未完成 prerequisites 或错误上层位姿。
-- 上一次启动日志没有 OOM、NVIDIA Xid、panic 或正常 shutdown，表现为 GPU 负载期间
-  的突然断电/硬复位。RTX 3090 默认 370W，当前由用户临时限制到 250W，调试完成前不要恢复。
-- 8B instruct 的真实动作调用总耗时约 3.9–8.0 秒；实际 prompt 约 4.1K–9.0K token，
-  输出约 226–400 token。原先三四分钟的主要成因（thinking 变体和过大预算）已消除。
-- Ollama `qwen3-vl:8b` 与 `qwen3-vl:30b` 是 thinking 变体，即使请求
-  `think:false` 仍可能把 3K/4K/6K 全耗在 thinking。应使用官方 instruct 变体
-  `qwen3-vl:8b-instruct` 和 `qwen3-vl:30b-a3b-instruct` 做结构化规划。8B instruct
-  已验证；30B A3B instruct 正在安装/待对比，不能用现有 `qwen3-vl:30b` thinking
-  标签替代。
-- 最近一次聚焦测试：
+## 1. 开始前必须知道
 
-  ```text
-  python3 -m unittest tests.test_vlm_nudge_preflight \
-    tests.test_workspace_configuration tests.test_task_semantic_regressions \
-    tests.test_policy_routing_and_grounding tests.test_task_semantics \
-    tests.test_six_role_house tests.test_vlm_replanning_loop
-  Ran 121 tests
-  OK
-  ```
+- 仓库：`/home/wxm/code/RobotStackDemo`
+- 分支：`llm-decision-explore`
+- 主入口：`tools/workflows/stack_demo_pipeline.py`
+- 机器人：UR5
+- 夹爪：GF225 / DH gripper
+- 相机：RealSense D435i
+- ROS：Ubuntu 22.04 + ROS 2 Humble
+- GPU：RTX 3090，调试期间保持 250 W 功耗上限
+- 默认 VLM：`qwen3-vl:8b-instruct`
+- 30B 对照模型：`qwen3-vl:30b-a3b-instruct`
+- 机械臂、MoveIt、相机和感知服务由用户通过桌面
+  `Start_Robot_Stack.desktop` 启动。
 
-## 2. 我们在做什么
-
-我们的最终任务是：**从桌面散落积木中识别并取出任务需要的积木，完成搭房子或按颜色整理；当目标积木没有安全抓取角度或缺少足够操作空间时，先自主规划并执行清障，再重新感知并继续抓取与搭建/整理。** 清障是服务于目标抓取的恢复手段，不是独立任务，也不能破坏已完成结构。
-
-目标是在不重写现有感知、D435i 深度几何、MoveIt、UR5 执行和 GF225 夹爪模块的前提下，完成以下闭环：
+先完整阅读：
 
 ```text
-用户指令
-→ 确定任务家族
-→ VLM 充分推理并输出严格 JSON
-→ 当前场景对象/角色绑定
-→ 语义、几何、碰撞、MoveIt 校验
-→ 执行（必须显式开启）
-→ 重新感知
-→ track 重绑定
-→ 下一步决策
+AGENTS.md
+README.md
+tools/workflows/stack_demo/README.md
+本 HANDOFF.md
 ```
 
-当前支持的任务家族：
+`AGENTS.md` 的核心约束：真实运动必须显式授权并支持 dry-run；不要混合感知、推理、
+几何和执行层；行为或命令变化必须同步 README；补丁要小且可审查。当前
+`tools/workflows/stack_demo/task_workflow.py` 已经明显过大，是技术债，但当前实机阶段不要
+为了重构而同时改变行为。先完成整理，再处理房子，之后再按职责拆文件。
 
-- `stack_blocks`：明确颜色顺序的线性堆叠。
-- `build_house`：固定六角色、两列两层、屋顶、三角形结构。
-- `organize_blocks`：按颜色整理为 rows、columns 或 regions。
+## 2. 我们到底在做什么
 
-最初的主要故障包括：
+最终目标是从一堆任意散落、互相遮挡或挤在一起的积木开始，闭环完成：
 
-1. VLM 连续输出同一个失败动作，五次都进入几何/MoveIt，机械臂始终不动。
-2. 检测 `object_id` 跨帧变化导致对象或任务角色绑定错误。
-3. GF225 推动下降始终使用 0.112 m 固定矩形，过度拒绝。
-4. Qwen3 把推理放在 `message.thinking`，`message.content` 为空；旧代码执行 `json.loads("")`，再把异常伪造成 stop，最终误报对象引用不存在。
-5. build_house 和 organize_blocks 共用房屋 Schema/提示词。
-6. 房屋 grounded plan 要求模型重复输出固定 assembly steps，但模型输出协议与验证器不一致。
-7. 线性堆叠阶段允许模型重复输出缺颜色或错误长度的 `full_stack_order`。
+1. **按颜色整理积木**：每种颜色一个目标区域，同色积木放在一起并排成一行；
+2. **搭房子**：从散落积木中取材，搭成四个方块支撑、一个屋顶、一个三角顶的六角色房子。
 
-## 3. 已经完成的功能
+中途遇到障碍不能因为一次抓取不可行、碰撞预检失败、MoveIt 失败或 VLM 重复动作就退出。
+统一恢复逻辑是：
 
-### 3.1 动作失败防重复
+```text
+当前存在能安全抓取、且能推进任务的对象
+    -> 抓取
+    -> organize：直接放到该对象自己的同色行
+    -> house：用于房屋角色，或把障碍抓到安全临时区
+
+当前全部对象没有可靠抓取角度
+    -> 清障
+    -> 优先抓走可抓障碍
+    -> 仍不能抓才从障碍物侧面空处下降，水平推 3–5 cm
+    -> 重新观察
+    -> 再次执行“能抓先抓，否则清障”
+```
+
+水平推动时碰到其他未保护散乱积木可以作为可恢复接触；下降时不能压到任何积木。桌面、
+支撑物、已放好的任务结构、protected 对象和最终放置区域不能被随意撞击或破坏。
+
+用户明确要求：当前实机阶段只处理会阻止任务完成的问题：
+
+- 感知错误；
+- 目标位姿错误；
+- 抓取失败；
+- 碰撞预检错误；
+- MoveIt 失败；
+- 执行后状态未更新；
+- VLM 重复无效动作。
+
+不要继续扩展通用任务 Schema。不要同时调整理和房子。严格先完成整理，再开始房子。
+
+## 3. 用户已经确认的实机事实
+
+- 工作区为 `base_link` 米制坐标：
+  - `x=0.235..0.65 m`
+  - `y=-0.10..0.40 m`
+- 每次观测前机械臂回同一标准关节位：`config/rectangle_ready_pose.json`。
+- 驱动已经稳定，不要修改机械臂驱动、相机驱动或桌面启动文件，也不要重复启动它们。
+- 清障必须开启。
+- 整理不应死板地先抓某一种颜色；每一步选择当前最好抓、能推进任务的对象。
+- 每种颜色一个区域，同色积木放在同色旁边，一种颜色一排。
+- 放置角度不应靠固定“转 90°”规则；如果完整碰撞检测能找到安全角度/落点，就由几何检查决定。
+- 放置高度不能过低；当前整理释放默认在名义中心上方增加 10 mm。
+- 推障必须从物体旁边空处下降，不能先到物体正上方再水平推。
+- 松散积木之间发生接触不等于任务失败；只有保护对象、桌面、支撑结构等必须硬拒绝。
+- 当前 250 W GPU 上限必须保留。此前改到 300 W 仍发生过硬重启。
+
+## 4. 当前代码已经完成了什么
+
+### 4.1 模型与调用速度
+
+- 默认使用 `qwen3-vl:8b-instruct`，真实结构化动作推理通常为数秒，不再需要三四分钟。
+- 不要用 `qwen3-vl:8b` 或 `qwen3-vl:30b` thinking 标签替代 instruct；它们可能把预算全耗在
+  thinking 而没有 JSON content。
+- `qwen3-vl:30b-a3b-instruct` 只用于后续对照，不是当前整理阻塞项。
+- Ollama thinking/content、finalizer、budget/backend retry 已统一处理。
+- 动作输入已压缩物理阻挡信息，避免重复失败后触发
+  `INPUT_CONTEXT_BUDGET_EXCEEDED`。
+
+### 4.2 感知和类别恢复
+
+- YOLO 负责检测框与 RGB-D 三维几何。
+- 低置信检测、预期对象漏检、类别不可靠时，VLM 可复核类别；VLM 不生成几何坐标。
+- 视觉颜色优先于容易误标的 detector label，仍保留 label 兼容。
+- 近重复 3D 检测会合并；跨帧使用 `track_id`，当前帧使用
+  `object_ref=scene_<revision>:obj_<id>`。
+- detector `object_id` 不是永久身份，绝不能跨帧直接复用。
+
+### 4.3 TF 与工作区
+
+- `config/workspace_bounds.json` 已写入用户确认的 x/y 边界和独立
+  `organize_layout_bounds`。
+- 每次实际快照前使用现场 TF：
+  - `base_link <- camera_color_optical_frame`
+  - `base_link <- tool0`
+- 不要因为机械臂初始位置变化而手工加坐标偏移；先保证标准观测关节位和 fresh TF。
+- 缺少工作区或 TF 是明确系统错误，不让 VLM 猜。
+
+### 4.4 整理任务的抓取优先决策
 
 核心文件：
 
-- `robot_scene_pipeline/action_fingerprint.py`
-- `tools/workflows/stack_demo/vlm_action.py`
-- `tools/workflows/stack_demo/vlm_action_loop.py`
 - `tools/workflows/stack_demo/task_workflow.py`
-
-已经实现：
-
-- 基于稳定 `track_id` 的 `ActionFingerprint`。
-- 方向量化为 `+X/-X/+Y/-Y/diagonal_1/diagonal_2/other`。
-- 距离按 0.005 m 量化，yaw 按 5° 量化。
-- `reason`、`confidence`、无意义的小数尾数不影响指纹。
-- 每任务步骤维护失败账本、禁止指纹、策略计数。
-- 黑名单动作在语义之后、几何/碰撞/MoveIt 之前被拒绝，不重复做昂贵验证。
-- 第 3 次可禁止连续失败两次的动作类型，第 4 次要求改变高层策略。
-- safe stop 必须有多个唯一失败指纹和多个策略；否则要求 `reobserve`。
-- `nudge` 不能实现 `on_top_of` 或“推到另一个物体上方”。
-- fallback 只允许从 VLM 自己已经生成的 `alternative_actions` 中选择未尝试动作，代码不会凭空生成完整候选集。
-
-### 3.2 当前帧引用与跨帧跟踪
-
-核心文件：
-
-- `robot_scene_pipeline/object_tracking.py`
-- `robot_scene_pipeline/scene_memory.py`
-
-身份规则：
-
-- 检测 ID：仅用于当前检测索引和内部单步执行。
-- `object_ref`：`scene_<revision>:obj_<detector_id>`，只在当前 revision 有效。
-- `track_id`：跨帧稳定身份，例如 `track_green_01`。
-
-已经实现：
-
-- 形状、颜色、三维中心、尺寸、bbox IoU、预测位移、角色/保护状态的匹配代价。
-- 全局一对一最小代价绑定，禁止两个旧 track 绑定到同一个新检测。
-- 二义性匹配标记 ambiguous；ambiguous 对象不能直接执行，必须重新观察。
-- 过期 object_ref、track/ref 冲突、裸 ID 无 revision 都会被拒绝。
-- 日志：`track_assignment.json`、`track_history.json`、`role_binding_history.json`。
-
-### 3.3 GF225 分段几何与受控接触
-
-核心文件：
-
-- `robot_scene_pipeline/tool_swept_volume.py`
+- `robot_scene_pipeline/vlm_task_policy.py`
 - `robot_scene_pipeline/grasp_yaw_search.py`
+
+当前每轮会对所有目标行外对象运行物理抓取角扫描，并把精简结果放入动作决策输入：
+
+- 有可靠可抓对象：必须 `pick_place`，不允许 `nudge`、`pick_away`、`reobserve` 或 `stop`；
+- VLM 选到不可抓对象或直接放弃：代码改选可靠可抓候选；
+- 按连续可行 yaw 区间大小排序，不按颜色固定顺序；
+- 同一个失败物理动作会被指纹黑名单拒绝；反方向推动是不同物理策略，不会被误杀；
+- organize 未完成时，`stop` 不会被接受为完成。
+
+最新实机又增加了一条关键门：真实抓取必须存在至少 **10° 连续安全 yaw 区间**，并从区间
+内部选择角度。最近碰撞的蓝块只有 `23°–27°` 共 4° 狭窄区，旧代码仍选择边界
+`22.949°`；现在该抓取会判为不可抓，必须换目标或清障。
+
+### 4.5 整理目标区域与落点
+
+- 每个观察到的颜色只生成一个非重叠行区域。
+- 同一任务内首次确定的目标行保持不变，不再每次观测重新漂移几毫米。
+- 目标颜色/group 由当前对象真实视觉颜色绑定，模型不能把红块放到蓝区。
+- VLM 把目标位置复制成源位置时，代码会在目标颜色区域内生成并完整校验空槽。
+- 小于 15 mm 的搬动视为无效，不允许以几毫米“挪一下”冒充整理进展。
+- 同色已有成员时，下一块优先放在同色成员旁边，并检查最小间距和行对齐。
+- 动作后进度判断允许最多 3 mm 的感知足迹误差，避免方块 yaw 抖动导致刚放好的块被再次抓走。
+- 目标区域是在散乱区之外选择的任务区域；推障终点尽量避开所有最终目标区域。
+
+### 4.6 放置夹爪避障（最新修复，尚未实机复验）
+
+核心文件：`robot_scene_pipeline/task_action_validation.py`。
+
+此前整理只检查“被放积木的本体足迹”是否与其他积木重叠，没有检查张开的 GF225 手指。
+因此蓝块目标中心与红块中心相距约 33 mm，积木本体不重叠，但夹爪在下降/释放时撞红块。
+
+现在：
+
+- 按目标 yaw 构造张开夹爪的两根实体手指；中间 49 mm 开口不是实体；
+- 放置目标必须清除所有当前可见对象，包括前几步已经放好的颜色行；
+- 被阻挡时返回 `target_pose_gripper_clearance_blocked`；
+- 在同一颜色区域内搜索另一个满足对象足迹、行对齐、间距、工作区和夹爪清障的位置；
+- 用现场第二步数据重放：旧蓝块落点 `[0.335, 0.2524]` 被红块拒绝，自动改为
+  `[0.29105, 0.2524]` 后通过全部语义与夹爪几何检查。
+
+这项修复已经单元测试和现场数据离线重放，但用户要求先停止测试，因此**还没有进行修复后的
+下一次真实运动验证**。
+
+### 4.7 清障
+
+核心文件：
+
 - `tools/workflows/stack_demo/clearance_execution.py`
+- `robot_scene_pipeline/tool_swept_volume.py`
+- `tools/robot/moveit_preview/push.py`
 
-推动模型默认分段：
+已实现：
 
-```text
-tip             z=0.000–0.025 m   width=0.025 m
-upper_fingers   z=0.025–0.070 m   width=0.062 m
-gripper_body    z=0.070–0.150 m   width=0.112 m
-```
+- 清障始终需要 `--execute-push-clearing` 明确开启；
+- 当前全部抓取均被物理扫描判为不可行时，无需先浪费一轮失败 pick，允许立即清障；
+- VLM nudge 不可执行或重复时，代码在当前散乱对象、四个基坐标方向、0°/90° 腕角中做有界搜索；
+- 默认推 4 cm，符合用户要求的 3–5 cm；
+- 每个候选依次通过语义、工作区、分段 GF225 扫掠体和 MoveIt plan-only；
+- 推障从接触侧的空位置下降；下降/接触阶段不能用“松散接触允许”绕过顶部碰撞；
+- 水平推动阶段可允许受控松散连锁接触，随后必须重新观察；
+- 推动尽量增加障碍与被阻塞目标的距离，并避开最终颜色区。
 
-抓取模型使用两根实体手指，中间约 0.049 m 开口不是碰撞实体。
+仍未完成的实机事实：到目前为止没有在最新逻辑上完整执行并验证一次自动清障闭环。
 
-未保护散乱积木只有在侵入量、预计被动位移、接触数量、工作区、倾覆风险和撤离检查均通过时，才允许 `controlled_contact`。桌面、支撑物、已完成结构、protected 对象仍是硬碰撞。发生受控接触后必须重新感知。
+### 4.8 运动参数
 
-### 3.4 统一 Ollama 客户端和 Qwen3 Thinking
+- 标准位复位：`0.08/0.08`
+- 接近/平移：`0.08/0.08`
+- 安全高位末端 Z 轴预旋转：默认 `3 ×` 主速度，即 `0.24/0.24`
+- 预旋转仍可显式用 `--pre-rotate-velocity`、`--pre-rotate-acceleration` 覆盖
+- 放置下降：保留较低的 `0.03/0.03`
+- 整理释放间隙：10 mm
 
-核心文件：
+0.24 只用于高位原地 wrist/Z 预旋转，不要把近物体下降速度一起提高。
 
-- `robot_scene_pipeline/ollama_policy_client.py`
-- `robot_scene_pipeline/vlm_action_policy.py`
-- `robot_scene_pipeline/vlm_stack_policy.py`
-- `robot_scene_pipeline/vlm_task_policy.py`
-- `robot_scene_pipeline/llm_scene_reasoner.py`
+## 5. 今天真实机器人实际跑到了哪里
 
-所有 Ollama `requests.post` 已集中到 `ollama_policy_client.py`。其他策略模块不再直接访问 HTTP 响应或自行对 `message.content` 做 `json.loads`。
+### 5.1 有效实机进展
 
-统一顺序：
-
-```text
-HTTP 状态
-→ 响应 JSON
-→ message 信封
-→ thinking/content
-→ done/done_reason
-→ JSON 解析
-→ JSON Schema
-→ 业务语义
-```
-
-Qwen3/Qwen2.5 兼容：
-
-- `--vlm-think-mode auto`：Qwen3/Qwen3-VL 发 `think=true`，Qwen2.5-VL 不发该字段。
-- 始终兼容 `message.thinking` 缺失或存在。
-- thinking 非空、content 合法 JSON：直接使用 content。
-- thinking 非空、content 为空或非法且 `done_reason=stop`：进入 Finalization Call。
-- Finalization 使用 `think=false`，保留原 system/user、图像和上一轮 thinking，只定稿 JSON，不重新分析图像。
-- Ollama 不接受 assistant 消息中的 thinking 字段时，将 thinking 放入单独内部上下文消息，不丢弃推理。
-- `done_reason=length` 或明显截断：扩大 `num_predict`，必要时扩大 `num_ctx`，重新 reasoning。
-- HTTP、连接、超时、非法信封、thinking/content 同时为空：Backend Retry。
-- 后端失败不会生成 stop、object_ref、ActionFingerprint、几何检查或 MoveIt 调用。
-
-默认预算：
+运行目录：
 
 ```text
-stack_order          num_ctx=12288  num_predict=4096
-task_contract        num_ctx=8192   num_predict=2048
-grounded_task_plan   num_ctx=16384  num_predict=4096
-action_proposal      num_ctx=16384  num_predict=3072
-action_replan        num_ctx=16384  num_predict=3072
-orientation_analysis num_ctx=24576  num_predict=8192
-final_json_generation               num_predict=2048
+runtime/organize_blocks_decision_fix_live_250w_20260714
 ```
 
-新增参数：
+该轮真实完成：
 
-- `--vlm-think-mode auto|on|off`
-- `--vlm-num-ctx`
-- `--vlm-num-predict`
-- `--vlm-finalizer-num-predict`
-- `--vlm-read-timeout-sec`（默认 1200）
-- `--vlm-keep-alive`（默认 `1h`）
-- `--vlm-max-backend-retries`（默认 3）
-- `--vlm-max-budget-retries`（默认 3）
-- `--unload-model-after-task`
+1. 第一块红块：抓取成功、搬到红色行、松开成功、退回高位、重新观测成功；
+2. 第二块蓝块：抓取成功、搬到蓝色行、松开成功；
+3. 预旋转命令确认使用 `0.24/0.24`，约 90° 规划时长从此前约 7–8 秒降到约 2.6 秒；
+4. 红块放置后进度正确更新，第二轮没有再次抓红块，而是选择蓝块。
 
-模型会在任务开始前预热。同一任务保持 `keep_alive=1h`；只有显式 `--unload-model-after-task` 才会尝试卸载。
+### 5.2 实机暴露的安全问题
 
-调用日志位于：
+用户在第二步及时人工推开障碍，说明蓝块的局部抓取角判断过于乐观。随后蓝块放置时张开的
+夹爪碰到第一步红块。根因不是 MoveIt IK，而是：
+
+- MoveIt 规划场景没有完整加入这些桌面散乱小块，不能独自承担桌面碰撞判断；
+- 抓取算法接受了只有 4° 宽、且取在边界上的脆弱 yaw；
+- 放置语义只检查积木足迹，没有检查张开夹爪的手指。
+
+这三个事实必须长期保留在设计中，不能因为 MoveIt `Execution result: True` 就认为真实路径没有
+碰撞。
+
+### 5.3 停止时的机器人状态
+
+第二步蓝块已经松开，夹爪为空，程序在回标准位前被停止。随后已只读检查控制器：
+
+- `scaled_joint_trajectory_controller` active；
+- TF 正常；
+- 当时末端在约 `[0.405, 0.282, 0.207]` 高位；
+- 已执行标准位复位并成功到达 ready pose。
+
+之后曾启动修复后的新实机命令，但用户在约 9 秒内中断，要求先做文档，不再测试。新会话仍应
+先检查是否有残留 pipeline/moveit 进程、当前关节位和夹爪状态，不要盲信本文描述的瞬时状态。
+
+## 6. 当前卡在哪里
+
+当前唯一应聚焦的任务是 `organize_blocks`。卡点不是 VLM 调用速度，也不是驱动，而是最新两项
+安全修复尚未通过新一轮实机验证：
+
+1. 10° 连续抓取 yaw 门是否会正确拒绝之前那种狭窄蓝块，并改抓其他块或进入清障；
+2. 放置夹爪几何是否会在真实场景中把目标从邻近已放红块的位置改到安全位置；
+3. 全部不可抓时，自动侧推是否能真实执行一次、重新观察并创造抓取角；
+4. 整理尚未完整跑到 `task_complete=true`；
+5. 房子尚未进入最终实机闭环调试，必须等整理完成后再开始。
+
+最近一次聚焦回归（在文档修改前）为：
 
 ```text
-ollama_calls/<logical-call>/ollama_request.json
-ollama_calls/<logical-call>/ollama_response.json
-ollama_calls/<logical-call>/ollama_thinking.txt
-ollama_calls/<logical-call>/ollama_content.txt
-ollama_calls/<logical-call>/ollama_diagnostics.json
-model_runtime_diagnostics.json
+Ran 125 tests
+OK (skipped=1)
 ```
 
-### 3.5 四种计数器严格分离
+用户当前明确要求“先不做测试”，因此本次文档更新后没有再运行测试或机械臂。
 
-```text
-Backend Attempt：连接、HTTP、超时、非法信封、空消息
-Budget Retry：done_reason=length、JSON 截断、预算不足
-Order Attempt：四颜色实例绑定语义错误或重复
-Action Attempt：合法动作 JSON 后的引用、语义、几何、碰撞、MoveIt 重规划
-```
+## 7. 下一步计划（严格按顺序）
 
-Backend 和 Budget 不进入 Action/Order 失败账本。Backend 全部失败会报告 `VLM_BACKEND_FAILED`；预算耗尽和 finalizer 失败分别报告 `TOKEN_BUDGET_EXHAUSTED`、`FINALIZATION_FAILED`。
+### 第一步：安全恢复检查，不改代码
 
-### 3.6 任务路由与独立 Schema
+1. 用户用 `Start_Robot_Stack.desktop` 启动驱动；不要自行修改/重启驱动文件。
+2. 确认没有遗留 `stack_demo_pipeline.py` 或 `moveit_plan_preview.py` 运动进程。
+3. 确认控制器 active、夹爪为空、末端在安全高位或 ready pose。
+4. 刷新并验证相机/末端 TF。
+5. 确认 `nvidia-smi` 功耗上限仍是 250 W。
+6. 当前积木因用户人工推开和上次碰撞已变化，必须 fresh observation，不能复用旧动作坐标。
 
-核心文件：
+### 第二步：只验证整理的最新两个安全门
 
-- `robot_scene_pipeline/task_routing.py`
-- `robot_scene_pipeline/task_schemas.py`
-- `robot_scene_pipeline/vlm_task_policy.py`
+1. 从 fresh scene 做一次 plan-only/预检，查看 `physical_grasp_validation`：
+   - `robust_feasible_yaw_intervals_deg` 必须至少 10°；
+   - 4° 窄区必须出现在 `rejected_narrow_feasible_yaw_intervals_deg`；
+2. 查看放置目标验证：
+   - 旧行成员必须出现在 place gripper obstacles 中；
+   - 被挡时必须得到 `target_pose_gripper_clearance_blocked` 和同色区安全替代点；
+3. 只在这两项日志正确时执行一个低风险实机步骤；
+4. 观察抓取、放置、复位、fresh observation 和 track 更新完整结束。
 
-确定性路由只确定任务家族，不替代 VLM 规划：
+### 第三步：完成整场颜色整理
 
-```text
-整理 / 按颜色 / 分类 / 分组 / 归类 → organize_blocks
-搭房子 / 建房子 / 房屋              → build_house
-堆叠 / 叠放 / 依次向上              → stack_blocks
-```
+1. 不按颜色固定顺序，持续“能抓先抓”；
+2. 全部不可抓时必须执行一次真实自动清障，不准退出；
+3. 清障后重新观察，抓走已创造角度的对象；
+4. 同色成员放在同一行，放置夹爪不碰其他颜色行；
+5. 直到全部积木进入对应区域、间距/行对齐满足且 `task_complete=true`；
+6. 保存完整成功 runtime，作为房子调试前的基线。
 
-合同 Schema 已拆开：
+### 第四步：单独开始房子
 
-- `BUILD_HOUSE_CONTRACT_SCHEMA` 只接受 `build_house`。
-- `ORGANIZE_BLOCKS_CONTRACT_SCHEMA` 只接受 `organize_blocks`。
+整理完整成功后，才开始 `build_house`。沿用同一原则：
 
-整理 task_contract 输入不含图像、检测对象、bbox、点云、PCA、房屋本体或六角色。任务类型与路由不一致返回 `task_type_instruction_mismatch`。
+- 能抓角色块先抓；
+- 可抓障碍先 `pick_away`；
+- 不能抓才侧推；
+- 已完成支撑/屋顶立即 protected；
+- 每一步 fresh observation、重新绑定角色、重新计算谓词；
+- 屋顶和三角形翻面使用现有四元数/SLERP，不要固定写 45° 或只绕 yaw。
 
-### 3.7 房屋精简 grounded plan
+## 8. 实机命令
 
-核心文件：
-
-- `robot_scene_pipeline/house_grounded_adapter.py`
-- `robot_scene_pipeline/house_task_definition.py`
-- `robot_scene_pipeline/task_semantic_validation.py`
-
-VLM 的房屋 grounded 输出协议是 `grounded_house_plan_v1`，只输出：
-
-- `role_bindings`（role_id、object_ref、track_id、confidence）
-- `orientation_observations`
-- `reason`
-- `confidence`
-
-模型不再重复输出 label、中心、尺寸、bbox、固定 assembly steps 或完成状态。代码根据 object_ref/track_id 回填事实，并注入 `canonical_house_assembly_steps()`。
-
-固定顺序为左右下层、左右上层、屋顶、三角形；prerequisites 使用角色 ID。模型输出 `assembly_status=completed` 或自定义步骤会被 Schema 拒绝。
-
-形状归一化已经支持：
-
-```text
-concave
-concave rectangle
-concave_rectangle
-→ concave_rectangle
-```
-
-roof 允许 `concave_rectangle` 或 `rectangle`，并优先 concave。
-
-### 3.8 四层堆叠实例绑定与 OrderFingerprint
-
-核心文件：
-
-- `robot_scene_pipeline/stack_binding.py`
-- `tools/workflows/stack_demo/scene.py`
-
-明确的“红绿蓝黄依次向上堆叠”不再让模型自由输出任意长度 `full_stack_order`。新协议 `stack_binding_v2` 让模型为固定颜色槽位选择实例：
-
-```json
-{
-  "selected_by_color": {
-    "red": {"object_ref": "...", "track_id": "..."},
-    "green": {"object_ref": "...", "track_id": "..."},
-    "blue": {"object_ref": "...", "track_id": "..."},
-    "yellow": {"object_ref": "...", "track_id": "..."}
-  }
-}
-```
-
-验证四槽完整、revision 正确、四个 track 唯一、实际颜色正确。OrderFingerprint 是四个颜色对应的 track 组合。
-
-- 同一个错误绑定第二次出现：`duplicate_failed_order`，不重复完整验证。
-- 每种颜色只有一个合法实例：`stack_binding_deterministic_unique_fallback`，无需模型重复确认唯一事实。
-- 同色有多个实例：仍由 VLM 自主选择。
-- 多个合法组合且模型未选择：`stack_binding_selection_failed`，绝不随机绑定。
-
-### 3.9 Workspace 启动检查
-
-动作调用前必须存在 `table_bounds` 或 `workspace_bounds`。缺失时立即返回：
-
-```text
-WORKSPACE_CONFIGURATION_MISSING
-```
-
-这不是 VLM 推理失败；模型不得生成或猜测工作区边界。
-
-## 4. 六个运行目录的离线回归结论
-
-测试文件：`tests/test_new_runtime_regressions.py`
-
-### `runtime/linear_stack_qwen3_30b_20260712_184333`
-
-- 已知正确顺序恢复为 `[red id=3, green id=1, blue id=2, yellow id=0]`。
-- 每色唯一，新代码直接形成 deterministic unique binding。
-- 原动作阶段 `thinking` 非空但 `content=""`；新客户端会 finalization，不再伪造成 stop 或 `selected_object_reference_not_found`。
-
-### `runtime/build_house_qwen3_30b_20260712_184615`
-
-- 原五次 task_contract 都是空 content，并报 `Expecting value`。
-- 新流程会得到合法 JSON、明确 Backend/Budget/Finalization 失败之一，不会把异常计入五次语义重规划。
-- 该记录场景本身没有明确 triangle 候选；合同问题修复后，后续可能明确报告资源不足。
-
-### `runtime/organize_blocks_qwen3_30b_20260712_184818`
-
-- 新路由固定为 organize_blocks。
-- task_contract/grounded prompt 测试确认不包含房屋角色、本体或 `house_semantics`。
-
-### `runtime/linear_stack_20260712_202038`
-
-- 红、绿各一个候选；蓝、黄有多个候选。
-- 因存在多个合法组合，代码不会 deterministic 随机选择，必须由 VLM 输出完整四槽绑定。
-- 原三 ID、缺黄色结果现在会被拒绝并通过 OrderFingerprint 防重复。
-
-### `runtime/build_house_20260712_202457`
-
-- 检测标签 `concave` 已归一为 `concave_rectangle`，可绑定 roof。
-- assembly steps 由代码注入，不再因模型固定步骤格式错误重试。
-
-### `runtime/organize_blocks_20260712_202701`
-
-- 原日志错误生成 build_house 合同。
-- 新路由和 `ORGANIZE_BLOCKS_CONTRACT_SCHEMA` 会在格式与语义两层拒绝该结果。
-
-## 5. 当前卡在哪里
-
-当前在真实机器人 PC 上，workspace、ROS、TF、MoveIt、感知以及三个任务首动作的
-Qwen3-VL 8B instruct + MoveIt plan-only 已打通。剩余工作：
-
-1. 用 `qwen3-vl:30b-a3b-instruct` 对相同固定场景做离线策略对比，不能使用 thinking
-   变体 `qwen3-vl:30b`。
-2. 主机曾在 3090 高负载期间出现无 OOM/Xid/panic 的硬复位；当前 250W 功耗上限必须
-   保留，30B 验证期间尤其不能恢复 370W。
-3. 完整 discovery 238 项通过（1 项可选旧 runtime 回放跳过）；核心 121 项回归通过。
-4. 下一安全阶段才是低风险真实单步执行；在明确复核场景、急停、速度和控制器状态前
-   不得添加 `--execute`。
-
-## 6. 下一步计划（严格按顺序）
-
-### 第一步：完成 30B instruct 对比
-
-8B instruct 已完成三个任务验证。安装并运行 Qwen3-VL 30B A3B instruct；保持 250W
-GPU 上限。优先复用本节列出的已保存 scene/contract/grounded plan，只验证动作 JSON，
-避免重复感知和无意义地重跑固定合同。
-
-检查：
-
-- `ollama_response.json` 是否同时保存 thinking/content。
-- 空 content 是否进入 finalizer。
-- `done_reason=length` 是否只触发 Budget Retry。
-- Backend/Budget 是否没有增加 Order/Action Attempt。
-- organize prompt 是否完全没有房屋字段。
-- 房屋 VLM 是否只输出精简 role bindings。
-- stack 多实例时是否输出完整四槽绑定。
-
-### 第二步：复核三个任务 plan-only 产物
-
-- 三个任务已完成，均不加 `--execute`。
-- stack 与 organize 的 pick/place 全路径可规划；house 上层支撑 pick/place 全路径可规划。
-- organize 的恢复链已验证：目标区域越界 → 修正目标 → grounding 错配 → 保持物理动作并
-  修正源中心 → 接受，不会被重复动作指纹误杀。
-
-### 第三步：真实硬件（用户已授权，但仍受安全门控）
-
-- 只有三个任务都稳定通过首动作 MoveIt plan-only 后再考虑。
-- 真实执行必须显式 `--execute`，清障还必须显式 `--execute-push-clearing`。
-- 先低风险单步，再闭环任务。
-
-## 7. 绝对不要踩的坑
-
-### 调用层
-
-1. **不要在任何策略模块新增 `requests.post`。** 所有 Ollama 调用必须经过 `ollama_policy_client.py`。
-2. **不要直接 `json.loads(message.content)`。** 必须走统一信封、done、预算、Schema 状态机。
-3. **不要丢弃 `message.thinking`。** 也不要从 thinking 用正则提取 object ID、动作或位姿直接执行。
-4. **不要把空 content、HTTP 异常、超时、非法 JSON 伪造成 stop。** 后端失败必须保持 `decision=None`。
-5. **不要把 Backend/Budget Retry 计入 Action 或 Order Attempt。**
-6. **不要为了响应速度重新把 `num_predict` 截断到 512/1024/1536。** 本阶段明确优先充分推理。
-7. **不要使用 `num_predict=-1`。** 防止错误提示导致无限生成。
-8. **不要根据显存从 23 GB 降到 20–21 GB 就判断模型已卸载。** 看 Ollama 状态和 `load_duration`。
-
-### 任务语义
-
-9. **不要让 organize_blocks 使用房屋 Schema 或房屋 system prompt。**
-10. **不要把确定性任务路由扩大成代码替代 VLM 规划。** 路由只确定任务家族。
-11. **不要让模型生成固定房屋 assembly steps、placed/completed 或 assembly_status。**
-12. **不要把 `concave` 当作 unknown。** 必须先于 rectangle 归一为 `concave_rectangle`。
-13. **不要继续用旧的任意长度 `full_stack_order` 作为在线四层协议。**
-14. **多实例 stack 不得随机挑一个。** 只有组合唯一时才允许 deterministic fallback。
-
-### 身份与动作
-
-15. **不要把 detector object_id 当作任务级永久身份。** object_ref 是帧内，track_id 才跨帧。
-16. **不要按数组顺序或仅按颜色重绑 track。** 必须一对一匹配。
-17. **ambiguous track 不得执行，必须 reobserve。**
-18. **不要删除或绕过 ActionFingerprint 黑名单。** 重复失败动作不能再次进入几何/MoveIt。
-19. **不要允许 nudge 表示竖直堆叠。** nudge 只表示桌面平面清障。
-20. **不要因为相同动作重复五次就判定场景无解。** safe stop 需要多个唯一动作和策略。
-
-### 机器人安全
-
-21. **不要让 VLM 猜 workspace。** 缺失就是 `WORKSPACE_CONFIGURATION_MISSING`。
-22. **不要恢复单个 0.112 m 矩形作为全部 GF225 推动碰撞体。**
-23. **不要把 protected、support、table 或已完成结构接触降级为 controlled contact。**
-24. **不要默认执行机器人。** dry-run 和 plan-only 必须先行。
-25. **没有用户新的明确授权，不得驱动真实 UR5。**
-
-## 8. 新会话开始时建议先做的检查
+驱动由桌面启动后，新终端：
 
 ```bash
 cd /home/wxm/code/RobotStackDemo
-git branch --show-current
-git status --short
-python3 -m unittest discover -s tests
-rg -n "requests\.post" robot_scene_pipeline tools --glob '*.py'
-rg -n "fail_safe_stop|vlm_json_or_call_failed" robot_scene_pipeline tools --glob '*.py'
+source /opt/ros/humble/setup.bash
+source /home/wxm/ros2_ws/install/setup.bash
 ```
 
-预期：
+整理完整实机（清障必须开启）：
 
-- 分支为 `llm-decision-explore`。
-- 除交接文档或用户后续改动外，工作树应清晰可解释。
-- 核心 121 项通过；完整 discovery 为 238 项通过、1 项可选旧 runtime 回放跳过。
-- `requests.post` 只出现在 `ollama_policy_client.py`。
-- `fail_safe_stop` 只能代表合法 JSON 后的安全终止，不能出现在调用异常转换路径。
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  --instruction "按颜色整理积木" \
+  --model qwen3-vl:8b-instruct \
+  --execute --yes --execute-push-clearing \
+  --output-dir runtime/organize_blocks_<new_unique_name>
+```
 
-## 9. 重要测试入口
+房子命令只在整理成功后使用：
 
-- `tests/test_ollama_policy_client.py`：thinking、finalizer、length、HTTP、超时、空消息、think 降级。
-- `tests/test_policy_routing_and_grounding.py`：任务路由、独立 Schema、organize prompt 隔离、concave、房屋精简协议。
-- `tests/test_stack_binding_protocol.py`：四槽、track 唯一、实际颜色、OrderFingerprint、唯一 fallback、多实例不随机。
-- `tests/test_action_identity_and_contact.py`：ActionFingerprint、track、引用、分段夹爪、controlled contact、后端失败不进入动作验证。
-- `tests/test_new_runtime_regressions.py`：六个新旧运行目录离线回归。
-- `tests/test_vlm_replanning_loop.py`：stop/reobserve、premature stop、workspace、动作重规划。
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  --instruction "搭一个房子" \
+  --model qwen3-vl:8b-instruct \
+  --execute --yes --execute-push-clearing \
+  --output-dir runtime/build_house_<new_unique_name>
+```
 
-## 10. 最重要的一句话
+每次都用新的 output dir。不要覆盖历史 runtime，它们是定位实机问题的证据。
 
-下一阶段不是继续重构，而是：**保持 RTX 3090 的 250W 上限，用 30B A3B instruct 对
-已通过的 8B 固定场景做策略对比；随后在明确复核场景、急停、低速和控制器状态后，才
-考虑一次低风险真实单步。任何异常都根据统一调用诊断和四类计数器做局部修复，绝不
-绕过安全链路直接执行真实 UR5。**
+## 9. 重要运行目录
+
+```text
+# 最近一次真实红/蓝抓放，并暴露蓝抓取/放置碰撞
+runtime/organize_blocks_decision_fix_live_250w_20260714
+
+# 最新完整夹爪清障修复启动后很快被用户中断，可能只有部分启动产物
+runtime/organize_blocks_full_gripper_clearance_live_250w_20260714
+
+# 较早：红块成功抓放后，重复把已放红块当成待整理对象
+runtime/organize_blocks_no_exit_clearance_live_250w_20260714
+
+# 较早：重复动作/context 问题
+runtime/organize_blocks_grasp_first_live_250w_20260714
+
+# 离线抓取优先重放
+runtime/organize_blocks_grasp_first_offline_replay_20260714
+
+# 曾成功执行绿色侧推的清障记录
+runtime/organize_blocks_empty_side_clearance_250w_execute_20260714
+```
+
+调实机问题时先读最新 cycle 的：
+
+```text
+task_action_attempt_XX_input.json
+task_action_attempt_XX_output.json
+task_action_attempt_XX_validation.json
+task_action_preflight.json
+task_step_XX_grasp_validation.json
+task_step_XX_pick_plan.json
+task_step_XX_place_plan.json
+task_action_execution.json
+observation_after_*/private_scene_state.json
+failure_ledger.json
+replanning_context.json
+automatic_clearance_search.json
+```
+
+## 10. 绝对不要再踩的坑
+
+### 驱动和现场
+
+1. **不要修改或重复启动机械臂/相机驱动。** 用户用桌面启动器管理它们。
+2. **不要复用碰撞前或人工移动前的动作坐标。** 场景变化后必须 fresh observation。
+3. **不要在不清楚夹爪是否持物时直接 Ctrl-C。** 终端输出可能有延迟；此前一次以为机械臂仍在
+   ready，实际已经抓起红块并在高位预旋转。若持物，先安全完成放置或退回高位。
+4. **不要因为 MoveIt plan/execution 成功就认定桌面小块无碰撞。** 当前 MoveIt planning scene
+   没有完整表达所有检测积木，必须保留代码侧 GF225/积木几何门。
+5. **不要把 0.24 用到近物体下降。** 它只用于安全高位腕部预旋转。
+
+### 抓取和放置
+
+6. **不要接受只有几度宽的抓取角缝隙。** 至少 10° 连续可行且选区间内部。
+7. **不要只检查被放积木的本体足迹。** 必须检查张开夹爪下降和释放是否碰当前所有对象。
+8. **不要在同色/异色行之间只留“积木不重叠”的距离。** 还要给 GF225 张开手指留空间，必要时
+   在同一区域内改变 x。
+9. **不要把几毫米位移当任务进展。** 目标点复制源点或小于 15 mm 必须重新选槽。
+10. **不要把刚放好的块因亚毫米 yaw/足迹抖动又判为区域外。** 保留 3 mm 观测容差和固定目标行。
+11. **不要把放置高度降回贴桌。** 当前 10 mm release gap 是实机碰桌后的修复。
+
+### 清障
+
+12. **不要因“选中的目标不好抓”就退出。** 先尝试其他可靠抓取；全不可抓立即清障。
+13. **不要先移动到障碍物正上方再推。** 从接触侧空处下降，再水平推。
+14. **不要用 loose-contact 规则允许下降压到邻块。** 受控接触只用于水平推动阶段。
+15. **不要把普通未保护红/蓝块永久当作不可碰结构。** 但已经进入最终行、房屋支撑或 protected
+    对象必须保护。
+16. **不要因为一个推方向失败就禁止反方向。** 相反接触侧是不同物理策略。
+17. **不要把清障推向最终颜色区。** 初始规划要让最终区与散乱区保持距离，推障也要避开它。
+
+### 感知、身份和决策
+
+18. **不要把 detector id 当跨帧身份。** 当前帧用 object_ref，跨帧用 track_id。
+19. **不要让 VLM 生成/覆盖 TF、工作区或三维坐标。** VLM 辅助类别与任务决策，几何来自代码。
+20. **不要严格按颜色顺序抓。** 每轮选择当前最可靠可抓、能推进任务的对象。
+21. **不要让 VLM 重复同一无效动作 8 次。** 有可抓对象时代码选可靠抓取；全不可抓时有界清障。
+22. **不要把模型/连接/预算失败伪造成 stop。** Backend、Budget、Action 计数保持分离。
+23. **不要继续扩大 prompt 和失败历史。** 物理阻挡只传精简 id，避免再次超出上下文。
+
+### 范围和电源
+
+24. **不要同时调整理和房子。** 当前只完成整理。
+25. **不要继续扩展通用 Schema。** 只修阻止当前任务完成的错误。
+26. **不要把 GPU 功耗恢复到 300/370 W。** 当前保持 250 W；硬重启不是普通软件异常。
+27. **不要使用 `qwen3-vl:8b`/`qwen3-vl:30b` thinking 标签做严格动作 JSON。** 使用 instruct。
+28. **不要执行 destructive git 操作。** 工作树有大量用户与本轮未提交修改，先审阅再提交。
+
+## 11. 当前工作树和测试
+
+工作树包含大量未提交修改，涉及感知恢复、VLM 决策、追踪、整理几何、清障、运动参数和测试。
+不要 `git reset --hard`，不要覆盖用户改动。先运行：
+
+```bash
+git status --short
+git diff --check
+```
+
+本轮聚焦回归在最新代码修复后、文档修改前通过 125 项（1 skip）。用户随后明确说先不测试，
+因此新会话不要自动重跑全套；等用户恢复验证工作后，再按风险选择聚焦测试和一次新场景 plan-only。
+
+## 12. 最重要的一句话
+
+**当前不要宣布完成。下一步只验证颜色整理的两个最新实机安全门：拒绝狭窄抓取 yaw，以及放置时
+张开夹爪避开已放好的颜色行；随后必须真实完成一次自动清障和整场颜色分类。整理成功后，才开始
+房子。任何单次不可抓、碰撞预检或 VLM 坏选择都应触发换抓取/抓走障碍/侧推清障，而不是退出。**

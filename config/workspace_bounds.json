@@ -10,6 +10,12 @@
     "zmin": -0.03,
     "zmax": 0.25
   },
+  "organize_layout_bounds": {
+    "xmin": 0.25,
+    "xmax": 0.42,
+    "ymin": 0.04,
+    "ymax": 0.30
+  },
   "calibration": {
     "date": "2026-07-13",
     "method": "D435i/table-plane calibration with user-confirmed real robot workspace extension",

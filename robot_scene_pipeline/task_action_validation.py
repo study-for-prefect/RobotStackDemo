@@ -7,6 +7,7 @@ import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from .geometry_relations import get_center, get_size
+from .grasp_yaw_search import evaluate_grasp_yaw
 from .llm_stack_blocks import object_label_contains
 from .reorientation_planner import plan_reorientation, quaternion_multiply
 from .task_geometry import (
@@ -248,7 +249,11 @@ def validate_organize_pick_place(
         float(target_center[1]) - float(source_center[1]),
     )
     alignment_tolerance = float(contract.get("goal_spec", {}).get("alignment_tolerance_m", 0.012))
-    minimum_reposition = max(0.005, min(0.010, 0.5 * alignment_tolerance))
+    # A few millimetres is only detector jitter or a gripper re-seat, not task
+    # progress.  Require a visibly meaningful displacement before accepting a
+    # corrective pick/place, while still allowing a nearby block to enter its
+    # row without forcing an arbitrary 4 cm detour.
+    minimum_reposition = max(0.015, 0.5 * alignment_tolerance)
     if xy_displacement < minimum_reposition:
         failed = _fail(report, "target_pose_too_close_to_source", "target_pose_base")
         detail = {
@@ -304,6 +309,49 @@ def validate_organize_pick_place(
     workspace = state.get("table_bounds") or state.get("workspace_bounds")
     if not object_inside_workspace(moved, workspace):
         return None, _fail(report, "target_pose_outside_workspace", "target_pose_base")
+    place_yaw_deg = math.degrees(float((proposal.get("target_pose_base") or {}).get("yaw_rad", 0.0)))
+    place_obstacles = [
+        other for other in state.get("objects", [])
+        if str(other.get("id")) != str(obj.get("id"))
+    ]
+    place_gripper = evaluate_grasp_yaw(
+        moved,
+        place_obstacles,
+        place_yaw_deg,
+        gripper_outer_width_m=0.112,
+        gripper_inner_width_m=0.049,
+        approach_length_m=0.02,
+        side_clearance_m=0.006,
+    )
+    if not place_gripper.get("feasible"):
+        failed = _fail(
+            report,
+            "target_pose_gripper_clearance_blocked",
+            "target_pose_base",
+        )
+        detail = {
+            "received_position_m": get_center(moved),
+            "target_yaw_deg": place_yaw_deg,
+            "blocking_objects": place_gripper.get("blocking_objects") or [],
+            "correction": (
+                "choose another point in the same color region whose open-gripper "
+                "descent and release clear every observed object"
+            ),
+        }
+        suggested = _suggest_organize_target_position(
+            obj=obj,
+            state=state,
+            group=group,
+            region=regions[region_id],
+            grouping_key=grouping_key,
+            contract=contract,
+            target_pose=proposal["target_pose_base"],
+            minimum_reposition_m=minimum_reposition,
+        )
+        if suggested is not None:
+            detail["suggested_collision_free_position_m"] = suggested
+        failed["checks"]["target_pose_base"]["detail"].update(detail)
+        return None, failed
     minimum_spacing = float(contract.get("goal_spec", {}).get("minimum_spacing_m", 0.015))
     group_members = [moved]
     for other in state.get("objects", []):
@@ -476,6 +524,16 @@ def _suggest_organize_target_position(
     ymin, ymax = float(region["ymin"]) + half_y, float(region["ymax"]) - half_y
     if xmin > xmax or ymin > ymax:
         return None
+    # Do not return a rounded point exactly on the mathematical footprint
+    # boundary.  Besides floating-point rejection, a real block needs a small
+    # calibration allowance inside its assigned row.
+    boundary_inset = min(
+        0.0005,
+        max(0.0, 0.25 * (xmax - xmin)),
+        max(0.0, 0.25 * (ymax - ymin)),
+    )
+    xmin, xmax = xmin + boundary_inset, xmax - boundary_inset
+    ymin, ymax = ymin + boundary_inset, ymax - boundary_inset
     same_group_inside = [
         other for other in state.get("objects", [])
         if str(other.get("id")) != str(obj.get("id"))
@@ -492,7 +550,18 @@ def _suggest_organize_target_position(
     elif same_group_inside and layout == "columns":
         x_values = [sum(get_center(item)[0] for item in same_group_inside) / len(same_group_inside)]
     positions = [(x, y) for x in x_values for y in y_values]
-    positions.sort(key=lambda point: math.hypot(point[0] - source[0], point[1] - source[1]))
+    if same_group_inside:
+        # Put the next member beside its same-color row, then rely on the
+        # spacing/collision checks below to choose the nearest safe slot.
+        positions.sort(key=lambda point: min(
+            math.hypot(point[0] - get_center(item)[0], point[1] - get_center(item)[1])
+            for item in same_group_inside
+        ))
+    else:
+        midpoint = (0.5 * (xmin + xmax), 0.5 * (ymin + ymax))
+        positions.sort(key=lambda point: math.hypot(
+            point[0] - midpoint[0], point[1] - midpoint[1],
+        ))
     target_position = target_pose.get("position_m", target_pose.get("position"))
     target_z = float(target_position[2])
     rejected_destination_bin = (
@@ -525,6 +594,22 @@ def _suggest_organize_target_position(
                 if footprint_inside_region(other_footprint, region):
                     group_members.append(other)
         if collision or not evaluate_layout(group_members, layout, tolerance):
+            continue
+        exact_place_yaw_deg = math.degrees(yaw)
+        place_obstacles = [
+            other for other in state.get("objects", [])
+            if str(other.get("id")) != str(obj.get("id"))
+        ]
+        place_gripper = evaluate_grasp_yaw(
+            candidate,
+            place_obstacles,
+            exact_place_yaw_deg,
+            gripper_outer_width_m=0.112,
+            gripper_inner_width_m=0.049,
+            approach_length_m=0.02,
+            side_clearance_m=0.006,
+        )
+        if not place_gripper.get("feasible"):
             continue
         return [round(float(x), 6), round(float(y), 6), round(target_z, 6)]
     return None

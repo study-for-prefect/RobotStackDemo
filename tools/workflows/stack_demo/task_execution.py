@@ -65,6 +65,9 @@ def _validate_pick_grasp_geometry(args: Any, state: dict, action: dict) -> Tuple
         gripper_inner_width_m=float(getattr(args, "grasp_gripper_inner_width_m", 0.049)),
         side_clearance_m=float(getattr(args, "grasp_gripper_side_clearance_m", 0.006)),
         approach_length_m=float(getattr(args, "grasp_approach_length_m", 0.02)),
+        min_feasible_yaw_span_deg=float(
+            getattr(args, "grasp_min_feasible_yaw_span_deg", 10.0)
+        ),
     )
     output = dict(action)
     output["physical_grasp_validation"] = _compact_grasp_report(report)
@@ -82,6 +85,8 @@ def _compact_grasp_report(report: dict) -> dict:
             "grasp_feasible", "selected_grasp_yaw_deg", "selected_grasp_axis_delta_deg",
             "selected_grasp_source", "feasible_yaw_intervals_deg", "blocked_yaw_intervals_deg",
             "all_grasps_blocked", "blocking_objects", "parameters",
+            "robust_feasible_yaw_intervals_deg",
+            "rejected_narrow_feasible_yaw_intervals_deg",
         )
     }
 

@@ -113,6 +113,11 @@ class PerceptionServerState:
             request_args.tf_json = project_path(str(query["tf_json"]))
         if query.get("camera_frame"):
             request_args.camera_frame = str(query["camera_frame"]).lstrip("/")
+        if query.get("score_thresh") is not None:
+            requested_threshold = float(query["score_thresh"])
+            if not 0.01 <= requested_threshold <= 1.0:
+                raise ValueError("score_thresh must be in [0.01, 1.0]")
+            request_args.score_thresh = requested_threshold
         frame = self.wait_latest_frame(float(self.args.request_timeout_s))
         source_frame = str((frame.profile or {}).get("coordinate_frame") or "")
         if source_frame and request_args.use_tf and request_args.tf_point_mode == DEFAULT_TF_POINT_MODE:

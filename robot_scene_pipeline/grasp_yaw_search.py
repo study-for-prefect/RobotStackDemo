@@ -373,6 +373,29 @@ def _evaluate_yaw(
     }
 
 
+def evaluate_grasp_yaw(
+    target: ObjectDict,
+    objects: Iterable[ObjectDict],
+    yaw_deg: float,
+    gripper_outer_width_m: float = 0.112,
+    gripper_inner_width_m: float = 0.049,
+    approach_length_m: float = 0.02,
+    z_tolerance_m: float = 0.04,
+    side_clearance_m: float = 0.006,
+) -> dict:
+    """Evaluate one exact top-down gripper yaw against visible obstacles."""
+    return _evaluate_yaw(
+        target,
+        [obj for obj in objects if isinstance(obj, dict)],
+        yaw_deg,
+        gripper_outer_width_m,
+        gripper_inner_width_m,
+        approach_length_m,
+        z_tolerance_m,
+        side_clearance_m,
+    )
+
+
 def _intervals(samples: List[dict], feasible: bool) -> Tuple[List[List[float]], List[dict]]:
     intervals: List[List[float]] = []
     blocker_intervals: List[dict] = []
@@ -421,6 +444,7 @@ def select_best_grasp(
     approach_length_m: float = 0.02,
     z_tolerance_m: float = 0.04,
     side_clearance_m: float = 0.006,
+    min_feasible_yaw_span_deg: float = 10.0,
 ) -> dict:
     obstacles = [obj for obj in objects if isinstance(obj, dict) and not is_same_object(obj, target)]
     candidates = _candidate_yaws(target, obstacles, yaw_step_deg, local_refine_step_deg, current_wrist_yaw_deg)
@@ -457,9 +481,27 @@ def select_best_grasp(
     feasible_intervals, _ = _intervals(local_samples, True)
     blocked_intervals, blockers_by_interval = _intervals(local_samples, False)
 
-    feasible_candidates = [item for item in candidate_results if item["feasible"]]
-    if not feasible_candidates and feasible_intervals:
-        for start, end in feasible_intervals:
+    minimum_span = max(0.0, float(min_feasible_yaw_span_deg))
+    robust_intervals = [
+        interval for interval in feasible_intervals
+        if float(interval[1]) - float(interval[0]) >= minimum_span
+    ]
+
+    def inside_robust_interval(yaw_deg: float) -> bool:
+        yaw = normalize_yaw_180(yaw_deg)
+        for start, end in robust_intervals:
+            span = float(end) - float(start)
+            inset = min(2.0, 0.25 * span)
+            if float(start) + inset <= yaw <= float(end) - inset:
+                return True
+        return False
+
+    feasible_candidates = [
+        item for item in candidate_results
+        if item["feasible"] and inside_robust_interval(float(item["yaw_deg"]))
+    ]
+    if not feasible_candidates and robust_intervals:
+        for start, end in robust_intervals:
             mid = normalize_yaw_180((float(start) + float(end)) / 2.0)
             result = _evaluate_yaw(
                 target,
@@ -500,13 +542,17 @@ def select_best_grasp(
         for blocker in interval.get("blocking_objects", []):
             all_blockers[str(blocker.get("id"))] = blocker
     categories = {str(item.get("blocker_category")) for item in all_blockers.values()}
-    all_grasps_blocked = not feasible_intervals
+    all_grasps_blocked = not robust_intervals
     return {
         "selected_grasp_yaw_deg": None if selected is None else round(float(selected_yaw), 3),
         "selected_grasp_axis_delta_deg": None if selected is None else round(float(selected_axis_delta), 3),
         "selected_grasp_source": None if selected is None else selected.get("source"),
         "grasp_feasible": selected is not None,
         "feasible_yaw_intervals_deg": feasible_intervals,
+        "robust_feasible_yaw_intervals_deg": robust_intervals,
+        "rejected_narrow_feasible_yaw_intervals_deg": [
+            interval for interval in feasible_intervals if interval not in robust_intervals
+        ],
         "blocked_yaw_intervals_deg": blocked_intervals,
         "all_grasps_blocked": bool(all_grasps_blocked),
         "blocking_objects_by_interval": blockers_by_interval,
@@ -522,5 +568,6 @@ def select_best_grasp(
             "gripper_inner_width_m": float(gripper_inner_width_m),
             "approach_length_m": float(approach_length_m),
             "side_clearance_m": float(side_clearance_m),
+            "min_feasible_yaw_span_deg": minimum_span,
         },
     }

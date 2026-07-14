@@ -2,6 +2,59 @@
 
 UR5 + RealSense D435i 的积木识别、抓取与堆叠演示项目。
 
+## 当前目标与开发状态（2026-07-14）
+
+本项目当前的最终目标不是完成一个固定场景的单步演示，而是从桌面上一堆任意散落、
+可能互相遮挡或挤在一起的积木开始，闭环完成两个主要任务：
+
+1. `organize_blocks`：把全部积木按颜色分类，每种颜色占一个目标区域并排成一行；
+2. `build_house`：从散落积木中取材，搭成四个方块支撑、一个屋顶和一个三角顶的六角色房子。
+
+两类任务共享同一条恢复原则：**能安全抓取并推进任务就先抓；当前目标不能抓时必须清障，
+不能因为一次选择不可抓、碰撞预检失败或 VLM 重复动作就直接结束。** 清障优先抓走可抓的
+障碍物；没有可靠抓取角度时，才从障碍物侧面空处下降并水平推动约 3–5 cm。整理任务中，
+抓走障碍物时直接把它放进自己的同色行；房子任务中则把障碍物移到安全临时区。推到其他
+未保护散乱积木属于可恢复接触，推桌面、支撑物、已完成结构或 protected 对象仍是硬拒绝。
+
+当前整理任务已经在实机上连续完成过红块和蓝块的抓取、搬运、放置与动作后重新观测，
+但**尚未完整跑完一次全场颜色分类，也尚未开始最终房子闭环实机验收**。最近一次整理实机
+暴露了两个安全漏检：蓝块只有约 4° 的狭窄抓取角仍被接受；蓝块放置时张开的夹爪撞到
+第一步已放好的红块。代码已增加对应修复和回归测试，但按用户要求尚未做修复后的下一次
+实机验证。因此不能宣称当前代码已经能够无人干预完整完成任务。
+
+整理任务当前新增的关键行为：
+
+- YOLO 负责检测框和三维几何；低置信、漏检或类别不可靠时由 VLM 复核类别，几何坐标仍以
+  RGB-D/TF 为准。
+- 每轮对所有目标行外对象做物理抓取扫描，不严格按颜色顺序；有可抓对象时，VLM 即使选到
+  不可抓对象、`stop` 或 `reobserve`，代码也改选当前可靠可抓对象。
+- 真实抓取必须有至少 10° 连续无碰撞 yaw 区间，并从区间内部取角度；窄缝边界角不执行。
+- 颜色目标区域首次生成后在同一任务内保持不变，不随每次观测漂移。代码在同色区域内生成
+  有效空槽；小于 15 mm 的搬动不算整理进展。
+- 放置不仅检查积木本体是否重叠，还用张开 GF225 的两根实体手指检查下降、释放位置是否会
+  碰到所有当前对象，包括前几步已经放好的颜色行；被挡住时在同色区域内改找安全位置。
+- 动作后目标行判断允许最多 3 mm 的观测足迹抖动，避免刚放好的方块因检测 yaw 波动又被抓走。
+- 当前全部不可抓时，不等待 8 次相同 VLM 输出：进入四个基坐标方向、两种腕角的有界推障
+  搜索，每个候选仍必须通过语义、工作区、GF225 扫掠体和 MoveIt plan-only。
+
+实机约束和当前参数：
+
+- 工作区使用 `base_link` 米制坐标：`x=0.235..0.65 m`、`y=-0.10..0.40 m`；最终颜色区
+  使用 `config/workspace_bounds.json` 中独立的 `organize_layout_bounds`。
+- 每次观测前回到 `config/rectangle_ready_pose.json` 标准关节位，并现场刷新
+  `base_link <- camera_color_optical_frame` 和 `base_link <- tool0`。
+- 主平移、接近物体和标准位复位默认速度/加速度比例为 `0.08/0.08`；安全高位的末端 Z 轴
+  预旋转默认是其 3 倍，即 `0.24/0.24`，可用 `--pre-rotate-velocity` 和
+  `--pre-rotate-acceleration` 显式覆盖。
+- 整理放置默认增加 10 mm 释放间隙，避免夹爪触桌。
+- RTX 3090 当前调试功耗上限保持 250 W。此前 300 W 仍发生过无 OOM/Xid/panic 日志的硬重启，
+  完成稳定验收前不要恢复 370 W。
+- 默认模型使用 `qwen3-vl:8b-instruct`；30B 对照应使用
+  `qwen3-vl:30b-a3b-instruct`，不要用会耗尽 thinking 预算的 `qwen3-vl:30b` 标签。
+
+机器人、MoveIt、相机和感知服务由桌面 `Start_Robot_Stack.desktop` 启动。任务工作流只运行
+下面的 pipeline；不要为任务调试修改或重复启动已经稳定工作的机械臂/相机驱动文件。
+
 ## 目录结构
 
 ```text
@@ -128,6 +181,27 @@ python3 tools/workflows/stack_demo_pipeline.py \
 `--execute` 默认不授权真实清障。只有需要且已确认允许机械臂推开/移走障碍物时，才额外
 添加 `--execute-push-clearing`。30B 对照测试只需把模型改为
 `qwen3-vl:30b-a3b-instruct`；不要使用 thinking 变体 `qwen3-vl:30b`。
+
+从散落积木执行完整整理或搭房子时，本项目当前目标要求清障始终开启：
+
+```bash
+# 按颜色整理：能抓先分类，不能抓则抓走/侧推障碍后重新观察
+python3 tools/workflows/stack_demo_pipeline.py \
+  --instruction "按颜色整理积木" \
+  --model qwen3-vl:8b-instruct \
+  --execute --yes --execute-push-clearing \
+  --output-dir runtime/organize_blocks_execute
+
+# 六角色房子：先完成整理实机验收后再运行
+python3 tools/workflows/stack_demo_pipeline.py \
+  --instruction "搭一个房子" \
+  --model qwen3-vl:8b-instruct \
+  --execute --yes --execute-push-clearing \
+  --output-dir runtime/build_house_execute
+```
+
+当前阶段不要直接运行第二条房子实机命令：严格先完成颜色整理，再单独调房子，不能同时修改
+两个任务。每次实机都使用新的输出目录并保留完整 runtime，遇到问题先读最新现场文件再改。
 
 动作安全检查使用 `config/workspace_bounds.json`。该文件必须明确写出 `base_link`、
 米制单位以及 `xmin/xmax/ymin/ymax/zmin/zmax` 六个方向；也可用

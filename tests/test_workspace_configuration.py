@@ -5,7 +5,11 @@ import unittest
 from types import SimpleNamespace
 
 from tools.workflows.stack_demo.commands import plan_only_command
-from tools.workflows.stack_demo.workspace import attach_configured_workspace, load_workspace_bounds
+from tools.workflows.stack_demo.workspace import (
+    attach_configured_workspace,
+    load_organize_layout_bounds,
+    load_workspace_bounds,
+)
 
 
 class WorkspaceConfigurationTests(unittest.TestCase):
@@ -45,6 +49,27 @@ class WorkspaceConfigurationTests(unittest.TestCase):
             state, SimpleNamespace(workspace_bounds_json="missing.json", base_frame="base_link"),
         )
         self.assertIs(result["table_bounds"], original)
+
+    def test_optional_organize_layout_is_loaded_inside_physical_workspace(self):
+        path = self._write({
+            "frame_id": "base_link", "unit": "meter",
+            "bounds": {
+                "xmin": 0.2, "xmax": 0.65, "ymin": -0.1,
+                "ymax": 0.4, "zmin": -0.03, "zmax": 0.25,
+            },
+            "organize_layout_bounds": {
+                "xmin": 0.25, "xmax": 0.42, "ymin": 0.04, "ymax": 0.30,
+            },
+        })
+        workspace = load_workspace_bounds(path)
+        layout = load_organize_layout_bounds(path, workspace)
+        self.assertEqual(layout, {
+            "xmin": 0.25, "xmax": 0.42, "ymin": 0.04, "ymax": 0.30,
+        })
+        state = attach_configured_workspace(
+            {}, SimpleNamespace(workspace_bounds_json=path, base_frame="base_link"),
+        )
+        self.assertEqual(state["organize_layout_bounds"], layout)
 
     def _write(self, payload):
         handle = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)

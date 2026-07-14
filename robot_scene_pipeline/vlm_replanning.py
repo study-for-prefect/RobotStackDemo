@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 ACTION_CHANGE_FIELDS = [
     "strategy_id",
-    "object_id",
+    "selected_object_id",
     "action_type",
     "target_pose_base",
     "direction_base",
@@ -42,7 +42,7 @@ def _feedback_action_signature(proposal: Dict[str, Any], scene_revision: int) ->
     yaw = proposal.get("gripper_yaw_rad")
     return {
         "scene_revision": int(scene_revision),
-        "object_id": proposal.get("object_id"),
+        "object_id": proposal.get("selected_object_id", proposal.get("object_id")),
         "action_type": proposal.get("action_type"),
         "direction_sector": _direction_sector(direction),
         "distance_range_m": _distance_range(distance),
@@ -62,20 +62,52 @@ def action_validation_feedback(
     for name in safety_report.get("failed_fields", []):
         check = (safety_report.get("checks") or {}).get(name) or {}
         detail = copy.deepcopy(check.get("detail") or {})
+        if name == "selected_object_grasp_feasible":
+            # Candidate-by-candidate yaw diagnostics can contain tens of
+            # thousands of lines.  Keep them in the physical preflight
+            # artifact, but give the VLM only the evidence needed to choose a
+            # different object or a clearance action.
+            detail = {
+                key: detail.get(key)
+                for key in (
+                    "grasp_feasible", "selected_grasp_yaw_deg",
+                    "selected_grasp_axis_delta_deg", "selected_grasp_source",
+                    "feasible_yaw_intervals_deg", "blocked_yaw_intervals_deg",
+                    "all_grasps_blocked", "blocking_objects", "blocked_by_base",
+                    "blocked_by_locked_structure", "blocked_by_placed_structure",
+                    "required_next_action",
+                )
+                if detail.get(key) is not None
+            }
         if name == "tool_swept_volume_clear":
             failed_checks.append({"type": name, "reason": detail.get("reason")})
         else:
             failed_checks.append({"type": name, **detail})
     tool_report = safety_report.get("tool_swept_volume_report") or {}
+    collision_groups = {}
     for collision in tool_report.get("hard_collisions", tool_report.get("collisions", [])):
-        failed_checks.append({
+        key = (
+            collision.get("entity_type", "scene_object"), collision.get("id"),
+            collision.get("label"),
+        )
+        grouped = collision_groups.setdefault(key, {
             "type": "tool_swept_volume_collision",
-            "phase": collision.get("stage"),
-            "colliding_entity_type": collision.get("entity_type", "scene_object"),
-            "colliding_object_id": collision.get("id"),
-            "colliding_object_label": collision.get("label"),
+            "phases": [],
+            "colliding_entity_type": key[0],
+            "colliding_object_id": key[1],
+            "colliding_object_label": key[2],
             "minimum_clearance_m": collision.get("minimum_clearance_m"),
         })
+        if collision.get("stage") not in grouped["phases"]:
+            grouped["phases"].append(collision.get("stage"))
+        values = [
+            value for value in (
+                grouped.get("minimum_clearance_m"), collision.get("minimum_clearance_m")
+            ) if isinstance(value, (int, float))
+        ]
+        if values:
+            grouped["minimum_clearance_m"] = min(values)
+    failed_checks.extend(list(collision_groups.values())[:8])
     if not failed_checks:
         failed_checks.append({"type": safety_report.get("reason") or "proposal_rejected"})
     stage = _validation_stage(safety_report)
@@ -103,7 +135,7 @@ def compact_action(proposal: Dict[str, Any]) -> Dict[str, Any]:
     return {
         key: proposal.get(key)
         for key in (
-            "strategy_id", "action_type", "object_id", "target_object_id", "contact_side",
+            "strategy_id", "action_type", "object_id", "selected_object_id", "target_object_id", "contact_side",
             "selected_object_ref", "selected_track_id", "group_id", "target_region_id", "role_id",
             "direction_base", "push_direction_base", "distance_m", "push_distance_m",
             "gripper_yaw_rad", "safe_place_center_base_m", "target_pose_base", "reason",

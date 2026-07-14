@@ -120,7 +120,10 @@ def build_grounded_task_plan_input(
         organize_objects = organize_scope_objects(state)
         value["objects"] = [compact_task_object(obj) for obj in organize_objects]
         value["layout_slot_candidates"] = _organize_layout_slots(
-            state.get("table_bounds") or state.get("workspace_bounds"), organize_objects,
+            state.get("organize_layout_bounds")
+            or state.get("table_bounds")
+            or state.get("workspace_bounds"),
+            organize_objects,
         )
         value["organize_plan_rules"] = [
             "Create exactly one group for each resolved visual_color (fall back to detector label when absent).",
@@ -149,7 +152,7 @@ def build_task_action_input(
         "task_contract": task_contract,
         "grounded_task_plan": compact_grounded_task_plan(grounded_plan),
         "current_goal_progress": compact_goal_progress(goal_progress),
-        "failure_history": list(failure_history or []),
+        "failure_history": _compact_action_failure_history(failure_history or []),
         "replanning_context": replanning_context or {},
         "workspace_bounds": state.get("table_bounds") or state.get("workspace_bounds"),
         "objects": [
@@ -179,6 +182,46 @@ def compact_goal_progress(goal_progress: Optional[dict]) -> dict:
     compact = {key: value for key, value in goal_progress.items() if key in policy_keys}
     if compact.get("task_type") == "build_house":
         compact["eligible_role_ids_for_next_action"] = _eligible_house_action_roles(compact)
+    return compact
+
+
+def _compact_action_failure_history(history: List[dict], tail_count: int = 1) -> List[dict]:
+    """Keep the latest corrections plus the latest physical grasp blockage."""
+    values = [item for item in history if isinstance(item, dict)]
+    selected = values[-max(1, int(tail_count)):]
+    blocked = next((
+        entry for entry in reversed(values)
+        if any(
+            isinstance(check, dict)
+            and check.get("type") == "selected_object_grasp_feasible"
+            and (check.get("all_grasps_blocked") or not check.get("grasp_feasible", True))
+            for check in entry.get("failed_checks", [])
+        )
+    ), None)
+    if blocked is not None and blocked not in selected:
+        selected.insert(0, blocked)
+    compact = []
+    for entry in selected:
+        output = {
+            key: entry.get(key) for key in (
+                "proposal_id", "scene_revision", "validation_stage", "passed",
+                "rejected_action", "constraints_for_next_proposal",
+            ) if key in entry
+        }
+        output["failed_checks"] = []
+        for check in entry.get("failed_checks", []):
+            if not isinstance(check, dict):
+                continue
+            output["failed_checks"].append({
+                key: check.get(key) for key in (
+                    "type", "reason", "all_grasps_blocked", "grasp_feasible",
+                    "blocking_objects", "suggested_collision_free_position_m",
+                    "suggested_interval_midpoint_position_m", "expected_object_center_base_m",
+                    "expected_object_label", "colliding_object_id", "colliding_object_label",
+                    "phase", "phases", "minimum_clearance_m",
+                ) if key in check
+            })
+        compact.append(output)
     return compact
 
 
@@ -298,7 +341,13 @@ def call_vlm_task_policy(
 
 
 def _task_prompt(policy_input: dict, policy_kind: str) -> str:
-    text = {key: value for key, value in policy_input.items() if key not in ("scene_rgb", "minimal_overlay")}
+    # The exact schema is already passed to Ollama through the structured
+    # ``format`` field.  Repeating it in the natural-language prompt wastes
+    # several thousand tokens and can crowd out physical failure feedback.
+    text = {
+        key: value for key, value in policy_input.items()
+        if key not in ("scene_rgb", "minimal_overlay", "output_schema")
+    }
     if policy_kind == "task_contract":
         expected = policy_input.get("expected_task_type")
         instruction = "输出一次且仅一次 {} 任务合同，绝不能写任何 object_id。".format(expected)
@@ -353,18 +402,36 @@ def _task_prompt(policy_input: dict, policy_kind: str) -> str:
             )
         if (policy_input.get("task_contract") or {}).get("task_type") == "organize_blocks":
             instruction += (
-                "整理目标搬运优先使用 pick_place，不要仅因为检测框重叠就先 nudge；但若物理反馈明确"
-                "selected_object_grasp_feasible=false 或 all_grasps_blocked=true，则必须先 nudge/pick_away 清障，禁止继续直接抓。"
+                "最高优先级执行 physical_action_options：只要 direct_grasp_available=true，本次动作必须是 pick_place，"
+                "selected_object_ref 必须从 direct_grasp_object_refs 中选择，严禁 nudge、pick_away、reobserve 或 stop。"
+                "首选 recommended_direct_grasp_object_ref（它具有最大的可行抓取 yaw 区间）；只有失败历史已明确拒绝它时"
+                "才选择 direct_grasp_object_refs 中的下一项。"
+                "整理不按颜色顺序执行。抓取任一可抓的 outside_region 积木并放入它自己的同色行，既是整理推进也是清障；"
+                "因此不要为了抓某个受阻目标而跳过另一块可抓的红/绿/蓝/黄积木。只有当 direct_grasp_available=false 时"
+                "才进入清障：先检查阻挡物是否可抓；整理任务中可抓阻挡物仍用 pick_place 放入其同色 target_region，"
+                "所有相关松散块都不可抓时才允许 nudge。"
+                "换 selected_object_ref 时必须同时切换到该物体自身颜色的 group_id 和 target_region_id，"
+                "禁止沿用上一个受阻物体的组或目标区域。"
+                "清障可选择 blocking_objects 或同一散乱簇内任一 loose_movable 积木，优先 nudge 3~5cm 来创造夹爪角度；"
+                "被推积木碰到其他未保护松散积木属于 recoverable contact，不得因此停止。推动终点必须避开所有"
+                "target_regions 和已整理/保护区域，并在动作后重新观测。"
                 "pick_place 必须完整输出 strategy_id、"
                 "selected_object_ref/selected_track_id、group_id、target_region_id、object_label、object_center_base_m、"
                 "scene_revision 和 target_pose_base。目标完整足迹不得与任何当前物体重叠；必须检查所有物体中心，"
                 "不要机械地选择区域中心。失败反馈给出 blocking_object 时必须更换 XY。"
+                "整理 pick_place 的 role_id、所有 target_object_*、contact_side、direction_base、distance_m、"
+                "gripper_yaw_rad 和 safe_place_center_base_m 必须为 null；这些字段只属于房屋或清障动作。"
                 "若某组 group_diagnostics.outside_region 非空，只能优先选择其中的物体，禁止搬动已经在目标区内的成员。"
                 "target_pose_base 的 XY 必须与源中心有实质距离，禁止原地抓起再原地放下。"
                 "每种颜色独占一个 target_region，同色积木必须在该区域内沿同一行并排且保持 minimum_spacing_m；"
                 "放置 yaw 必须兼顾完整积木足迹、夹爪空间和碰撞约束；只在避碰需要时改变姿态，不固定旋转角度。"
                 "若失败反馈给出 allowed_center_x_m/allowed_center_y_m，下一次 target_pose_base.position_m 的 XY"
                 "必须直接选在这两个闭区间内，禁止再次复制源物体中心。"
+            )
+        if (policy_input.get("task_contract") or {}).get("task_type") == "build_house":
+            instruction += (
+                "清障也必须遵守 grasp-first：目标角色可抓就直接装配；目标受阻时，阻挡物可抓则先 pick_away，"
+                "只有阻挡物也不可抓时才 nudge。"
             )
     ontology = "\n{}\n".format(HOUSE_DEFINITION_PROMPT) if (
         policy_input.get("expected_task_type") == "build_house"
@@ -381,6 +448,13 @@ def _task_action_recovery_directive(policy_input: dict) -> str:
         return ""
     latest = history[-1] if isinstance(history[-1], dict) else {}
     latest_checks = [item for item in latest.get("failed_checks", []) if isinstance(item, dict)]
+    if any(item.get("type") == "organize_clearance_requires_physical_grasp_blockage" for item in latest_checks):
+        return (
+            "最高优先级动作类型纠错：当前没有任何物理抓取全角度受阻证据，禁止继续 nudge 或 pick_away。"
+            "下一动作必须改为 pick_place，选择 current_goal_progress.group_diagnostics 中 outside_region 的积木，"
+            "并在其同色 target_region 内给出与源中心至少相距0.006m的无碰撞 target_pose_base。"
+            "只有后续 physical_grasp_preflight 明确返回 all_grasps_blocked=true 才允许清障。"
+        )
     if any(item.get("type") == "push_direction_base_unit_xy_vector" for item in latest_checks):
         return (
             "最高优先级清障参数纠错：保持上次选择的阻挡物和 target_object 不变，但 direction_base 必须是长度为1的"
@@ -391,6 +465,36 @@ def _task_action_recovery_directive(policy_input: dict) -> str:
         return (
             "最高优先级清障接触侧纠错：保持上次阻挡物、target_object、单位 direction_base 和 distance_m；"
             "仅把 contact_side 改到方向反侧：+X=>-x，-X=>+x，+Y=>-y，-Y=>+y。"
+        )
+    if any(item.get("type") == "organize_clearance_must_increase_target_separation" for item in latest_checks):
+        return (
+            "最高优先级清障方向纠错：上次推动会让阻挡物更靠近原受阻目标，禁止重复。"
+            "保持原受阻 target_object，并从当前 objects 重新选择阻挡物或方向；推动终点到 target_object 中心的"
+            "XY距离必须比起点至少增加0.005m。可以改为相反方向，若夹爪空间不足则改用 pick_away。"
+        )
+    if any(item.get("type") == "organize_clearance_avoid_target_regions" for item in latest_checks):
+        return (
+            "最高优先级清障方向纠错：保持松散清障物和原受阻 target_object，改用另一个单位 XY 方向并推动0.03~0.05m；"
+            "推动终点不得落入 grounded_task_plan.target_regions。优先把散乱物推离所有最终颜色行。"
+        )
+    entry_collision = next((
+        item for item in latest_checks
+        if item.get("type") == "tool_swept_volume_collision"
+        and item.get("colliding_entity_type") == "movable_object"
+        and any(
+            phase in {"approach_to_contact", "contact_pose"}
+            for phase in (item.get("phases") or [item.get("phase")])
+        )
+    ), None)
+    if entry_collision is not None:
+        return (
+            "最高优先级清障进场纠错：上次夹爪侧推接触位被松散积木 id={!r}, label={!r} 占据，"
+            "禁止从该积木正上方下降，也不能只修改 distance_m。必须换另一个 direction_base/contact_side，"
+            "或换散乱簇边缘的 selected_object，使 pre_push 到 contact_pose 的垂直下降列完全无积木；"
+            "只有 horizontal_push 阶段才允许与其他未保护松散积木发生 recoverable contact。"
+        ).format(
+            entry_collision.get("colliding_object_id"),
+            entry_collision.get("colliding_object_label"),
         )
     invalid_pose = next((
         item for item in latest_checks
@@ -418,14 +522,22 @@ def _task_action_recovery_directive(policy_input: dict) -> str:
     if blocked_check is not None:
         rejected = (blocked_entry or {}).get("rejected_action") or {}
         blockers = blocked_check.get("blocking_objects") or []
+        outside_ids = {
+            str(object_id)
+            for group in (policy_input.get("current_goal_progress") or {}).get("group_diagnostics", [])
+            for object_id in group.get("outside_region", [])
+            if object_id is not None
+        }
+        blocked_id = rejected.get("selected_object_id")
         return (
             "最高优先级抓取清障：物理夹爪扫描确认原目标 selected_object_ref={!r}, selected_track_id={!r}, "
             "label={!r}, center={} 在所有角度均被阻挡。禁止再次对它输出 pick_place。"
-            "必须从 blocking_objects={} 中选择一个 loose_movable 阻挡物，并用输入 objects 中匹配 detector_object_id 的"
+            "立即清障，不需要再逐个尝试其他颜色。可从 blocking_objects={} 或同一散乱簇中选择任一 loose_movable，并用输入 objects 中匹配 detector_object_id 的"
             "object_ref/track_id/label/geometry_center_base_m 作为 selected_*；原受阻目标必须作为 target_object_*。"
             "strategy_id 必须改为 clear_blocker_by_nudge（pick_away 则 clear_blocker_by_pick_away），禁止继续用 organize_blocks。"
             "优先输出完整 nudge：target_pose_base=null, safe_place_center_base_m=null, direction_base 为三维单位 XY 向量，"
-            "distance_m 在[0.01,0.05]，contact_side 必须位于 direction_base 反方向，gripper_yaw_rad 为有限数。"
+            "distance_m 在[0.03,0.05]，contact_side 必须位于 direction_base 反方向，gripper_yaw_rad 为有限数。"
+            "方向要远离 grounded_task_plan.target_regions；被推物体接触其他未保护松散积木是 recoverable contact，不得 stop。"
             "若无安全推移空间则输出完整 pick_away 和无碰撞 safe_place_center_base_m。"
         ).format(
             rejected.get("selected_object_ref"),
@@ -484,7 +596,7 @@ def _scene_objects(state: dict) -> Iterable[dict]:
 
 
 def _organize_layout_slots(workspace: object, objects: List[dict]) -> List[dict]:
-    """Offer equal non-overlapping row slots; the VLM still assigns colors to slots."""
+    """Offer compact row slots in the part of the layout area farthest from clutter."""
     present = {color_value_from_object(obj) for obj in objects} - {None}
     canonical_order = ("red", "green", "blue", "yellow")
     colors = [color for color in canonical_order if color in present]
@@ -495,19 +607,64 @@ def _organize_layout_slots(workspace: object, objects: List[dict]) -> List[dict]
         ymin, ymax = float(workspace["ymin"]), float(workspace["ymax"])
     except (KeyError, TypeError, ValueError):
         return []
-    height = (ymax - ymin) / len(colors)
-    return [
-        {
+    available_height = ymax - ymin
+    row_heights = []
+    for color in colors:
+        color_objects = [obj for obj in objects if color_value_from_object(obj) == color]
+        footprint = max((
+            max(float(value) for value in (obj.get("dimensions_m") or [])[:2])
+            for obj in color_objects
+            if len(obj.get("dimensions_m") or []) >= 2
+        ), default=0.022)
+        row_heights.append(max(0.03, footprint + 0.008))
+    total_height = sum(row_heights)
+    if total_height > available_height:
+        row_heights = [available_height / len(colors)] * len(colors)
+        total_height = available_height
+
+    # Candidate windows include both edges and positions just beyond each
+    # observed footprint.  Maximize the minimum vertical gap so destinations
+    # do not begin inside the current scattered cluster.
+    starts = [ymin, ymax - total_height]
+    obstacle_intervals = []
+    for obj in objects:
+        center = obj.get("geometry_center_m") or obj.get("center_3d_base_m")
+        size = obj.get("dimensions_m") or []
+        if not isinstance(center, (list, tuple)) or len(center) < 2:
+            continue
+        half_y = 0.5 * float(size[1]) if len(size) >= 2 else 0.012
+        lower, upper = float(center[1]) - half_y, float(center[1]) + half_y
+        obstacle_intervals.append((lower, upper))
+        starts.extend((upper + 0.025, lower - 0.025 - total_height))
+    starts = [max(ymin, min(ymax - total_height, value)) for value in starts]
+
+    def clearance(start: float) -> float:
+        end = start + total_height
+        gaps = []
+        for lower, upper in obstacle_intervals:
+            if upper < start:
+                gaps.append(start - upper)
+            elif lower > end:
+                gaps.append(lower - end)
+            else:
+                gaps.append(-min(end, upper) + max(start, lower))
+        return min(gaps) if gaps else available_height
+
+    start_y = max(starts, key=lambda value: (clearance(value), value))
+    slots = []
+    cursor = start_y
+    for index, (color, height) in enumerate(zip(colors, row_heights)):
+        slots.append({
             "slot_id": "row_slot_{:02d}".format(index + 1),
-            "assigned_color": colors[index],
+            "assigned_color": color,
             "bounds_base_m": {
                 "xmin": round(xmin, 6), "xmax": round(xmax, 6),
-                "ymin": round(ymin + index * height, 6),
-                "ymax": round(ymin + (index + 1) * height, 6),
+                "ymin": round(cursor, 6), "ymax": round(cursor + height, 6),
             },
-        }
-        for index in range(len(colors))
-    ]
+            "selection_reason": "free_band_farthest_from_current_scattered_footprints",
+        })
+        cursor += height
+    return slots
 
 
 def _images(policy_input: dict, include: bool) -> List[str]:

@@ -304,6 +304,12 @@ def run_push_plan(node: Any, args: Any, planning_start_state: Any, gripper: Any 
                 return False
     if gripper_closed_for_push:
         if not _set_gripper(node, args, gripper, "open"):
-            node.get_logger().error("failed_after_motion: gripper open recovery failed after push success.")
-            return False
+            node.get_logger().warning(
+                "Push motion succeeded but first gripper open was incomplete; retrying once."
+            )
+            if not _set_gripper(node, args, gripper, "open"):
+                node.get_logger().error(
+                    "failed_after_motion: gripper open recovery failed after push success."
+                )
+                return False
     return True

@@ -14,10 +14,13 @@ from .task_schemas import validate_against_schema
 
 POLICY_GENERATION_CONFIG = {
     "stack_order": {"num_ctx": 12288, "num_predict": 4096},
-    "task_contract": {"num_ctx": 8192, "num_predict": 2048},
-    "grounded_task_plan": {"num_ctx": 16384, "num_predict": 4096},
-    "action_proposal": {"num_ctx": 16384, "num_predict": 3072},
-    "action_replan": {"num_ctx": 16384, "num_predict": 3072},
+    # Keep the structured task policies on one runner layout.  Switching the
+    # same model between 8K/12K/16K makes Ollama unload and reload GPU weights
+    # between calls, causing avoidable power transients on the robot host.
+    "task_contract": {"num_ctx": 12288, "num_predict": 2048},
+    "grounded_task_plan": {"num_ctx": 12288, "num_predict": 4096},
+    "action_proposal": {"num_ctx": 12288, "num_predict": 2048},
+    "action_replan": {"num_ctx": 12288, "num_predict": 2048},
     "orientation_analysis": {"num_ctx": 24576, "num_predict": 8192},
     "final_json_generation": {"num_ctx": 12288, "num_predict": 2048},
 }
@@ -143,10 +146,52 @@ def call_policy(
 
 
 def unload_model(args: Any, artifact_dir: Optional[str] = None) -> PolicyCallResult:
-    """Explicitly release the configured model only when requested by the workflow."""
-    message = [{"role": "user", "content": "release model"}]
-    clone = _ArgsOverride(args, vlm_keep_alive="0", vlm_max_backend_retries=1, vlm_think_mode="off")
-    return call_policy(clone, "final_json_generation", message, {"type": "object"}, artifact_dir)
+    """Release the configured model without running one more GPU inference."""
+    model = str(getattr(args, "model", "qwen3-vl:8b-instruct"))
+    result = PolicyCallResult(
+        transport_status="backend_failed",
+        generation_status="model_unload_failed",
+        policy_kind="model_unload",
+        model=model,
+    )
+    chat_url = str(getattr(args, "ollama_url", "http://127.0.0.1:11434/api/chat"))
+    base_url = chat_url.rsplit("/api/", 1)[0] if "/api/" in chat_url else chat_url.rstrip("/")
+    unload_url = base_url + "/api/generate"
+    payload = {"model": model, "keep_alive": 0}
+    try:
+        response = requests.post(
+            unload_url,
+            json=payload,
+            timeout=min(30.0, float(getattr(args, "vlm_read_timeout_sec", 1200.0))),
+        )
+        result.http_status = int(response.status_code)
+        if not 200 <= result.http_status < 300:
+            result.error_type = "MODEL_UNLOAD_HTTP_ERROR"
+            result.error_message = "HTTP {}: {}".format(
+                result.http_status, str(getattr(response, "text", ""))[:500],
+            )
+        else:
+            try:
+                result.raw_response = response.json()
+            except Exception:
+                result.raw_response = getattr(response, "text", "")
+            result.transport_status = "ok"
+            result.generation_status = "model_unloaded"
+            result.done = True
+    except requests.Timeout as exc:
+        result.error_type = "MODEL_UNLOAD_TIMEOUT"
+        result.error_message = str(exc)
+    except requests.RequestException as exc:
+        result.error_type = "MODEL_UNLOAD_REQUEST_FAILED"
+        result.error_message = str(exc)
+    if artifact_dir:
+        os.makedirs(artifact_dir, exist_ok=True)
+        _write_json(os.path.join(artifact_dir, "ollama_model_unload.json"), {
+            "request_url": unload_url,
+            "request": payload,
+            "result": result.to_dict(),
+        })
+    return result
 
 
 def warm_model(args: Any, artifact_dir: Optional[str] = None) -> PolicyCallResult:

@@ -176,6 +176,10 @@ def _controlled_contact_allowed(
     expected = float(overlap)
     size = obj.get("dimensions_m") or obj.get("size_m") or []
     footprint_limit = 0.5 * min(float(value) for value in size[:2]) if len(size) >= 2 else 0.0
+    loose_chain_contact = bool(config.get("allow_loose_chain_contact", False))
+    entry_side_clear = envelope.get("stage") not in {
+        "approach_to_contact", "contact_pose",
+    }
     checks = {
         "enabled": bool(config.get("enabled", True)),
         "loose_unprotected_object": (
@@ -183,14 +187,30 @@ def _controlled_contact_allowed(
             and str(obj.get("role") or "") not in {"base", "structure", "support"}
             and str(obj.get("state") or "") not in {"placed", "locked", "protected"}
         ),
-        "side_intrusion_within_limit": expected <= float(config.get("max_side_intrusion_m", 0.005)),
-        "passive_displacement_within_limit": expected <= float(config.get("max_expected_passive_displacement_m", 0.015)),
+        "side_intrusion_within_limit": (
+            loose_chain_contact
+            or expected <= float(config.get("max_side_intrusion_m", 0.005))
+        ),
+        "passive_displacement_within_limit": (
+            loose_chain_contact
+            or expected <= float(config.get("max_expected_passive_displacement_m", 0.015))
+        ),
         "contacted_object_count_within_limit": (
-            obj.get("id") in contacted_ids
+            loose_chain_contact
+            or obj.get("id") in contacted_ids
             or len(contacted_ids) < int(config.get("max_contacted_objects", 2))
         ),
-        "withdrawal_clear": envelope.get("stage") != "retreat",
-        "topple_risk_low": footprint_limit > 0.0 and expected <= footprint_limit,
+        "withdrawal_clear": (
+            loose_chain_contact or envelope.get("stage") != "retreat"
+        ),
+        # A side push must descend through an empty contact-side column.  Loose
+        # chain contact is permitted only once horizontal pushing has begun;
+        # it must never justify descending on top of a neighbouring block.
+        "entry_contact_side_clear": entry_side_clear,
+        "topple_risk_low": (
+            loose_chain_contact
+            or (footprint_limit > 0.0 and expected <= footprint_limit)
+        ),
         "workspace_safe": _passive_motion_inside_workspace(push_plan, obj, expected),
     }
     return all(checks.values()), checks

@@ -36,7 +36,7 @@ def organize_scope_objects(state: dict) -> List[dict]:
             continue
         if color_value_from_object(obj) is None:
             continue
-        if _detection_clipped_by_image_edge(obj, state):
+        if _detection_clipped_by_image_edge(obj, state) and not _edge_geometry_usable(obj):
             continue
         if workspace is not None and not object_inside_workspace(obj, workspace):
             continue
@@ -79,3 +79,20 @@ def _detection_clipped_by_image_edge(obj: dict, state: dict) -> bool:
         float(bbox[0]) <= margin_px or float(bbox[1]) <= margin_px
         or float(bbox[2]) >= width - margin_px or float(bbox[3]) >= height - margin_px
     )
+
+
+def _edge_geometry_usable(obj: dict) -> bool:
+    """Keep a clipped block only when RGB-D still produced plausible grasp geometry."""
+    center = obj.get("geometry_center_m") or obj.get("center_3d_base_m")
+    dimensions = obj.get("dimensions_m")
+    if not obj.get("pointcloud_geometry_valid") or not obj.get("depth_geometry_observable"):
+        return False
+    if not isinstance(center, list) or len(center) < 3:
+        return False
+    if not isinstance(dimensions, list) or len(dimensions) < 3:
+        return False
+    try:
+        dx, dy, dz = [float(value) for value in dimensions[:3]]
+    except (TypeError, ValueError):
+        return False
+    return 0.015 <= dx <= 0.060 and 0.015 <= dy <= 0.060 and 0.015 <= dz <= 0.060

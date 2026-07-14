@@ -149,12 +149,45 @@ class PolicyRoutingAndGroundingTests(unittest.TestCase):
         }
         payload = build_grounded_task_plan_input(state, contract, 1, CONFIG)
         self.assertEqual(len(payload["layout_slot_candidates"]), 2)
-        self.assertEqual(payload["layout_slot_candidates"][0]["bounds_base_m"]["ymax"], 0.2)
+        self.assertGreater(
+            payload["layout_slot_candidates"][0]["bounds_base_m"]["ymin"], 0.2,
+        )
+        self.assertEqual(
+            payload["layout_slot_candidates"][-1]["bounds_base_m"]["ymax"], 0.4,
+        )
         self.assertEqual(
             [slot["assigned_color"] for slot in payload["layout_slot_candidates"]],
             ["red", "blue"],
         )
         self.assertIn("未来放置区", _task_prompt(payload, "grounded_task_plan"))
+
+    def test_organize_slots_use_observable_layout_not_full_workspace(self):
+        contract = {
+            "task_type": "organize_blocks", "goal_spec": {
+                "grouping_key": "color", "layout_type": "rows",
+                "include_scope": "all_detected_blocks", "allow_stacking": False,
+            },
+        }
+        state = {
+            "workspace_bounds": {
+                "xmin": 0.235, "xmax": 0.65, "ymin": -0.10, "ymax": 0.40,
+            },
+            "organize_layout_bounds": {
+                "xmin": 0.25, "xmax": 0.42, "ymin": 0.04, "ymax": 0.30,
+            },
+            "objects": [
+                {"id": 1, "label": "square red", "geometry_center_m": [0.3, 0.1, 0.0], "dimensions_m": [0.02, 0.02, 0.02]},
+                {"id": 2, "label": "square blue", "geometry_center_m": [0.4, 0.2, 0.0], "dimensions_m": [0.02, 0.02, 0.02]},
+            ],
+        }
+        slots = build_grounded_task_plan_input(state, contract, 1, CONFIG)[
+            "layout_slot_candidates"
+        ]
+        self.assertTrue(slots)
+        self.assertTrue(all(slot["bounds_base_m"]["xmin"] == 0.25 for slot in slots))
+        self.assertTrue(all(slot["bounds_base_m"]["xmax"] == 0.42 for slot in slots))
+        self.assertGreaterEqual(slots[0]["bounds_base_m"]["ymin"], 0.20)
+        self.assertEqual(slots[-1]["bounds_base_m"]["ymax"], 0.30)
 
     def test_task_action_output_schema_exposes_complete_clearance_parameters(self):
         required = set(TASK_ACTION_OUTPUT_SCHEMA["required"])
@@ -167,6 +200,19 @@ class PolicyRoutingAndGroundingTests(unittest.TestCase):
             "yaw_rad",
             TASK_ACTION_OUTPUT_SCHEMA["properties"]["target_pose_base"]["required"],
         )
+
+    def test_prompt_does_not_duplicate_structured_output_schema(self):
+        payload = {
+            "task_contract": {"task_type": "organize_blocks"},
+            "failure_history": [],
+            "output_schema": {
+                "type": "object",
+                "properties": {"unique_schema_marker": {"type": "string"}},
+            },
+        }
+        prompt = _task_prompt(payload, "task_action")
+        self.assertNotIn("unique_schema_marker", prompt)
+        self.assertNotIn('"output_schema"', prompt)
 
     def test_blocked_organize_grasp_prompt_requires_complete_clearance_action(self):
         contract = {

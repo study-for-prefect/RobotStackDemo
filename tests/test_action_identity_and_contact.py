@@ -43,9 +43,45 @@ class ActionIdentityAndContactTests(unittest.TestCase):
         third = build_replanning_context(ledger, 3, 5)["hard_constraints"]
         fourth = build_replanning_context(ledger, 4, 5)["hard_constraints"]
         fifth = build_replanning_context(ledger, 5, 5)["hard_constraints"]
-        self.assertEqual(third["forbidden_action_types"], ["nudge"])
+        self.assertEqual(third["forbidden_action_types"], [])
         self.assertTrue(fourth["required_strategy_change"])
         self.assertTrue(fifth["safe_stop_allowed"])
+
+    def test_protocol_attempts_do_not_force_strategy_change_after_one_real_failure(self):
+        state = _tracked_state()
+        action = _nudge(strategy="clear_a")
+        fingerprint = normalize_action_fingerprint(action, state, 12)
+        ledger = [ledger_entry(1, fingerprint, action, "semantic", ["bad_pose"], 12)]
+        fourth = build_replanning_context(ledger, 4, 8)["hard_constraints"]
+        self.assertFalse(fourth["required_strategy_change"])
+
+    def test_multiple_target_pose_corrections_do_not_force_strategy_change(self):
+        state = _tracked_state()
+        action = _nudge(strategy="clear_a")
+        fingerprint = normalize_action_fingerprint(action, state, 12)
+        ledger = [
+            ledger_entry(index, fingerprint, action, "action_semantic_validation", [reason], 12)
+            for index, reason in (
+                (1, "target_pose_too_close_to_source"),
+                (2, "target_pose_outside_group_region"),
+            )
+        ]
+        fourth = build_replanning_context(ledger, 4, 8)["hard_constraints"]
+        self.assertFalse(fourth["required_strategy_change"])
+        self.assertFalse(fourth["safe_stop_allowed"])
+
+    def test_runtime_physical_validation_stage_names_force_strategy_change(self):
+        state = _tracked_state()
+        first = _nudge(strategy="clear_a")
+        second = _nudge(strategy="clear_b", direction=[0.0, 1.0, 0.0])
+        ledger = [
+            ledger_entry(1, normalize_action_fingerprint(first, state, 12), first,
+                         "moveit_validation", ["selected_pick_not_grasp_feasible"], 12),
+            ledger_entry(2, normalize_action_fingerprint(second, state, 12), second,
+                         "geometry_validation", ["tool_swept_volume_rejected"], 12),
+        ]
+        fourth = build_replanning_context(ledger, 4, 8)["hard_constraints"]
+        self.assertTrue(fourth["required_strategy_change"])
 
     def test_pick_place_pose_corrections_do_not_forbid_the_required_action_type(self):
         state = _tracked_state()
@@ -214,7 +250,7 @@ class ActionIdentityAndContactTests(unittest.TestCase):
         self.assertEqual(len(boxes), 2)
         self.assertTrue(all(box["vmax"] <= -0.049 / 2.0 or box["vmin"] >= 0.049 / 2.0 for box in boxes))
 
-    def test_light_loose_contact_is_controlled_but_protected_is_hard(self):
+    def test_contact_side_neighbor_is_hard_even_when_loose(self):
         loose = _object(3, "square blue", -0.037, y=0.0, size=[0.006, 0.01, 0.01])
         loose["geometry_center_m"][2] = 0.017
         loose["pushable"] = True
@@ -229,11 +265,32 @@ class ActionIdentityAndContactTests(unittest.TestCase):
             controlled_contact={"enabled": True, "max_side_intrusion_m": 0.005},
         )
 
-        self.assertTrue(report["feasible"])
-        self.assertEqual(report["contact_status"], "controlled_contact")
-        self.assertTrue(report["requires_reobservation"])
+        self.assertFalse(report["feasible"])
+        self.assertEqual(report["contact_status"], "hard_collision")
         self.assertFalse(protected["feasible"])
         self.assertEqual(protected["contact_status"], "hard_collision")
+
+    def test_clearance_loose_chain_contact_does_not_relax_protected_object(self):
+        loose = _object(3, "square blue", -0.01, y=0.0, size=[0.02, 0.02, 0.02])
+        loose["geometry_center_m"][2] = 0.017
+        loose["pushable"] = True
+        contact = {
+            "enabled": True, "max_side_intrusion_m": 0.001,
+            "allow_loose_chain_contact": True,
+        }
+        report = check_tool_swept_volume(
+            _push_plan(), [loose], ignore_object_ids=[2], safety_margin_m=0.0,
+            tool_depth_m=0.01, fingertip_thickness_m=0.006,
+            controlled_contact=contact,
+        )
+        protected = check_tool_swept_volume(
+            _push_plan(), [loose], ignore_object_ids=[2], protected_object_ids=[3],
+            safety_margin_m=0.0, tool_depth_m=0.01,
+            fingertip_thickness_m=0.006, controlled_contact=contact,
+        )
+        self.assertTrue(report["feasible"])
+        self.assertTrue(report["requires_reobservation"])
+        self.assertFalse(protected["feasible"])
 
     def test_linear_stack_runtime_repeated_nudge_has_one_fingerprint_and_is_semantically_invalid(self):
         cycle = os.path.join(ROOT, "runtime", "linear_stack_20260712_164342", "cycle_01_object_1")

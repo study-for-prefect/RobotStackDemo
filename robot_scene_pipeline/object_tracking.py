@@ -171,6 +171,9 @@ def _new_track_id(tracks: dict, detection: dict) -> str:
 
 
 def _color(obj: dict) -> str:
+    visual_color = str(obj.get("visual_color") or "").lower()
+    if visual_color:
+        return visual_color
     label = str(obj.get("label") or "").lower()
     return next((value for value in ("red", "green", "blue", "yellow", "orange", "purple", "cyan") if value in label), "unknown")
 

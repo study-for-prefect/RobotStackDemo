@@ -221,7 +221,23 @@ def evaluate_organize_groups(state: dict, contract: dict, plan: dict) -> dict:
         members = [obj for obj in all_objects if _group_match(obj, group, goal_spec.get("grouping_key"))]
         minimum_count = int(group.get("minimum_required_count", 1))
         region = regions.get(group.get("target_region_id"))
-        inside = [obj for obj in members if footprint_inside_region(object_footprint_polygon(obj), region)]
+        # Post-action detector yaw for nearly square blocks is noisy: a tiny
+        # angle change can expand the reconstructed AABB enough to cross a row
+        # edge by sub-millimetres even though the commanded placement was
+        # strictly inside.  Target validation remains strict; observed goal
+        # progress gets a bounded sensor tolerance so a placed block is not
+        # picked again solely due to perception jitter.
+        observation_region_tolerance = min(
+            0.003,
+            0.25 * float(goal_spec.get("alignment_tolerance_m", 0.012)),
+        )
+        inside = [
+            obj for obj in members
+            if footprint_inside_region(
+                object_footprint_polygon(obj), region,
+                margin_m=-observation_region_tolerance,
+            )
+        ]
         overlapping_pairs = _overlapping_pairs(members)
         spacing_violations = _spacing_violations(members, float(goal_spec.get("minimum_spacing_m", 0.015)))
         layout_satisfied = evaluate_layout(members, str(goal_spec.get("layout_type")), float(goal_spec.get("alignment_tolerance_m", 0.012)))

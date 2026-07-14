@@ -8,7 +8,7 @@ from unittest.mock import patch
 import requests
 
 from robot_scene_pipeline.ollama_policy_client import (
-    POLICY_GENERATION_CONFIG, _next_num_predict, call_policy,
+    POLICY_GENERATION_CONFIG, _next_num_predict, call_policy, unload_model,
 )
 
 
@@ -31,8 +31,11 @@ class OllamaPolicyClientTests(unittest.TestCase):
     def test_default_budgets_are_bounded_and_retry_grows_gradually(self):
         self.assertEqual(POLICY_GENERATION_CONFIG["task_contract"]["num_predict"], 2048)
         self.assertEqual(POLICY_GENERATION_CONFIG["grounded_task_plan"]["num_predict"], 4096)
-        self.assertEqual(POLICY_GENERATION_CONFIG["action_proposal"]["num_ctx"], 16384)
-        self.assertEqual(POLICY_GENERATION_CONFIG["action_proposal"]["num_predict"], 3072)
+        self.assertEqual(POLICY_GENERATION_CONFIG["task_contract"]["num_ctx"], 12288)
+        self.assertEqual(POLICY_GENERATION_CONFIG["grounded_task_plan"]["num_ctx"], 12288)
+        self.assertEqual(POLICY_GENERATION_CONFIG["action_proposal"]["num_ctx"], 12288)
+        self.assertEqual(POLICY_GENERATION_CONFIG["action_proposal"]["num_predict"], 2048)
+        self.assertEqual(POLICY_GENERATION_CONFIG["action_replan"]["num_predict"], 2048)
         self.assertEqual(
             [_next_num_predict(value) for value in (2048, 4096, 6144, 8192)],
             [4096, 6144, 8192, 12288],
@@ -179,6 +182,19 @@ class OllamaPolicyClientTests(unittest.TestCase):
             self.assertEqual(diagnostics["thinking_length_chars"], 1)
             self.assertEqual(diagnostics["eval_count"], 20)
             self.assertTrue(os.path.isfile(os.path.join(call_dir, "ollama_response.json")))
+
+    def test_unload_uses_generate_keep_alive_zero_without_inference_messages(self):
+        response = _response({"done": True})
+        with patch(
+            "robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response,
+        ) as post:
+            result = unload_model(_args())
+        self.assertEqual(result.transport_status, "ok")
+        self.assertEqual(result.generation_status, "model_unloaded")
+        self.assertEqual(post.call_args.args[0], "http://local/api/generate")
+        self.assertEqual(post.call_args.kwargs["json"], {
+            "model": "qwen3-vl:30b-a3b-instruct", "keep_alive": 0,
+        })
 
 
 def _args(**overrides):

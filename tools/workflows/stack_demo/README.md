@@ -26,6 +26,46 @@ oriented footprints, boundary spacing, and separate rows/columns/grid
 predicates. Required groups cannot complete while empty. Completion is
 computed from a new observation, never from VLM text.
 
+The current development objective starts from arbitrary scattered blocks, not
+from an already separated demonstration layout. For both organization and
+house building, the runtime must keep making progress when the first selected
+object is blocked: grasp another progress object when possible, grasp a movable
+blocker next, and use a geometry-checked 3--5 cm side push only when no robust
+grasp is available. A failed selection is a replanning/clearance condition, not
+permission to terminate an incomplete task.
+
+## Current organize recovery and safety gates
+
+The semantic `organize_blocks` path intentionally differs from the legacy
+linear-stack VLM-only action discovery path:
+
+- code scans all out-of-row blocks for physical grasp yaw feasibility;
+- a robust real grasp requires at least 10 degrees of continuous collision-free
+  yaw and selects an angle inside that interval, not at a narrow boundary;
+- when at least one robust grasp exists, a VLM choice of a blocked object,
+  `nudge`, `reobserve`, or `stop` is rebound to a robust grasp candidate;
+- color row regions are committed after their first valid construction and do
+  not drift after every observation;
+- VLM source-copy/no-op targets are replaced by a validated free slot in the
+  selected object's factual color row; motions below 15 mm do not count as
+  organization progress;
+- place validation checks both the moved block footprint and the open GF225
+  fingers against every current object, including blocks placed in earlier
+  rows. `target_pose_gripper_clearance_blocked` triggers another same-region
+  target search;
+- post-place row membership allows 3 mm of bounded observation footprint jitter,
+  while commanded target validation remains strict;
+- if all current grasps are blocked, code performs a bounded search over loose
+  objects, four base-frame push directions, and 0/90-degree wrist yaw. Each
+  candidate still passes semantic, workspace, segmented-tool and MoveIt
+  plan-only validation before execution.
+
+This bounded recovery exists to prevent repeated ineffective VLM actions; it
+does not bypass safety checks or generate unconstrained robot commands. For
+`build_house`, a graspable blocker is moved to a safe temporary area; completed
+supports/roof remain dynamically protected. Finish the organize real-robot
+acceptance before changing the house workflow.
+
 Every executable action carries `selected_object_id` and never VLM-emitted
 `object_id`. A house `pick_place`/`pick_reorient_place` also carries `role_id`; an organize action
 carries `group_id` and `target_region_id`. Code validates task semantics,
@@ -77,6 +117,8 @@ Task logs include `task_contract_{input,raw,validated}.json`,
 | `robot_scene_pipeline/task_semantic_validation.py` | Contract and current-scene binding validation |
 | `robot_scene_pipeline/task_goal_evaluator.py` | House/organization geometry predicate progress |
 | `robot_scene_pipeline/task_geometry.py` | Shared oriented-footprint predicates |
+| `robot_scene_pipeline/grasp_yaw_search.py` | Robust continuous-yaw grasp and exact open-gripper checks |
+| `robot_scene_pipeline/vlm_perception_review.py` | VLM-assisted recovery of missed/low-confidence detector classes |
 | `robot_scene_pipeline/task_dynamic_protection.py` | Per-revision protected roles, ids, regions, and relations |
 | `robot_scene_pipeline/task_action_adapter.py` | The only selected-id to legacy-id compatibility handoff |
 | `robot_scene_pipeline/house_task_definition.py` | Canonical six-role house ontology and assembly dependencies |
@@ -179,6 +221,9 @@ Code validates VLM intent before any motion:
   62 mm upper fingers from 25–70 mm, and 112 mm body from 70–150 mm; these
   installed heights are calibration defaults and must be measured on hardware;
 - open-gripper grasp checks use two solid fingers and a non-solid 49 mm gap;
+- real grasps require a continuous feasible yaw interval of at least 10 degrees;
+- organize placement checks the open gripper against previously placed and
+  scattered blocks, not only the moved block footprint;
 - table/support/protected contact is strict; small loose-object contact may pass
   only within intrusion, displacement, object-count, workspace, topple, and
   withdrawal limits, and always requires reobservation;
@@ -200,10 +245,13 @@ action types, to requiring a new strategy. Safe-stop requires multiple unique
 failed fingerprints and strategies; otherwise the control result is `reobserve`.
 A fresh RGB-D observation increments the revision, invalidates old frame-local
 references, and rebinds stable tracks one-to-one.
-The workflow never invents geometry candidates. If the VLM supplied optional
-`alternative_actions`, anti-loop fallback may select the highest-confidence
-untried candidate that still passes reference and basic semantic checks.
-Initial stack output is not repaired or overridden by a color-rule parser.
+The legacy linear-stack workflow never invents geometry candidates. If its VLM
+supplied optional `alternative_actions`, anti-loop fallback may select the
+highest-confidence untried candidate that still passes reference and basic
+semantic checks. The semantic organize workflow is different: it performs the
+bounded, fully validated grasp/row-slot/clearance recovery described above so
+an incomplete organization task does not terminate after a poor model choice.
+Initial stack output is still not repaired or overridden by a color-rule parser.
 
 ## Logs
 
@@ -245,6 +293,21 @@ python3 tools/workflows/stack_demo_pipeline.py \
   --execute \
   --execute-push-clearing
 ```
+
+On the robot PC, the stable UR/MoveIt/camera/perception drivers are started by
+`Start_Robot_Stack.desktop`. Do not edit or duplicate those driver launches
+while debugging this workflow. The confirmed workspace is `base_link`
+`x=0.235..0.65 m`, `y=-0.10..0.40 m`. Main translation/approach and ready reset
+use 0.08 velocity/acceleration scaling; safe-height wrist Z pre-rotation defaults
+to three times those values (0.24/0.24). The latter must not be reused for
+near-object descent.
+
+As of 2026-07-14, real organization has completed consecutive red and blue
+pick/place cycles, but the blue cycle exposed a narrow-yaw grasp collision risk
+and an open-gripper place collision with the prior red row. Both checks are now
+implemented and covered by focused tests/recorded-scene replay, but have not yet
+been revalidated by another real motion. The full color task and house task are
+therefore not yet accepted as complete.
 
 ## Qwen3 reasoning and policy protocols
 

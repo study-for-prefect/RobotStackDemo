@@ -60,6 +60,40 @@ class VisualColorTests(unittest.TestCase):
         }
         self.assertEqual([item["id"] for item in organize_scope_objects(state)], [7])
 
+    def test_edge_detection_is_kept_when_rgbd_geometry_is_usable(self):
+        obj = {
+            "id": 8, "label": "square yellow", "visual_color": "yellow",
+            "confidence": 0.9, "bbox_xyxy_px": [0, 20, 42, 78],
+            "geometry_center_m": [0.445, 0.335, -0.001],
+            "dimensions_m": [0.023, 0.020, 0.025],
+            "pointcloud_geometry_valid": True,
+            "depth_geometry_observable": True,
+        }
+        state = {
+            "objects": [obj], "camera_profile": {"color_width": 640, "color_height": 480},
+            "workspace_bounds": {
+                "xmin": 0.235, "xmax": 0.65, "ymin": -0.1, "ymax": 0.4,
+            },
+        }
+        self.assertEqual([item["id"] for item in organize_scope_objects(state)], [8])
+
+    def test_edge_detection_is_rejected_when_rgbd_geometry_is_invalid(self):
+        obj = {
+            "id": 9, "label": "square yellow", "visual_color": "yellow",
+            "confidence": 0.9, "bbox_xyxy_px": [0, 20, 42, 78],
+            "geometry_center_m": [0.445, 0.335, -0.001],
+            "dimensions_m": [0.023, 0.020, 0.025],
+            "pointcloud_geometry_valid": False,
+            "depth_geometry_observable": True,
+        }
+        state = {
+            "objects": [obj], "camera_profile": {"color_width": 640, "color_height": 480},
+            "workspace_bounds": {
+                "xmin": 0.235, "xmax": 0.65, "ymin": -0.1, "ymax": 0.4,
+            },
+        }
+        self.assertEqual(organize_scope_objects(state), [])
+
 
 if __name__ == "__main__":
     unittest.main()

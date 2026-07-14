@@ -50,9 +50,21 @@ def build_replanning_context(ledger: Iterable[dict], attempt: int, max_attempts:
         counts[action_type] = counts.get(action_type, 0) + 1
     forbidden_types = sorted(
         key for key, count in counts.items()
-        if key and key not in {"pick_place", "pick_reorient_place"} and count >= 2
+        if key and key not in {"pick_place", "pick_reorient_place", "nudge"} and count >= 2
     ) if attempt >= 3 else []
     strategies = {item.get("strategy_id") for item in entries if item.get("strategy_id")}
+    physical_failure_stages = {
+        "collision",
+        "physical_grasp_preflight", "geometry_preflight", "moveit_preflight",
+        "moveit_validation", "geometry_validation",
+    }
+    physical_entries = [
+        item for item in entries
+        if str(item.get("failure_stage") or "") in physical_failure_stages
+    ]
+    physical_strategies = {
+        item.get("strategy_id") for item in physical_entries if item.get("strategy_id")
+    }
     return {
         "attempt": int(attempt), "max_attempts": int(max_attempts),
         "failed_actions": [
@@ -64,8 +76,15 @@ def build_replanning_context(ledger: Iterable[dict], attempt: int, max_attempts:
         "hard_constraints": {
             "forbidden_action_fingerprints": [item.get("fingerprint") for item in entries],
             "forbidden_action_types": forbidden_types,
-            "required_strategy_change": attempt >= 4,
-            "safe_stop_allowed": attempt >= max_attempts and len(strategies) >= 2 and len(entries) >= 2,
+            # A corrected target pose may keep the same pick strategy. Force a
+            # strategy change only after repeated physical preflight failures,
+            # never after JSON/region/source-position corrections.
+            "required_strategy_change": attempt >= 4 and len(physical_entries) >= 2,
+            "safe_stop_allowed": (
+                attempt >= max_attempts
+                and len(physical_strategies) >= 2
+                and len(physical_entries) >= 2
+            ),
         },
     }
 
