@@ -15,6 +15,7 @@ from robot_scene_pipeline.geometry_relations import (
 )
 from robot_scene_pipeline.grasp_yaw_search import normalize_yaw_signed_180
 from tools.workflows.stack_demo.pick import build_offline_pick_plan
+from tools.planning.build_geometry_pick_plan import set_stack_demo_yaw
 from tools.workflows.stack_demo.placement import build_frozen_place_step, validate_place_second_snapshot
 from tools.workflows.stack_demo.push_clearing import (
     current_protected_structure_ids,
@@ -341,6 +342,41 @@ def test_selected_grasp_yaw_is_written_to_pick_plan():
     assert step["chosen_grasp_yaw_deg"] == 113.0
     assert step["target_yaw_deg"] == 113.0
     assert step["yaw_source"] == "adaptive_grasp_yaw_search"
+
+
+def test_ambiguous_concave_label_with_near_square_footprint_gets_safe_square_yaw():
+    obj = make_object(
+        4,
+        (0.347, 0.054, -0.0027),
+        size=(0.0241, 0.0224, 0.0254),
+        label="concave",
+        table_yaw_deg=76.19,
+        table_yaw_valid=False,
+        footprint_aspect_ratio=1.075,
+    )
+    step = {}
+    set_stack_demo_yaw(step, obj)
+    assert step["target_yaw_valid"] is True
+    assert abs(step["target_yaw_deg"] - (-13.81)) < 1e-6
+    assert step["yaw_shape_source"] == "near_square_footprint"
+
+
+def test_triangle_is_never_reclassified_as_near_square_for_grasp_yaw():
+    obj = make_object(
+        7,
+        (0.35, 0.05, 0.0),
+        size=(0.024, 0.023, 0.024),
+        label="triangle green",
+        table_yaw_deg=45.0,
+        table_yaw_valid=False,
+        footprint_aspect_ratio=1.04,
+    )
+    try:
+        set_stack_demo_yaw({}, obj)
+    except RuntimeError as exc:
+        assert "no reliable grasp yaw" in str(exc)
+    else:
+        raise AssertionError("triangle must not use near-square geometry fallback")
 
 
 def test_thin_object_pick_target_z_is_clamped_inside_object_height():

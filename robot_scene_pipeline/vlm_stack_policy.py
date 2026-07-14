@@ -22,6 +22,8 @@ def compact_stack_object(obj: ObjectDict) -> ObjectDict:
         "track_id": obj.get("track_id"),
         "detector_object_id": obj.get("id"),
         "label": obj.get("label"),
+        "visual_color": obj.get("visual_color"),
+        "visual_color_confidence": obj.get("visual_color_confidence"),
         "confidence": obj.get("confidence"),
         "bbox_xyxy_px": obj.get("bbox_xyxy_px"),
         "center_px": obj.get("center_px"),
@@ -165,7 +167,8 @@ def build_vlm_stack_prompt(policy_input: dict) -> str:
         "你是 UR5 桌面积木堆叠任务的 VLM 结构决策模块。\n"
         "你必须为红、绿、蓝、黄四个固定颜色槽位选择当前场景实例。\n"
         "只能使用 objects 中的 object_ref 和 track_id，不得输出裸 object id。\n"
-        "颜色顺序由 required_color_order 固定；若同色有多个实例，由你结合图像和几何自主选择。\n"
+        "颜色顺序由 required_color_order 固定；颜色优先使用 objects.visual_color，缺失时再结合 label 和图像；"
+        "若同色有多个实例，由你结合图像和几何自主选择。\n"
         "禁止输出 forbidden_order_fingerprints 中相同的四 track 组合。\n"
         "只输出严格 JSON：\n"
         "{\n"

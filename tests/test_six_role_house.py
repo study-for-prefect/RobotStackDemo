@@ -22,6 +22,7 @@ from robot_scene_pipeline.task_schemas import GROUNDED_HOUSE_PLAN_SCHEMA
 from robot_scene_pipeline.ollama_policy_client import PolicyCallResult
 from robot_scene_pipeline.vlm_task_policy import _task_prompt, build_task_contract_input, call_vlm_task_policy
 from tools.workflows.stack_demo.task_execution import (
+    _task_place_release_position,
     execute_pick_place_and_reobserve,
     preflight_pick_place_action,
 )
@@ -233,6 +234,29 @@ class HouseActionValidationTests(unittest.TestCase):
 
 
 class ReorientationExecutionTests(unittest.TestCase):
+    def test_organize_release_uses_configured_gap_above_nominal_table_pose(self):
+        action = {
+            "group_id": "group_blue",
+            "target_pose_base": {"position_m": [0.36, 0.16, -0.0013]},
+        }
+        nominal, release, gap = _task_place_release_position(
+            SimpleNamespace(release_gap_m=0.010), action,
+        )
+        self.assertEqual(nominal, [0.36, 0.16, -0.0013])
+        self.assertAlmostEqual(gap, 0.010)
+        self.assertAlmostEqual(release[2], 0.0087)
+
+    def test_house_release_height_is_not_changed_by_organize_gap(self):
+        action = {
+            "role_id": "left_support_lower",
+            "target_pose_base": {"position_m": [0.30, 0.0, 0.02]},
+        }
+        nominal, release, gap = _task_place_release_position(
+            SimpleNamespace(release_gap_m=0.010), action,
+        )
+        self.assertEqual(release, nominal)
+        self.assertEqual(gap, 0.0)
+
     def test_every_reorientation_waypoint_is_moveit_preflighted(self):
         action = _validated_reorientation_action()
         args = SimpleNamespace(execute=True)

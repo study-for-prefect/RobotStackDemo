@@ -157,6 +157,10 @@ def public_object(det):
     return {
         "id": det["id"],
         "label": det["label"],
+        "visual_color": det.get("visual_color"),
+        "visual_color_confidence": det.get("visual_color_confidence"),
+        "visual_color_source": det.get("visual_color_source"),
+        "visual_color_pixel_count": det.get("visual_color_pixel_count"),
         "confidence": round(det["confidence"], 4),
         "bbox_xyxy_px": [round(v, 2) for v in det["bbox"]],
         "center_px": det.get("center_px"),

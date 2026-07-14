@@ -268,7 +268,7 @@ def _select_task_action(
                 prior_strategies = {item.get("strategy_id") for item in replanning["failed_actions"]}
                 if constraints["required_strategy_change"] and proposal.get("strategy_id") in prior_strategies:
                     raise TaskActionSchemaError("strategy_change_required", proposal)
-                semantic_error = _task_nudge_semantic_error(proposal, progress)
+                semantic_error = _task_nudge_semantic_error(proposal, progress, history)
                 if semantic_error:
                     raise TaskActionSchemaError(semantic_error, proposal)
             if action_type in {"nudge", "pick_away"}:
@@ -303,18 +303,37 @@ def _select_task_action(
             if (not getattr(args, "execute", False) and not plan_only) or checked.get("moveit_feasible"):
                 write_json(os.path.join(cycle_dir, "task_action_attempt_{:02d}_validation.json".format(attempt)), report)
                 return checked, proposal
+            physical_grasp = checked.get("physical_grasp_validation") or {}
+            grasp_blocked = checked.get("preflight_failure_type") == "selected_pick_not_grasp_feasible"
             report = {
                 **report,
                 "passed": False,
                 "accepted": False,
-                "validation_stage": "moveit_preflight",
-                "reason": "moveit_preflight_failed",
+                "validation_stage": "physical_grasp_preflight" if grasp_blocked else "moveit_preflight",
+                "reason": (
+                    "selected_pick_not_grasp_feasible" if grasp_blocked else "moveit_preflight_failed"
+                ),
+                "moveit_feasible": False,
                 "moveit_preflight_error": checked.get("moveit_preflight_error"),
             }
+            if grasp_blocked:
+                report["failed_fields"] = ["selected_object_grasp_feasible"]
+                report["checks"] = {
+                    **(report.get("checks") or {}),
+                    "selected_object_grasp_feasible": {
+                        "ok": False,
+                        "detail": {
+                            **physical_grasp,
+                            "required_next_action": (
+                                "choose nudge or pick_away clearance, then reobserve before pick_place"
+                            ),
+                        },
+                    },
+                }
         feedback = action_validation_feedback(proposal, report, state["scene_revision"], attempt); history.append(feedback)
         correctable_protocol_reasons = {
             "object_binding_grounding_mismatch", "task_action_json_schema_invalid",
-            "invalid_target_pose_base",
+            "invalid_target_pose_base", "push_parameters_invalid",
         }
         if str(report.get("reason")) not in correctable_protocol_reasons:
             fingerprint = fingerprint or normalize_action_fingerprint(proposal, state, state["scene_revision"])
@@ -348,12 +367,58 @@ def _resolve_task_action_reference(proposal: dict, state: dict) -> dict:
         output["selected_track_id"] = resolved["object_track_id"]
     else:
         output.pop("selected_track_id", None)
+    if resolved.get("target_object_id") is not None:
+        output["target_object_id"] = resolved["target_object_id"]
+        output["target_object_ref"] = resolved.get("target_object_ref")
+        if resolved.get("target_object_track_id"):
+            output["target_object_track_id"] = resolved["target_object_track_id"]
+        else:
+            output.pop("target_object_track_id", None)
+    if output.get("action_type") == "nudge":
+        expected_contact = _contact_side_for_direction(output.get("direction_base"))
+        if expected_contact is not None and output.get("contact_side") != expected_contact:
+            output["model_reported_contact_side"] = output.get("contact_side")
+            output["contact_side"] = expected_contact
+            output["contact_side_source"] = "derived_opposite_to_valid_direction_base"
     output.setdefault("strategy_id", "{}_{}".format(proposal.get("action_type", "action"), proposal.get("role_id") or proposal.get("group_id") or "task"))
     return output
 
 
-def _task_nudge_semantic_error(proposal: dict, progress: dict) -> Optional[str]:
-    if str(proposal.get("action_type")) != "nudge":
+def _contact_side_for_direction(direction: Any) -> Optional[str]:
+    if not isinstance(direction, (list, tuple)) or len(direction) != 3:
+        return None
+    try:
+        x, y, z = [float(value) for value in direction]
+    except (TypeError, ValueError):
+        return None
+    norm = (x * x + y * y + z * z) ** 0.5
+    if abs(norm - 1.0) > 1e-3 or abs(z) > 1e-3:
+        return None
+    if abs(x) >= abs(y):
+        return "-x" if x >= 0.0 else "+x"
+    return "-y" if y >= 0.0 else "+y"
+
+
+def _task_nudge_semantic_error(
+    proposal: dict, progress: dict, failure_history: Optional[List[dict]] = None,
+) -> Optional[str]:
+    action_type = str(proposal.get("action_type"))
+    if action_type not in {"nudge", "pick_away"}:
+        return None
+    if progress.get("task_type") == "organize_blocks":
+        blocked_entry, blocked_check = _latest_blocked_grasp_failure(failure_history or [])
+        if blocked_check is None:
+            return "organize_clearance_requires_physical_grasp_blockage"
+        blocker_ids = {
+            str(item.get("id")) for item in blocked_check.get("blocking_objects", [])
+            if isinstance(item, dict) and item.get("id") is not None
+        }
+        if str(proposal.get("selected_object_id")) not in blocker_ids:
+            return "organize_clearance_object_not_reported_blocker"
+        blocked_target = (blocked_entry.get("rejected_action") or {}).get("selected_object_ref")
+        if blocked_target and str(proposal.get("target_object_ref")) != str(blocked_target):
+            return "organize_clearance_target_not_blocked_pick_object"
+    if action_type != "nudge":
         return None
     text = " ".join(str(proposal.get(key) or "") for key in ("reason", "predicted_scene_benefit")).lower()
     if any(token in text for token in ("上方", "堆叠", "on_top", "on top", "stack")):
@@ -361,6 +426,21 @@ def _task_nudge_semantic_error(proposal: dict, progress: dict) -> Optional[str]:
     if proposal.get("role_id") and any("on_top" in str(value) for value in progress.get("unsatisfied_predicates", [])):
         return "nudge_cannot_satisfy_vertical_stack_relation"
     return None
+
+
+def _latest_blocked_grasp_failure(history: List[dict]) -> Tuple[dict, Optional[dict]]:
+    for entry in reversed(history):
+        if not isinstance(entry, dict):
+            continue
+        check = next((
+            item for item in entry.get("failed_checks", [])
+            if isinstance(item, dict)
+            and item.get("type") == "selected_object_grasp_feasible"
+            and (item.get("all_grasps_blocked") or not item.get("grasp_feasible", True))
+        ), None)
+        if check is not None:
+            return entry, check
+    return {}, None
 
 
 def _state_with_dynamic_protection(state: dict, protection: dict) -> Tuple[dict, List[Any]]:

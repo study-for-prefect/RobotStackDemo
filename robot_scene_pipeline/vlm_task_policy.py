@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from .io_utils import image_to_base64
 from .house_task_definition import HOUSE_DEFINITION_PROMPT, HOUSE_ROLE_IDS, canonical_house_goal_spec
 from .ollama_policy_client import call_policy
-from .organize_scope import color_value_from_label, organize_scope_objects
+from .organize_scope import color_value_from_object, organize_scope_objects
 from .task_schemas import schema_for_policy
 from .task_routing import route_task_type
 
@@ -23,6 +23,8 @@ def compact_task_object(obj: Dict[str, Any]) -> Dict[str, Any]:
         "track_id": obj.get("track_id"),
         "detector_object_id": obj.get("id"),
         "label": obj.get("label"),
+        "visual_color": obj.get("visual_color"),
+        "visual_color_confidence": obj.get("visual_color_confidence"),
         "confidence": obj.get("confidence"),
         "geometry_center_base_m": obj.get("geometry_center_m") or obj.get("center_3d_base_m"),
         "dimensions_m": obj.get("dimensions_m"),
@@ -121,9 +123,9 @@ def build_grounded_task_plan_input(
             state.get("table_bounds") or state.get("workspace_bounds"), organize_objects,
         )
         value["organize_plan_rules"] = [
-            "Create exactly one group for each color value present in the detector labels.",
+            "Create exactly one group for each resolved visual_color (fall back to detector label when absent).",
             "object_ids are current-scene detector_object_id values, not persistent identities.",
-            "Assign every color-labeled block exactly once and never include a non-block false detection.",
+            "Assign every resolved-color block exactly once and never include a non-block false detection.",
             "Create exactly one target region per group and link it with target_region_id.",
             "Every region must be inside workspace_bounds and regions must not overlap.",
             "For rows, allocate separated horizontal bands: members share y within alignment_tolerance_m and spread along x.",
@@ -328,7 +330,13 @@ def _task_prompt(policy_input: dict, policy_kind: str) -> str:
             "房子 pick_place 给 role_id；整理 pick_place 给 group_id 和 target_region_id；并给 scene_revision、准确 grounding 和目标位姿。"
             "object_label 和 object_center_base_m 必须逐值复制所选 objects 条目的 label 和 geometry_center_base_m，绝不能复制 target_pose_base。"
             "需要改变 roof/triangle 正反面时选择 pick_reorient_place；仅 yaw 不能代替翻面，具体轴角由代码计算。"
-            "nudge/pick_away 也使用统一引用和完整物理参数。禁止输出 replanning_context 中的失败指纹，不能只修改 reason、confidence 或小数尾数。"
+            "nudge/pick_away 也使用统一引用和完整物理参数，strategy_id 必须改成独立清障策略名（例如 clear_blocker_by_nudge），"
+            "不能继续使用 organize_blocks。nudge 必须把被移动的阻挡物写入 selected_object_ref/selected_track_id，"
+            "把原本受阻的抓取目标写入 target_object_ref/target_object_track_id，并逐值复制双方 label/center；还必须给出"
+            "contact_side(+x|-x|+y|-y)、direction_base(三维单位 XY 向量)、distance_m(0.01~0.05) 和 gripper_yaw_rad，"
+            "此时 target_pose_base 与 safe_place_center_base_m 必须为 null。pick_away 使用相同的双方引用并给出"
+            "safe_place_center_base_m，此时 contact_side/direction_base/distance_m/gripper_yaw_rad/target_pose_base 必须为 null。"
+            "禁止输出 replanning_context 中的失败指纹，不能只修改 reason、confidence 或小数尾数。"
             "nudge 只能用于桌面平面清障，不能形成 on_top_of；堆叠必须 pick_place。只能选择当前可见引用；不要自动宣称任务完成。"
         )
         if (policy_input.get("task_contract") or {}).get("task_type") == "build_house":
@@ -345,10 +353,16 @@ def _task_prompt(policy_input: dict, policy_kind: str) -> str:
             )
         if (policy_input.get("task_contract") or {}).get("task_type") == "organize_blocks":
             instruction += (
-                "整理目标搬运优先使用 pick_place，不要因为检测框重叠就先 nudge。pick_place 必须完整输出 strategy_id、"
+                "整理目标搬运优先使用 pick_place，不要仅因为检测框重叠就先 nudge；但若物理反馈明确"
+                "selected_object_grasp_feasible=false 或 all_grasps_blocked=true，则必须先 nudge/pick_away 清障，禁止继续直接抓。"
+                "pick_place 必须完整输出 strategy_id、"
                 "selected_object_ref/selected_track_id、group_id、target_region_id、object_label、object_center_base_m、"
                 "scene_revision 和 target_pose_base。目标完整足迹不得与任何当前物体重叠；必须检查所有物体中心，"
                 "不要机械地选择区域中心。失败反馈给出 blocking_object 时必须更换 XY。"
+                "若某组 group_diagnostics.outside_region 非空，只能优先选择其中的物体，禁止搬动已经在目标区内的成员。"
+                "target_pose_base 的 XY 必须与源中心有实质距离，禁止原地抓起再原地放下。"
+                "每种颜色独占一个 target_region，同色积木必须在该区域内沿同一行并排且保持 minimum_spacing_m；"
+                "放置 yaw 必须兼顾完整积木足迹、夹爪空间和碰撞约束；只在避碰需要时改变姿态，不固定旋转角度。"
                 "若失败反馈给出 allowed_center_x_m/allowed_center_y_m，下一次 target_pose_base.position_m 的 XY"
                 "必须直接选在这两个闭区间内，禁止再次复制源物体中心。"
             )
@@ -366,10 +380,72 @@ def _task_action_recovery_directive(policy_input: dict) -> str:
     if not history:
         return ""
     latest = history[-1] if isinstance(history[-1], dict) else {}
+    latest_checks = [item for item in latest.get("failed_checks", []) if isinstance(item, dict)]
+    if any(item.get("type") == "push_direction_base_unit_xy_vector" for item in latest_checks):
+        return (
+            "最高优先级清障参数纠错：保持上次选择的阻挡物和 target_object 不变，但 direction_base 必须是长度为1的"
+            "三维单位 XY 向量，不是位移量；只能例如 [1,0,0]、[-1,0,0]、[0,1,0] 或 [0,-1,0]。"
+            "distance_m 单独填写[0.01,0.05]。contact_side 必须与方向相反：+X方向用-x，-X方向用+x，+Y方向用-y，-Y方向用+y。"
+        )
+    if any(item.get("type") == "contact_side_matches_push_direction" for item in latest_checks):
+        return (
+            "最高优先级清障接触侧纠错：保持上次阻挡物、target_object、单位 direction_base 和 distance_m；"
+            "仅把 contact_side 改到方向反侧：+X=>-x，-X=>+x，+Y=>-y，-Y=>+y。"
+        )
+    invalid_pose = next((
+        item for item in latest_checks
+        if item.get("type") == "target_pose_base" and item.get("reason") == "invalid_target_pose_base"
+    ), None)
+    if invalid_pose is not None:
+        return (
+            "最高优先级位姿格式纠错：普通整理 pick_place 的 target_pose_base 必须同时包含"
+            "position_m:[x,y,z] 和有限 yaw_rad（方块可先用0.0）；不得省略 yaw_rad。"
+        )
+    blocked_entry = None
+    blocked_check = None
+    for entry in reversed(history):
+        if not isinstance(entry, dict):
+            continue
+        blocked_check = next((
+            item for item in entry.get("failed_checks", [])
+            if isinstance(item, dict)
+            and item.get("type") == "selected_object_grasp_feasible"
+            and (item.get("all_grasps_blocked") or not item.get("grasp_feasible", True))
+        ), None)
+        if blocked_check is not None:
+            blocked_entry = entry
+            break
+    if blocked_check is not None:
+        rejected = (blocked_entry or {}).get("rejected_action") or {}
+        blockers = blocked_check.get("blocking_objects") or []
+        return (
+            "最高优先级抓取清障：物理夹爪扫描确认原目标 selected_object_ref={!r}, selected_track_id={!r}, "
+            "label={!r}, center={} 在所有角度均被阻挡。禁止再次对它输出 pick_place。"
+            "必须从 blocking_objects={} 中选择一个 loose_movable 阻挡物，并用输入 objects 中匹配 detector_object_id 的"
+            "object_ref/track_id/label/geometry_center_base_m 作为 selected_*；原受阻目标必须作为 target_object_*。"
+            "strategy_id 必须改为 clear_blocker_by_nudge（pick_away 则 clear_blocker_by_pick_away），禁止继续用 organize_blocks。"
+            "优先输出完整 nudge：target_pose_base=null, safe_place_center_base_m=null, direction_base 为三维单位 XY 向量，"
+            "distance_m 在[0.01,0.05]，contact_side 必须位于 direction_base 反方向，gripper_yaw_rad 为有限数。"
+            "若无安全推移空间则输出完整 pick_away 和无碰撞 safe_place_center_base_m。"
+        ).format(
+            rejected.get("selected_object_ref"),
+            rejected.get("selected_track_id"),
+            rejected.get("object_label"),
+            rejected.get("object_center_base_m"),
+            blockers,
+        )
     target_check = next((
         item for item in latest.get("failed_checks", [])
         if isinstance(item, dict) and item.get("type") == "target_pose_base"
     ), None)
+    if target_check and target_check.get("suggested_collision_free_position_m"):
+        return (
+            "最高优先级碰撞纠错：上次 target_pose_base 与现有物体重叠。下一动作必须保持正确的区外目标物体，"
+            "并把 target_pose_base.position_m 直接改为 geometry-checked position={}；"
+            "绝不能再次使用 blocking_object_center_base_m 或 rejected_action 的旧位置。".format(
+                target_check["suggested_collision_free_position_m"]
+            )
+        )
     if target_check and target_check.get("suggested_interval_midpoint_position_m"):
         return (
             "最高优先级位姿纠错：上次 target_pose_base 已被拒绝。下一动作必须改变 target_pose_base，"
@@ -409,7 +485,7 @@ def _scene_objects(state: dict) -> Iterable[dict]:
 
 def _organize_layout_slots(workspace: object, objects: List[dict]) -> List[dict]:
     """Offer equal non-overlapping row slots; the VLM still assigns colors to slots."""
-    present = {color_value_from_label(obj.get("label")) for obj in objects} - {None}
+    present = {color_value_from_object(obj) for obj in objects} - {None}
     canonical_order = ("red", "green", "blue", "yellow")
     colors = [color for color in canonical_order if color in present]
     if not isinstance(workspace, dict) or not colors:

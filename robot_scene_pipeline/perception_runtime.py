@@ -17,6 +17,7 @@ from .tf_transform import (
     resolved_transform_matrix,
     transform_summary,
 )
+from .visual_color import attach_visual_colors
 
 
 def detector_metadata(args: Any) -> Dict[str, Any]:
@@ -63,6 +64,7 @@ def process_rgbd_scene(
         args.detector_scale,
         args.max_detections,
     )
+    detections = attach_visual_colors(detections, frame_bgr, candidates)
     metadata = detector_metadata(args)
     write_json(paths["candidates"], {**metadata, "candidates": candidates[: args.debug_topk]})
 

@@ -25,11 +25,17 @@ from robot_scene_pipeline.task_goal_evaluator import (
 from robot_scene_pipeline.orientation_fusion import fuse_house_orientation_observations
 from robot_scene_pipeline.vlm_action_validation import validate_vlm_action_decision
 from tools.workflows.stack_demo.execution_safety import validate_execution_source
+from tools.workflows.stack_demo.task_execution import (
+    _validate_pick_grasp_geometry,
+    preflight_pick_place_action,
+)
 from tools.workflows.stack_demo.task_workflow import (
     _execute_task_action,
     _reobserve,
+    _resolve_task_action_reference,
     _select_task_action,
     _state_with_dynamic_protection,
+    _task_nudge_semantic_error,
     run_semantic_task_workflow,
 )
 from tests.house_task_fixtures import HOUSE_CONFIG, house_contract, house_plan, house_state
@@ -50,6 +56,62 @@ CONFIG["house_semantics"] = copy.deepcopy(HOUSE_CONFIG["house_semantics"])
 
 
 class ActionSchemaTests(unittest.TestCase):
+    def test_clearance_target_reference_is_resolved_with_operated_reference(self):
+        state = {
+            "scene_revision": 2,
+            "objects": [
+                {"id": 1, "object_ref": "scene_2:obj_1", "track_id": "track_blue_01"},
+                {"id": 2, "object_ref": "scene_2:obj_2", "track_id": "track_red_01"},
+            ],
+        }
+        resolved = _resolve_task_action_reference({
+            "action_type": "nudge", "scene_revision": 2,
+            "selected_object_ref": "scene_2:obj_1", "selected_track_id": "track_blue_01",
+            "target_object_ref": "scene_2:obj_2", "target_object_track_id": "track_red_01",
+        }, state)
+        self.assertEqual(resolved["selected_object_id"], 1)
+        self.assertEqual(resolved["target_object_id"], 2)
+        self.assertEqual(resolved["target_object_ref"], "scene_2:obj_2")
+
+    def test_nudge_contact_side_is_derived_opposite_to_unit_direction(self):
+        state = {
+            "scene_revision": 2,
+            "objects": [
+                {"id": 1, "object_ref": "scene_2:obj_1", "track_id": "track_blue_01"},
+                {"id": 2, "object_ref": "scene_2:obj_2", "track_id": "track_red_01"},
+            ],
+        }
+        resolved = _resolve_task_action_reference({
+            "action_type": "nudge", "scene_revision": 2,
+            "selected_object_ref": "scene_2:obj_1", "target_object_ref": "scene_2:obj_2",
+            "direction_base": [0.0, -1.0, 0.0], "contact_side": "-y",
+        }, state)
+        self.assertEqual(resolved["contact_side"], "+y")
+        self.assertEqual(resolved["model_reported_contact_side"], "-y")
+
+    def test_organize_clearance_requires_reported_blocker_and_blocked_target(self):
+        progress = {"task_type": "organize_blocks"}
+        proposal = {
+            "action_type": "nudge", "selected_object_id": 2,
+            "target_object_ref": "scene_2:obj_1",
+        }
+        self.assertEqual(
+            _task_nudge_semantic_error(proposal, progress, []),
+            "organize_clearance_requires_physical_grasp_blockage",
+        )
+        history = [{
+            "rejected_action": {"selected_object_ref": "scene_2:obj_1"},
+            "failed_checks": [{
+                "type": "selected_object_grasp_feasible", "all_grasps_blocked": True,
+                "blocking_objects": [{"id": 2, "blocker_category": "loose_movable"}],
+            }],
+        }]
+        self.assertIsNone(_task_nudge_semantic_error(proposal, progress, history))
+        self.assertEqual(
+            _task_nudge_semantic_error({**proposal, "selected_object_id": 3}, progress, history),
+            "organize_clearance_object_not_reported_blocker",
+        )
+
     def test_pick_action_schema_requires_target_pose(self):
         proposal = _organize_action()
         proposal.pop("target_pose_base")
@@ -128,6 +190,43 @@ class OrganizeActionTests(unittest.TestCase):
         _action, report = validate_task_action(proposal, _organize_state(), _organize_contract(), _organize_plan(), {})
         self.assertEqual(report["reason"], "target_region_does_not_match_group")
 
+    def test_organize_rejects_inside_member_while_same_group_has_outside_member(self):
+        state = _organize_state()
+        state["objects"].append(_object(3, "square red", [0.50, 0.20, 0.02]))
+        plan = _organize_plan()
+        plan["groups"][0]["object_ids"] = [1, 3]
+        progress = {"group_diagnostics": [{
+            "group_id": "red_group", "inside_region": [1], "outside_region": [3],
+        }]}
+        action, report = validate_task_action(
+            _organize_action(), state, _organize_contract(), plan, progress,
+        )
+        self.assertIsNone(action)
+        self.assertEqual(
+            report["reason"],
+            "selected_object_already_inside_while_group_has_outside_members",
+        )
+
+    def test_organize_rejects_noop_pick_place(self):
+        proposal = _organize_action()
+        proposal["target_pose_base"]["position_m"] = [0.20, 0.0, 0.02]
+        action, report = validate_task_action(
+            proposal, _organize_state(), _organize_contract(), _organize_plan(), {},
+        )
+        self.assertIsNone(action)
+        self.assertEqual(report["reason"], "target_pose_too_close_to_source")
+        suggested = report["checks"]["target_pose_base"]["detail"][
+            "suggested_collision_free_position_m"
+        ]
+        self.assertGreater(
+            ((suggested[0] - 0.20) ** 2 + (suggested[1] - 0.0) ** 2) ** 0.5,
+            0.006,
+        )
+        self.assertNotEqual(
+            (round(suggested[0], 2), round(suggested[1], 2)),
+            (round(0.20, 2), round(0.0, 2)),
+        )
+
     def test_center_inside_but_footprint_outside_region_is_rejected(self):
         proposal = _organize_action(); proposal["target_pose_base"]["position_m"][0] = 0.295
         _action, report = validate_task_action(proposal, _organize_state(), _organize_contract(), _organize_plan(), {})
@@ -145,6 +244,36 @@ class OrganizeActionTests(unittest.TestCase):
         _action, report = validate_task_action(proposal, state, _organize_contract(), _organize_plan(), {})
         self.assertEqual(report["reason"], "target_pose_violates_group_layout")
         self.assertEqual(proposal["target_pose_base"]["position_m"], [0.25, 0.03, 0.02])
+
+    def test_overlap_feedback_supplies_geometry_checked_recovery_position(self):
+        state = _organize_state()
+        state["objects"].append(_object(3, "square red", [0.50, 0.20, 0.02]))
+        plan = _organize_plan()
+        plan["groups"][0]["object_ids"] = [1, 3]
+        proposal = _organize_action()
+        proposal.update({
+            "selected_object_id": 3,
+            "object_center_base_m": [0.50, 0.20, 0.02],
+        })
+        proposal["target_pose_base"]["position_m"] = [0.20, 0.0, 0.02]
+        action, report = validate_task_action(
+            proposal, state, _organize_contract(), plan,
+            {"group_diagnostics": [{"group_id": "red_group", "outside_region": [3]}]},
+        )
+        self.assertIsNone(action)
+        self.assertEqual(report["reason"], "target_pose_overlaps_planned_object")
+        suggested = report["checks"]["target_pose_base"]["detail"][
+            "suggested_collision_free_position_m"
+        ]
+        self.assertNotEqual(suggested[:2], [0.20, 0.0])
+        corrected = dict(proposal)
+        corrected["target_pose_base"] = {"position_m": suggested, "yaw_rad": 0.0}
+        accepted, corrected_report = validate_task_action(
+            corrected, state, _organize_contract(), plan,
+            {"group_diagnostics": [{"group_id": "red_group", "outside_region": [3]}]},
+        )
+        self.assertIsNotNone(accepted)
+        self.assertTrue(corrected_report["accepted"])
 
     def test_first_member_can_enter_empty_target_row_progressively(self):
         state = _organize_state()
@@ -213,6 +342,57 @@ class GeometryAndCompletionTests(unittest.TestCase):
 
 
 class DynamicProtectionAndSafetyTests(unittest.TestCase):
+    def test_runtime_red_collision_yaw_is_rejected_as_blocked(self):
+        target = _object(6, "square red", [0.2778, 0.0465, -0.0021], [0.0242, 0.0222, 0.0229])
+        target["table_yaw_deg"] = 66.25
+        objects = [
+            target,
+            _object(3, "square yellow", [0.2949, 0.0907, -0.0026], [0.0250, 0.0235, 0.0249]),
+            _object(5, "square green", [0.2715, 0.1183, -0.0020], [0.0257, 0.0217, 0.0236]),
+        ]
+        action = {"action_type": "pick_place", "object_id": 6}
+        selected, report = _validate_pick_grasp_geometry(SimpleNamespace(), {"objects": objects}, action)
+        self.assertFalse(report["grasp_feasible"])
+        self.assertNotIn("selected_grasp_yaw_deg", selected)
+        self.assertTrue(any(start <= 156.25 < end for start, end in report["blocked_yaw_intervals_deg"]))
+
+    def test_organize_pick_blocked_at_all_yaws_stops_before_moveit(self):
+        target = _object(1, "square red", [0.40, 0.0, 0.02], [0.024, 0.024, 0.024])
+        objects = [target]
+        for index, (x, y) in enumerate(((0.45, 0.0), (0.35, 0.0), (0.40, 0.05), (0.40, -0.05)), 2):
+            objects.append(_object(index, "square blue", [x, y, 0.02], [0.03, 0.03, 0.03]))
+        args = SimpleNamespace(execute=True, moveit_plan_only=False)
+        action = {"action_type": "pick_place", "object_id": 1}
+        with tempfile.TemporaryDirectory() as output_dir, patch(
+            "tools.workflows.stack_demo.task_execution.build_pick_place_plans"
+        ) as build_plans:
+            checked = preflight_pick_place_action(args, output_dir, {"objects": objects}, action, 1)
+        build_plans.assert_not_called()
+        self.assertFalse(checked["moveit_feasible"])
+        self.assertEqual(checked["preflight_failure_type"], "selected_pick_not_grasp_feasible")
+        self.assertTrue(checked["physical_grasp_validation"]["all_grasps_blocked"])
+
+    def test_collision_checked_yaw_is_forwarded_to_pick_plan_builder(self):
+        target = _object(1, "square red", [0.3289, 0.0888, -0.002], [0.0226, 0.0222, 0.025])
+        target["table_yaw_deg"] = -0.8
+        obstacle = _object(2, "square blue", [0.3304, 0.1338, 0.0], [0.0225, 0.0216, 0.0257])
+        obstacle["table_yaw_deg"] = 0.12
+        args = SimpleNamespace(execute=False, moveit_plan_only=False)
+        action = {"action_type": "pick_place", "object_id": 1}
+        captured = {}
+
+        def fake_build(_args, _cycle, _state, checked_action, _step):
+            captured.update(checked_action)
+            return "pick.json", "place.json"
+
+        with tempfile.TemporaryDirectory() as output_dir, patch(
+            "tools.workflows.stack_demo.task_execution.build_pick_place_plans",
+            side_effect=fake_build,
+        ):
+            preflight_pick_place_action(args, output_dir, {"objects": [target, obstacle]}, action, 1)
+        self.assertAlmostEqual(captured["selected_grasp_yaw_deg"], 89.2, delta=2.0)
+        self.assertEqual(captured["grasp_yaw_source"], "target_principal_axis")
+
     def test_clearance_execution_requires_separate_authorization(self):
         args = SimpleNamespace(execute=True, execute_push_clearing=False)
         with self.assertRaisesRegex(RuntimeError, "CLEARANCE_EXECUTION_NOT_AUTHORIZED"):
@@ -304,6 +484,46 @@ class DynamicProtectionAndSafetyTests(unittest.TestCase):
                 )
         self.assertTrue(action["moveit_feasible"])
         self.assertEqual(preflight.call_count, 2)
+
+    def test_correctable_nudge_parameters_do_not_forbid_same_strategy_retry(self):
+        proposal = {
+            "strategy_id": "clear_blocker_by_nudge", "action_type": "nudge",
+            "selected_object_id": 1, "target_object_id": 2,
+            "object_label": "square red", "object_center_base_m": [0.20, 0.0, 0.02],
+            "target_object_label": "square blue", "target_object_center_base_m": [0.45, 0.0, 0.02],
+            "scene_revision": 2, "direction_base": [0.0, 1.0, 0.0],
+            "distance_m": 0.03, "contact_side": "+y", "gripper_yaw_rad": 0.0,
+        }
+        corrected = {**proposal, "contact_side": "-y"}
+        args = SimpleNamespace(max_vlm_action_attempts=2, execute=True, moveit_plan_only=False)
+        accepted_action = {
+            "action_type": "nudge", "object_id": 1, "target_object_id": 2,
+            "direction_base": [0.0, 1.0, 0.0], "distance_m": 0.03,
+            "contact_side": "-y", "gripper_yaw_rad": 0.0,
+        }
+        invalid = {
+            "accepted": False, "reason": "push_parameters_invalid",
+            "failed_fields": ["contact_side_matches_push_direction"],
+            "checks": {"contact_side_matches_push_direction": {"ok": False, "detail": {"contact_side": "+y"}}},
+        }
+        with tempfile.TemporaryDirectory() as output_dir, patch(
+            "tools.workflows.stack_demo.task_workflow.call_vlm_task_policy",
+            side_effect=[
+                {"call_status": "parsed", "decision": proposal},
+                {"call_status": "parsed", "decision": corrected},
+            ],
+        ), patch(
+            "tools.workflows.stack_demo.task_workflow.validate_vlm_action_decision",
+            side_effect=[(None, invalid), (accepted_action, {"accepted": True})],
+        ), patch(
+            "tools.workflows.stack_demo.task_workflow._preflight_task_action",
+            return_value={**accepted_action, "moveit_feasible": True},
+        ):
+            action, _report = _select_task_action(
+                args, _clearance_state(), _organize_contract(), _organize_plan(), {}, {}, CONFIG,
+                output_dir, 1,
+            )
+        self.assertEqual(action["contact_side"], "-y")
 
     def test_grounding_metadata_correction_is_not_blocked_as_duplicate_action(self):
         proposal = {

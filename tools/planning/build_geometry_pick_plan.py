@@ -120,6 +120,23 @@ def normalize_equivalent_yaw(yaw_deg, period_deg):
     return ((float(yaw_deg) + half) % float(period_deg)) - half
 
 
+def geometry_is_near_square(obj, maximum_aspect_ratio=1.15):
+    """Use footprint geometry only for ambiguous non-triangle/non-round detector labels."""
+    label = str(obj.get("label", "")).lower()
+    if any(token in label for token in ("triangle", "circle", "semi")):
+        return False
+    ratio = obj.get("footprint_aspect_ratio")
+    if ratio is None:
+        size = obj.get("dimensions_m") or []
+        if len(size) >= 2 and min(abs(float(size[0])), abs(float(size[1]))) > 1e-9:
+            ratio = max(abs(float(size[0])), abs(float(size[1]))) / min(abs(float(size[0])), abs(float(size[1])))
+    try:
+        ratio = float(ratio)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(ratio) and 1.0 <= ratio <= float(maximum_aspect_ratio)
+
+
 def set_stack_demo_yaw(
     step,
     obj,
@@ -131,7 +148,8 @@ def set_stack_demo_yaw(
 ):
     label = str(obj.get("label", "")).lower()
     estimated_yaw = obj.get("table_yaw_deg")
-    is_square = "square" in label
+    near_square_geometry = geometry_is_near_square(obj)
+    is_square = "square" in label or near_square_geometry
     is_rectangle = "rectangle" in label
     if not (is_square or is_rectangle):
         if not obj.get("table_yaw_valid") or estimated_yaw is None:
@@ -163,7 +181,14 @@ def set_stack_demo_yaw(
     step["yaw_source"] = (
         "stack_demo_fixed_square"
         if is_square and square_yaw_mode == "fixed"
-        else "stack_demo_{}_90deg_equivalent".format(obj.get("table_yaw_source") or "detected")
+        else "stack_demo_{}_90deg_equivalent".format(
+            "near_square_footprint"
+            if near_square_geometry and "square" not in label
+            else (obj.get("table_yaw_source") or "detected")
+        )
+    )
+    step["yaw_shape_source"] = (
+        "near_square_footprint" if near_square_geometry and "square" not in label else "detector_label"
     )
     step.pop("yaw_forced_from_invalid_aspect_ratio", None)
 

@@ -48,7 +48,9 @@ def validate_task_action(
             dynamic_protection or {}, semantics_config or {},
         )
     if task_type == "organize_blocks":
-        return validate_organize_pick_place(proposal, state, task_contract, grounded_plan)
+        return validate_organize_pick_place(
+            proposal, state, task_contract, grounded_plan, goal_progress,
+        )
     return None, _report("task_action_validation", proposal, "unsupported_task_type", ["task_type"])
 
 
@@ -188,6 +190,7 @@ def validate_organize_pick_place(
     state: dict,
     contract: dict,
     grounded_plan: dict,
+    progress: Optional[dict] = None,
 ) -> Tuple[Optional[dict], dict]:
     """Validate group binding, full target footprint, spacing, and layout."""
     report = _report("organize_action_validation", proposal, "organize_action_invalid")
@@ -218,7 +221,60 @@ def validate_organize_pick_place(
     grounding_failure = _grounding_failure(obj, proposal, report)
     if grounding_failure:
         return None, grounding_failure
+    group_progress = next((
+        item for item in (progress or {}).get("group_diagnostics", [])
+        if str(item.get("group_id")) == str(group_id)
+    ), None)
+    outside_ids = {
+        str(value) for value in (group_progress or {}).get("outside_region", [])
+    }
+    if outside_ids and str(obj.get("id")) not in outside_ids:
+        failed = _fail(
+            report,
+            "selected_object_already_inside_while_group_has_outside_members",
+            "selected_object_id",
+        )
+        failed["checks"]["selected_object_id"]["detail"].update({
+            "selected_object_id": obj.get("id"),
+            "required_outside_object_ids": sorted(outside_ids),
+            "correction": "select a member from current_goal_progress.group_diagnostics[].outside_region",
+        })
+        return None, failed
     moved = _object_at_pose(obj, proposal["target_pose_base"])
+    source_center = get_center(obj)
+    target_center = get_center(moved)
+    xy_displacement = math.hypot(
+        float(target_center[0]) - float(source_center[0]),
+        float(target_center[1]) - float(source_center[1]),
+    )
+    alignment_tolerance = float(contract.get("goal_spec", {}).get("alignment_tolerance_m", 0.012))
+    minimum_reposition = max(0.005, min(0.010, 0.5 * alignment_tolerance))
+    if xy_displacement < minimum_reposition:
+        failed = _fail(report, "target_pose_too_close_to_source", "target_pose_base")
+        detail = {
+            "source_position_m": source_center,
+            "received_position_m": target_center,
+            "xy_displacement_m": round(xy_displacement, 6),
+            "minimum_reposition_distance_m": round(minimum_reposition, 6),
+            "correction": "choose an unsatisfied group member and a materially different collision-free XY",
+        }
+        suggested = _suggest_organize_target_position(
+            obj=obj,
+            state=state,
+            group=group,
+            region=regions[region_id],
+            grouping_key=grouping_key,
+            contract=contract,
+            target_pose=proposal["target_pose_base"],
+            minimum_reposition_m=minimum_reposition,
+        )
+        if suggested is not None:
+            detail["suggested_collision_free_position_m"] = suggested
+            detail["correction"] = (
+                "use this geometry-checked position or another position satisfying the same constraints"
+            )
+        failed["checks"]["target_pose_base"]["detail"].update(detail)
+        return None, failed
     if not footprint_inside_region(object_footprint_polygon(moved), regions[region_id]):
         region = regions[region_id]
         size = get_size(moved)
@@ -255,12 +311,28 @@ def validate_organize_pick_place(
             continue
         other_footprint = object_footprint_polygon(other)
         if footprint_overlap(object_footprint_polygon(moved), other_footprint):
-            report.setdefault("checks", {})["target_pose_base"] = {"detail": {
+            detail = {
                 "reason": "target_pose_overlaps_planned_object",
                 "blocking_object_id": other.get("id"),
                 "blocking_object_label": other.get("label"),
                 "blocking_object_center_base_m": get_center(other),
-            }}
+            }
+            suggested = _suggest_organize_target_position(
+                obj=obj,
+                state=state,
+                group=group,
+                region=regions[region_id],
+                grouping_key=grouping_key,
+                contract=contract,
+                target_pose=proposal["target_pose_base"],
+                minimum_reposition_m=minimum_reposition,
+            )
+            if suggested is not None:
+                detail["suggested_collision_free_position_m"] = suggested
+                detail["correction"] = (
+                    "use this geometry-checked position or another position satisfying the same constraints"
+                )
+            report.setdefault("checks", {})["target_pose_base"] = {"detail": detail}
             return None, _fail(report, "target_pose_overlaps_planned_object", "target_pose_base")
         if _object_belongs_to_group(other, group, grouping_key):
             distance = footprint_boundary_distance(object_footprint_polygon(moved), other_footprint)
@@ -275,7 +347,7 @@ def validate_organize_pick_place(
             if footprint_inside_region(other_footprint, regions[region_id]):
                 group_members.append(other)
     layout_type = str(contract.get("goal_spec", {}).get("layout_type") or "")
-    tolerance = float(contract.get("goal_spec", {}).get("alignment_tolerance_m", 0.012))
+    tolerance = alignment_tolerance
     if not evaluate_layout(group_members, layout_type, tolerance):
         return None, _fail(report, "target_pose_violates_group_layout", "target_pose_base")
     return _accepted_action(proposal, obj, report)
@@ -382,6 +454,92 @@ def _object_at_pose(obj: dict, pose: dict) -> dict:
     if pose.get("orientation_xyzw") is not None:
         moved["orientation_xyzw"] = list(pose["orientation_xyzw"])
     return moved
+
+
+def _suggest_organize_target_position(
+    obj: dict,
+    state: dict,
+    group: dict,
+    region: dict,
+    grouping_key: str,
+    contract: dict,
+    target_pose: dict,
+    minimum_reposition_m: float,
+) -> Optional[List[float]]:
+    """Find one geometry-checked recovery point after a VLM target collision."""
+    source = get_center(obj)
+    size = get_size(obj)
+    yaw = float(target_pose.get("yaw_rad", obj.get("yaw_rad", 0.0)))
+    half_x = 0.5 * (abs(math.cos(yaw)) * float(size[0]) + abs(math.sin(yaw)) * float(size[1]))
+    half_y = 0.5 * (abs(math.sin(yaw)) * float(size[0]) + abs(math.cos(yaw)) * float(size[1]))
+    xmin, xmax = float(region["xmin"]) + half_x, float(region["xmax"]) - half_x
+    ymin, ymax = float(region["ymin"]) + half_y, float(region["ymax"]) - half_y
+    if xmin > xmax or ymin > ymax:
+        return None
+    same_group_inside = [
+        other for other in state.get("objects", [])
+        if str(other.get("id")) != str(obj.get("id"))
+        and _object_belongs_to_group(other, group, grouping_key)
+        and footprint_inside_region(object_footprint_polygon(other), region)
+    ]
+    layout = str(contract.get("goal_spec", {}).get("layout_type") or "")
+    tolerance = float(contract.get("goal_spec", {}).get("alignment_tolerance_m", 0.012))
+    spacing = float(contract.get("goal_spec", {}).get("minimum_spacing_m", 0.015))
+    x_values = _candidate_axis_values(xmin, xmax, float(source[0]))
+    y_values = _candidate_axis_values(ymin, ymax, float(source[1]))
+    if same_group_inside and layout == "rows":
+        y_values = [sum(get_center(item)[1] for item in same_group_inside) / len(same_group_inside)]
+    elif same_group_inside and layout == "columns":
+        x_values = [sum(get_center(item)[0] for item in same_group_inside) / len(same_group_inside)]
+    positions = [(x, y) for x in x_values for y in y_values]
+    positions.sort(key=lambda point: math.hypot(point[0] - source[0], point[1] - source[1]))
+    target_position = target_pose.get("position_m", target_pose.get("position"))
+    target_z = float(target_position[2])
+    rejected_destination_bin = (
+        round(float(target_position[0]), 2),
+        round(float(target_position[1]), 2),
+    )
+    workspace = state.get("table_bounds") or state.get("workspace_bounds")
+    for x, y in positions:
+        if math.hypot(x - source[0], y - source[1]) < minimum_reposition_m:
+            continue
+        if (round(float(x), 2), round(float(y), 2)) == rejected_destination_bin:
+            continue
+        candidate = _object_at_pose(obj, {"position_m": [x, y, target_z], "yaw_rad": yaw})
+        footprint = object_footprint_polygon(candidate)
+        if not footprint_inside_region(footprint, region) or not object_inside_workspace(candidate, workspace):
+            continue
+        collision = False
+        group_members = [candidate]
+        for other in state.get("objects", []):
+            if str(other.get("id")) == str(obj.get("id")):
+                continue
+            other_footprint = object_footprint_polygon(other)
+            if footprint_overlap(footprint, other_footprint):
+                collision = True
+                break
+            if _object_belongs_to_group(other, group, grouping_key):
+                if footprint_boundary_distance(footprint, other_footprint) < spacing:
+                    collision = True
+                    break
+                if footprint_inside_region(other_footprint, region):
+                    group_members.append(other)
+        if collision or not evaluate_layout(group_members, layout, tolerance):
+            continue
+        return [round(float(x), 6), round(float(y), 6), round(target_z, 6)]
+    return None
+
+
+def _candidate_axis_values(low: float, high: float, preferred: float) -> List[float]:
+    preferred = min(max(preferred, low), high)
+    values = [preferred, 0.5 * (low + high), low, high]
+    steps = max(1, int(math.ceil((high - low) / 0.01)))
+    values.extend(low + (high - low) * index / steps for index in range(steps + 1))
+    unique = []
+    for value in values:
+        if not any(abs(value - seen) < 1e-6 for seen in unique):
+            unique.append(value)
+    return unique
 
 
 def _dependency_failure(role_id: str, progress: dict) -> Optional[str]:

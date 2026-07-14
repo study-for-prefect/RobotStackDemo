@@ -26,6 +26,9 @@ def compact_object_for_action_policy(obj: ObjectDict) -> ObjectDict:
         "detector_object_id": obj.get("id"),
         "label": obj.get("label"),
         "confidence": obj.get("confidence"),
+        "visual_color": obj.get("visual_color"),
+        "visual_color_confidence": obj.get("visual_color_confidence"),
+        "visual_color_source": obj.get("visual_color_source"),
         "bbox_xyxy_px": obj.get("bbox_xyxy_px"),
         "center_px": obj.get("center_px"),
         "depth_m": obj.get("depth_m"),
@@ -80,6 +83,10 @@ def build_vlm_action_decision_input(
             "action_step_index": int(step_index),
             "current_plan_focus": compact_object_for_action_policy(task_focus_object),
             "current_plan_focus_is_advisory": True,
+            "direct_pick_binding_rule": (
+                "For strategy_id=direct_pick_target and action_type=pick, operated object must be "
+                "current_plan_focus. Only nudge/pick_away clearance may operate another loose object."
+            ),
             "structure_plan": (memory or {}).get("task_plan") or structure.get("plan"),
             "stack_progress": {
                 "base": structure.get("base"),
@@ -87,8 +94,8 @@ def build_vlm_action_decision_input(
                 "current_top": structure.get("current_top"),
             },
             "rule": (
-                "Decide the next useful action from the whole scene. The current plan focus is context, "
-                "not a forced object choice."
+                "Direct pick must operate current_plan_focus. If it is blocked, clearance may operate "
+                "another loose object while keeping current_plan_focus as the benefited target."
             ),
         },
         "objects": [
@@ -212,7 +219,10 @@ def build_vlm_action_prompt(policy_input: dict) -> str:
         "物理约束：不移动 base、placed、locked、protected 物体；保护已堆叠结构。\n"
         "只能使用object_ref或track_id引用物体，禁止裸整数ID和数组index。\n"
         "pick 时两者通常相同；nudge/pick_away 时 operated reference 可是障碍物，target reference 可是受益对象。\n"
-        "不要因为 current_plan_focus 存在就机械选择它；先看全图和全部几何，再说明你的判断。\n"
+        "direct_pick_target 的 pick 必须操作 current_plan_focus；只有 nudge/pick_away 清障才可操作其他松散物体，"
+        "并把 current_plan_focus 作为受益目标。\n"
+        "颜色判断优先使用 objects[].visual_color；label 是检测器的形状/类别原文，"
+        "即使二者不同也不得用 label 覆盖 visual_color。\n"
         "同颜色/label 多实例必须用track_id、object_ref、bbox和base_link中心区分，禁止只按颜色猜。\n"
         "对于可执行动作，object_label/object_center_base_m 和 target_object_label/target_object_center_base_m "
         "必须从 objects 对应 reference 原样复制；reference、label、中心不一致会被拒绝。\n"

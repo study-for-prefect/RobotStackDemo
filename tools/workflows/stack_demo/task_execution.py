@@ -6,6 +6,7 @@ import copy
 import os
 from typing import Any, List, Tuple
 
+from robot_scene_pipeline.grasp_yaw_search import select_best_grasp
 from tools.planning.decision_to_execution import write_json
 
 from .commands import capture_empty_observation, moveit_frame_args, plan_only_command, run
@@ -15,8 +16,25 @@ from .push_clearing import object_by_string_id
 
 def preflight_pick_place_action(args: Any, cycle_dir: str, state: dict, action: dict, step_index: int) -> dict:
     """Use existing pick/place MoveIt commands in plan-only mode for a VLM pose."""
-    pick_path, place_path = build_pick_place_plans(args, cycle_dir, state, action, step_index)
-    output = dict(action); output.update({"pick_plan_path": pick_path, "place_plan_path": place_path})
+    output = dict(action)
+    if output.get("action_type") == "pick_place":
+        output, grasp_report = _validate_pick_grasp_geometry(args, state, output)
+        write_json(
+            os.path.join(cycle_dir, "task_step_{:02d}_grasp_validation.json".format(step_index)),
+            grasp_report,
+        )
+        if not grasp_report.get("grasp_feasible"):
+            output.update({
+                "moveit_feasible": False,
+                "executable_safe": False,
+                "preflight_failure_type": "selected_pick_not_grasp_feasible",
+                "moveit_preflight_error": (
+                    "selected_pick_not_grasp_feasible: clear blocking objects before retrying pick_place"
+                ),
+            })
+            return output
+    pick_path, place_path = build_pick_place_plans(args, cycle_dir, state, output, step_index)
+    output.update({"pick_plan_path": pick_path, "place_plan_path": place_path})
     if not getattr(args, "execute", False) and not getattr(args, "moveit_plan_only", False):
         output.update({"moveit_feasible": False, "executable_safe": False}); return output
     try:
@@ -35,6 +53,37 @@ def preflight_pick_place_action(args: Any, cycle_dir: str, state: dict, action: 
             waypoint["collision_free"] = True
             waypoint["moveit_plan_only_checked"] = True
     output.update({"moveit_feasible": True, "executable_safe": True}); return output
+
+
+def _validate_pick_grasp_geometry(args: Any, state: dict, action: dict) -> Tuple[dict, dict]:
+    """Select only a gripper yaw whose open fingers clear every visible scene object."""
+    obj = object_by_string_id(state.get("objects", []), action["object_id"])
+    report = select_best_grasp(
+        obj,
+        state.get("objects", []),
+        gripper_outer_width_m=float(getattr(args, "grasp_gripper_outer_width_m", 0.112)),
+        gripper_inner_width_m=float(getattr(args, "grasp_gripper_inner_width_m", 0.049)),
+        side_clearance_m=float(getattr(args, "grasp_gripper_side_clearance_m", 0.006)),
+        approach_length_m=float(getattr(args, "grasp_approach_length_m", 0.02)),
+    )
+    output = dict(action)
+    output["physical_grasp_validation"] = _compact_grasp_report(report)
+    selected_yaw = report.get("selected_grasp_yaw_deg")
+    if selected_yaw is not None:
+        output["selected_grasp_yaw_deg"] = float(selected_yaw)
+        output["grasp_yaw_source"] = report.get("selected_grasp_source") or "task_pick_physical_validation"
+    return output, report
+
+
+def _compact_grasp_report(report: dict) -> dict:
+    return {
+        key: report.get(key)
+        for key in (
+            "grasp_feasible", "selected_grasp_yaw_deg", "selected_grasp_axis_delta_deg",
+            "selected_grasp_source", "feasible_yaw_intervals_deg", "blocked_yaw_intervals_deg",
+            "all_grasps_blocked", "blocking_objects", "parameters",
+        )
+    }
 
 
 def execute_pick_place_and_reobserve(
@@ -71,6 +120,13 @@ def execute_pick_place_and_reobserve(
 def build_pick_place_plans(args: Any, cycle_dir: str, state: dict, action: dict, step_index: int) -> Tuple[str, str]:
     """Build existing pick plan plus a VLM-coordinate place plan without stack assumptions."""
     obj = copy.deepcopy(object_by_string_id(state.get("objects", []), action["object_id"]))
+    if action.get("selected_grasp_yaw_deg") is not None:
+        obj["selected_grasp_yaw_deg"] = float(action["selected_grasp_yaw_deg"])
+        obj["grasp_yaw_source"] = action.get("grasp_yaw_source") or "task_pick_physical_validation"
+        grasp_report = action.get("physical_grasp_validation") or {}
+        obj["selected_grasp_axis_delta_deg"] = grasp_report.get("selected_grasp_axis_delta_deg")
+        obj["feasible_yaw_intervals_deg"] = grasp_report.get("feasible_yaw_intervals_deg", [])
+        obj["blocked_yaw_intervals_deg"] = grasp_report.get("blocked_yaw_intervals_deg", [])
     if action.get("action_type") == "pick_reorient_place" and action.get("grasp_target_center_base_m"):
         obj["geometry_center_m"] = list(action["grasp_target_center_base_m"])
         obj["center_3d_base_m"] = list(action["grasp_target_center_base_m"])
@@ -86,24 +142,48 @@ def build_pick_place_plans(args: Any, cycle_dir: str, state: dict, action: dict,
         pick_plan["steps"][0]["target_orientation_xyzw"] = list(source_tool_orientation)
         pick_plan["steps"][0]["orientation_source"] = "object_orientation_and_grasp_transform"
         write_json(pick_path, pick_plan)
-    pose = action["target_pose_base"]; position = [float(value) for value in pose["position_m"]]
+    pose = action["target_pose_base"]
+    nominal_position, position, release_gap = _task_place_release_position(args, action)
+    target_yaw_deg = (
+        float(pose["yaw_rad"]) * 180.0 / 3.141592653589793
+        if pose.get("yaw_rad") is not None else None
+    )
     step = {
         "step": 1, "action": "place_relative", "status": "planned",
         "object_id": obj.get("id"), "object_label": obj.get("label"),
-        "coordinate_frame": "base_link", "coordinate_source": "vlm_task_action_target_pose_base",
+        "coordinate_frame": "base_link",
+        "coordinate_source": (
+            "vlm_task_action_target_pose_base+organize_release_gap"
+            if release_gap > 0.0 else "vlm_task_action_target_pose_base"
+        ),
+        "nominal_target_position_m": nominal_position,
+        "release_gap_m": release_gap,
         "target_position_m": position, "approach_position_m": [position[0], position[1], position[2] + float(args.approach_height_m)],
-        "target_yaw_deg": (float(pose["yaw_rad"]) * 180.0 / 3.141592653589793 if pose.get("yaw_rad") is not None else None),
-        "target_yaw_valid": pose.get("yaw_rad") is not None,
-        "chosen_grasp_yaw_deg": (float(pose["yaw_rad"]) * 180.0 / 3.141592653589793 if pose.get("yaw_rad") is not None else None),
+        "target_yaw_deg": target_yaw_deg,
+        "target_yaw_valid": target_yaw_deg is not None,
+        "chosen_grasp_yaw_deg": target_yaw_deg,
         "target_orientation_xyzw": (
             (action.get("reorientation_plan") or {}).get("target_tool_orientation_xyzw")
             or action.get("target_tool_orientation_xyzw")
         ),
-        "exact_tool_yaw_required": pose.get("yaw_rad") is not None,
-        "yaw_frame": "base_link", "yaw_source": "vlm_task_action" if pose.get("yaw_rad") is not None else "house_frame_code_geometry",
+        "exact_tool_yaw_required": target_yaw_deg is not None,
+        "yaw_frame": "base_link",
+        "yaw_source": "vlm_task_action" if pose.get("yaw_rad") is not None else "house_frame_code_geometry",
     }
     write_json(place_path, plan_envelope(state, step))
     return pick_path, place_path
+
+
+def _task_place_release_position(args: Any, action: dict) -> Tuple[List[float], List[float], float]:
+    """Raise organize releases above the nominal settled center to avoid table contact."""
+    pose = action["target_pose_base"]
+    nominal = [float(value) for value in pose["position_m"]]
+    release_gap = 0.0
+    if action.get("group_id") is not None:
+        release_gap = max(0.0, float(getattr(args, "release_gap_m", 0.010)))
+    release = list(nominal)
+    release[2] += release_gap
+    return nominal, release, release_gap
 
 
 def _place_command(args: Any, place_path: str, action: dict) -> List[str]:

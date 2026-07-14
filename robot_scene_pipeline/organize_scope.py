@@ -17,6 +17,16 @@ def color_value_from_label(label: object) -> Optional[str]:
     return matches[0] if len(matches) == 1 else None
 
 
+def color_value_from_object(obj: object) -> Optional[str]:
+    """Prefer visual color evidence, with detector label as a compatibility fallback."""
+    if not isinstance(obj, dict):
+        return None
+    visual_color = str(obj.get("visual_color") or "").lower()
+    if visual_color in SUPPORTED_BLOCK_COLORS:
+        return visual_color
+    return color_value_from_label(obj.get("label"))
+
+
 def organize_scope_objects(state: dict) -> List[dict]:
     """Keep color-labeled blocks whose full footprint is inside calibrated bounds."""
     workspace = state.get("table_bounds") or state.get("workspace_bounds")
@@ -24,7 +34,7 @@ def organize_scope_objects(state: dict) -> List[dict]:
     for obj in state.get("objects", []):
         if not isinstance(obj, dict) or obj.get("is_workspace"):
             continue
-        if color_value_from_label(obj.get("label")) is None:
+        if color_value_from_object(obj) is None:
             continue
         if _detection_clipped_by_image_edge(obj, state):
             continue

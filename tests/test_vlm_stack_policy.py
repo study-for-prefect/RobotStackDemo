@@ -188,12 +188,16 @@ class VlmStackPolicyTests(unittest.TestCase):
         self.assertNotIn("explicit_rule_diagnostic", validated)
 
     def test_stack_input_does_not_include_camera_intrinsics(self):
-        payload = build_vlm_stack_decision_input(_state(), "stack blocks")
+        state = _state()
+        state["objects"][0].update({"visual_color": "blue", "visual_color_confidence": 0.99})
+        payload = build_vlm_stack_decision_input(state, "stack blocks")
         encoded = str(payload)
 
         self.assertNotIn("camera_profile", encoded)
         self.assertNotIn("fx", encoded)
         self.assertIn("geometry_center_base_m", encoded)
+        self.assertEqual(payload["objects"][0]["visual_color"], "blue")
+        self.assertEqual(payload["objects"][0]["visual_color_confidence"], 0.99)
         self.assertNotIn("base_object_id", payload["output_schema"])
         self.assertNotIn("stack_order", payload["output_schema"])
 

@@ -257,6 +257,33 @@ class ActionIdentityAndContactTests(unittest.TestCase):
             )
         self.assertEqual(len(fingerprints), 1)
 
+    def test_direct_pick_must_operate_current_stack_focus(self):
+        focus = _object(1, "square blue", 0.0)
+        focus.update({"track_id": "track_blue_01"})
+        wrong = {
+            "strategy_id": "direct_pick_target", "action_type": "pick",
+            "object_id": 3, "object_track_id": "track_green_01",
+        }
+        correct_by_track = {
+            "strategy_id": "direct_pick_target", "action_type": "pick",
+            "object_id": 9, "object_track_id": "track_blue_01",
+        }
+
+        self.assertEqual(
+            vlm_action._stack_action_semantic_error(wrong, focus),
+            "direct_pick_must_use_current_plan_focus",
+        )
+        self.assertIsNone(vlm_action._stack_action_semantic_error(correct_by_track, focus))
+
+    def test_clearance_can_operate_a_non_focus_object(self):
+        focus = _object(1, "square blue", 0.0)
+        focus.update({"track_id": "track_blue_01"})
+        clearance = {
+            "strategy_id": "clear_blocker_by_pick_away", "action_type": "pick_away",
+            "object_id": 4, "object_track_id": "track_yellow_01",
+        }
+        self.assertIsNone(vlm_action._stack_action_semantic_error(clearance, focus))
+
     def test_four_recorded_runtime_scenes_load_and_receive_unique_tracks(self):
         relative_states = [
             ("linear_stack_20260712_164224", "initial_order/private_scene_state.json"),

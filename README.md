@@ -74,13 +74,60 @@ python3 -m unittest discover -s tests
 唯一的兼容适配层再把已解析的 `selected_object_id` 复制为旧 MoveIt/清障模块使用的
 `object_id`；两个字段冲突会直接拒绝，不会改选对象或修改目标位姿。
 
-```bash
-# 搭房子：四个正方形 + 一个屋顶 + 一个三角形
-python3 tools/workflows/stack_demo_pipeline.py --instruction "搭一个房子"
+### 三个任务的运行指令
 
-# 按颜色整理成行
-python3 tools/workflows/stack_demo_pipeline.py --instruction "按颜色整理积木"
+桌面启动器已经启动机械臂、MoveIt、相机和感知服务后，在新终端先加载 ROS 环境：
+
+```bash
+cd /home/wxm/code/RobotStackDemo
+source /opt/ros/humble/setup.bash
+source /home/wxm/ros2_ws/install/setup.bash
 ```
+
+推荐使用以下三条自然语言指令。叠积木必须明确给出底层和逐层颜色关系；整理与房子由
+任务关键词路由到各自独立的合同、规划和完成条件。
+
+```text
+叠积木：以红色积木为底，把绿色积木放到红色上面，再把蓝色积木放到绿色上面，再把黄色积木放到蓝色上面
+整理积木：按颜色整理积木
+搭房子：搭一个房子
+```
+
+实机 MoveIt 仅规划，不运动机械臂或夹爪：
+
+```bash
+# 红→绿→蓝→黄四色堆叠
+python3 tools/workflows/stack_demo_pipeline.py \
+  --instruction "以红色积木为底，把绿色积木放到红色上面，再把蓝色积木放到绿色上面，再把黄色积木放到蓝色上面" \
+  --model qwen3-vl:8b-instruct --moveit-plan-only \
+  --output-dir runtime/stack_blocks_plan_only
+
+# 按颜色整理
+python3 tools/workflows/stack_demo_pipeline.py \
+  --instruction "按颜色整理积木" \
+  --model qwen3-vl:8b-instruct --moveit-plan-only \
+  --output-dir runtime/organize_blocks_plan_only
+
+# 六角色房子：四个正方形 + 一个屋顶 + 一个三角形
+python3 tools/workflows/stack_demo_pipeline.py \
+  --instruction "搭一个房子" \
+  --model qwen3-vl:8b-instruct --moveit-plan-only \
+  --output-dir runtime/build_house_plan_only
+```
+
+完整实机执行使用对应的同一条命令，把 `--moveit-plan-only` 改为 `--execute --yes`，
+并使用新的输出目录。例如完整四色堆叠：
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  --instruction "以红色积木为底，把绿色积木放到红色上面，再把蓝色积木放到绿色上面，再把黄色积木放到蓝色上面" \
+  --model qwen3-vl:8b-instruct --execute --yes \
+  --output-dir runtime/stack_blocks_execute
+```
+
+`--execute` 默认不授权真实清障。只有需要且已确认允许机械臂推开/移走障碍物时，才额外
+添加 `--execute-push-clearing`。30B 对照测试只需把模型改为
+`qwen3-vl:30b-a3b-instruct`；不要使用 thinking 变体 `qwen3-vl:30b`。
 
 动作安全检查使用 `config/workspace_bounds.json`。该文件必须明确写出 `base_link`、
 米制单位以及 `xmin/xmax/ymin/ymax/zmin/zmax` 六个方向；也可用
@@ -102,7 +149,8 @@ Ollama 各策略上下文有固定硬上限，不会根据 prompt 体积自动�
 先执行 `sudo nvidia-smi -pl 250` 并确认 `nvidia-smi` 显示 250W；该限制在重启或
 驱动重载后可能需要重新设置。三个任务稳定前不要直接恢复默认 370W。
 
-旧线性堆叠仅作为兼容路径保留，必须显式启用 `--legacy-linear-stack`。
+明确包含底层和逐层“上面”关系的指令会自动路由到 `stack_blocks` 兼容实现；只有在
+指令本身无法明确路由但需要强制进入该实现时，才手工添加 `--legacy-linear-stack`。
 详细自主 VLM 策略见
 [`tools/workflows/stack_demo/README.md`](tools/workflows/stack_demo/README.md)：
 真实推障仍必须显式 `--execute --execute-push-clearing`，短距离 nudge

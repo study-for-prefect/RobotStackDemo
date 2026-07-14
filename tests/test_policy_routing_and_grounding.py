@@ -8,6 +8,7 @@ from robot_scene_pipeline.task_schemas import (
     GROUNDED_HOUSE_PLAN_SCHEMA,
     GROUNDED_ORGANIZE_PLAN_SCHEMA,
     ORGANIZE_BLOCKS_CONTRACT_SCHEMA,
+    TASK_ACTION_OUTPUT_SCHEMA,
     schema_for_policy,
     validate_against_schema,
 )
@@ -154,6 +155,67 @@ class PolicyRoutingAndGroundingTests(unittest.TestCase):
             ["red", "blue"],
         )
         self.assertIn("未来放置区", _task_prompt(payload, "grounded_task_plan"))
+
+    def test_task_action_output_schema_exposes_complete_clearance_parameters(self):
+        required = set(TASK_ACTION_OUTPUT_SCHEMA["required"])
+        self.assertTrue({
+            "target_object_ref", "target_object_track_id", "target_object_label",
+            "target_object_center_base_m", "contact_side", "direction_base",
+            "distance_m", "gripper_yaw_rad", "safe_place_center_base_m",
+        }.issubset(required))
+        self.assertIn(
+            "yaw_rad",
+            TASK_ACTION_OUTPUT_SCHEMA["properties"]["target_pose_base"]["required"],
+        )
+
+    def test_blocked_organize_grasp_prompt_requires_complete_clearance_action(self):
+        contract = {
+            "task_type": "organize_blocks", "goal_spec": {
+                "grouping_key": "color", "layout_type": "rows",
+                "include_scope": "all_detected_blocks", "allow_stacking": False,
+            },
+        }
+        state = {
+            "objects": [
+                {"id": 1, "object_ref": "scene_1:obj_1", "track_id": "track_red_01", "label": "square red", "geometry_center_m": [0.30, 0.0, 0.0], "dimensions_m": [0.02, 0.02, 0.02]},
+                {"id": 2, "object_ref": "scene_1:obj_2", "track_id": "track_blue_01", "label": "square blue", "geometry_center_m": [0.34, 0.0, 0.0], "dimensions_m": [0.02, 0.02, 0.02]},
+            ],
+        }
+        failure = {
+            "rejected_action": {
+                "selected_object_ref": "scene_1:obj_1", "selected_track_id": "track_red_01",
+                "object_label": "square red", "object_center_base_m": [0.30, 0.0, 0.0],
+            },
+            "failed_checks": [{
+                "type": "selected_object_grasp_feasible", "grasp_feasible": False,
+                "all_grasps_blocked": True,
+                "blocking_objects": [{"id": 2, "label": "square blue", "blocker_category": "loose_movable"}],
+            }],
+        }
+        payload = build_task_action_input(
+            state, contract, {"task_type": "organize_blocks"}, {}, 1,
+            failure_history=[failure],
+        )
+        prompt = _task_prompt(payload, "task_action")
+        self.assertIn("禁止再次对它输出 pick_place", prompt)
+        self.assertIn("target_object_*", prompt)
+        self.assertIn("direction_base 为三维单位 XY 向量", prompt)
+        self.assertIn("scene_1:obj_1", prompt)
+
+    def test_bad_nudge_direction_prompt_demands_unit_vector_and_opposite_contact(self):
+        contract = {"task_type": "organize_blocks", "goal_spec": {}}
+        payload = build_task_action_input(
+            {"objects": []}, contract, {"task_type": "organize_blocks"}, {}, 1,
+            failure_history=[{
+                "failed_checks": [
+                    {"type": "push_direction_base_unit_xy_vector"},
+                    {"type": "contact_side_matches_push_direction"},
+                ],
+            }],
+        )
+        prompt = _task_prompt(payload, "task_action")
+        self.assertIn("[0,1,0]", prompt)
+        self.assertIn("+Y方向用-y", prompt)
 
     def test_contract_schemas_are_task_specific(self):
         self.assertIs(schema_for_policy("task_contract", "build_house"), BUILD_HOUSE_CONTRACT_SCHEMA)

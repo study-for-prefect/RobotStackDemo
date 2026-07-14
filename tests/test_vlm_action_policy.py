@@ -292,11 +292,19 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertIn("object_label_matches_selected_id", safety["failed_fields"])
 
     def test_action_input_contains_objective_scene_and_advisory_task_focus(self):
+        scene = _scene()
+        scene["objects"][0].update({
+            "visual_color": "yellow",
+            "visual_color_confidence": 0.93,
+            "visual_color_source": "instance_mask_hsv",
+        })
+        target = dict(_target())
+        target.update(scene["objects"][0])
         payload = vlm_action_policy.build_vlm_action_decision_input(
             "/tmp/scene.png",
             "/tmp/overlay.png",
-            _scene(),
-            _target(),
+            scene,
+            target,
             protected_ids=[3],
             base_id=3,
             memory={"structure": {"base": "base_block", "current_top": "base_block", "placed_order": ["base_block"]}},
@@ -307,6 +315,9 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertNotIn("id", payload["task_goal"]["current_plan_focus"])
         self.assertIn("object_ref", payload["task_goal"]["current_plan_focus"])
         self.assertTrue(payload["task_goal"]["current_plan_focus_is_advisory"])
+        self.assertIn("current_plan_focus", payload["task_goal"]["direct_pick_binding_rule"])
+        self.assertEqual(payload["task_goal"]["current_plan_focus"]["visual_color"], "yellow")
+        self.assertEqual(payload["objects"][0]["visual_color"], "yellow")
         self.assertNotIn("target_grasp_state", payload)
         encoded = json.dumps(payload)
         self.assertNotIn("grasp_feasible", encoded)
@@ -315,6 +326,8 @@ class VlmActionPolicyTests(unittest.TestCase):
         self.assertNotIn("recommended_direction", encoded)
         self.assertIn("contact_rule", payload["manipulator_geometry"])
         self.assertIn("没有代码生成的候选动作", prompt)
+        self.assertIn("pick 必须操作 current_plan_focus", prompt)
+        self.assertIn("颜色判断优先使用 objects[].visual_color", prompt)
 
     def test_blocked_grasp_feedback_becomes_high_priority_clearing_directive(self):
         payload = vlm_action_policy.build_vlm_action_decision_input(

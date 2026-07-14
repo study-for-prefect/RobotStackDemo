@@ -215,10 +215,21 @@ def evaluate_autonomous_vlm_action_attempt(
 
 
 def _stack_action_semantic_error(decision: dict, task_focus_object: dict) -> Optional[str]:
-    if str(decision.get("action_type")) != "nudge":
-        return None
+    action_type = str(decision.get("action_type"))
     same_id = str(decision.get("object_id")) == str(task_focus_object.get("id"))
-    same_track = decision.get("object_track_id") and str(decision.get("object_track_id")) == str(task_focus_object.get("track_id"))
+    same_track = bool(
+        decision.get("object_track_id")
+        and task_focus_object.get("track_id")
+        and str(decision.get("object_track_id")) == str(task_focus_object.get("track_id"))
+    )
+    if action_type == "pick":
+        if str(decision.get("strategy_id") or "direct_pick_target") == "direct_pick_target" and not (
+            same_id or same_track
+        ):
+            return "direct_pick_must_use_current_plan_focus"
+        return None
+    if action_type != "nudge":
+        return None
     vertical_text = " ".join(str(decision.get(key) or "") for key in ("reason", "predicted_scene_benefit", "scene_problem")).lower()
     vertical_relation = any(token in vertical_text for token in ("上方", "堆叠", "on_top", "on top", "stack"))
     if (same_id or same_track) and vertical_relation:

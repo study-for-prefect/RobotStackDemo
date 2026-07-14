@@ -73,6 +73,9 @@ def color_mentions(text: str) -> List[str]:
 
 
 def object_label_contains(obj: Dict[str, Any], color: str) -> bool:
+    visual_color = str(obj.get("visual_color") or "").lower()
+    if visual_color:
+        return visual_color == str(color).lower()
     label = str(obj.get("label", "")).lower()
     aliases = next((values for name, values in COLOR_ALIASES if name == color), (color,))
     return any(str(alias).lower() in label for alias in aliases)
