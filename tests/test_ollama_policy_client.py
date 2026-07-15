@@ -23,19 +23,16 @@ SCHEMA = {
 class OllamaPolicyClientTests(unittest.TestCase):
     def test_official_thinking_alias_is_rejected_before_structured_backend_call(self):
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post") as post:
-            result = call_policy(_args(model="qwen3-vl:8b"), "action_proposal", _messages(), SCHEMA)
+            result = call_policy(_args(model="qwen3-vl:8b"), "edge_selection", _messages(), SCHEMA)
         self.assertEqual(result.error_type, "THINKING_MODEL_UNSUITABLE_FOR_STRUCTURED_POLICY")
         self.assertIn("qwen3-vl:8b-instruct", result.error_message)
         post.assert_not_called()
 
     def test_default_budgets_are_bounded_and_retry_grows_gradually(self):
-        self.assertEqual(POLICY_GENERATION_CONFIG["task_contract"]["num_predict"], 2048)
-        self.assertEqual(POLICY_GENERATION_CONFIG["grounded_task_plan"]["num_predict"], 4096)
-        self.assertEqual(POLICY_GENERATION_CONFIG["task_contract"]["num_ctx"], 12288)
-        self.assertEqual(POLICY_GENERATION_CONFIG["grounded_task_plan"]["num_ctx"], 12288)
-        self.assertEqual(POLICY_GENERATION_CONFIG["action_proposal"]["num_ctx"], 12288)
-        self.assertEqual(POLICY_GENERATION_CONFIG["action_proposal"]["num_predict"], 2048)
-        self.assertEqual(POLICY_GENERATION_CONFIG["action_replan"]["num_predict"], 2048)
+        self.assertEqual(POLICY_GENERATION_CONFIG["target_selection"]["num_predict"], 768)
+        self.assertEqual(POLICY_GENERATION_CONFIG["edge_selection"]["num_predict"], 768)
+        self.assertEqual(POLICY_GENERATION_CONFIG["target_selection"]["num_ctx"], 12288)
+        self.assertEqual(POLICY_GENERATION_CONFIG["edge_selection"]["num_ctx"], 12288)
         self.assertEqual(
             [_next_num_predict(value) for value in (2048, 4096, 6144, 8192)],
             [4096, 6144, 8192, 12288],
@@ -44,34 +41,28 @@ class OllamaPolicyClientTests(unittest.TestCase):
     def test_oversized_text_is_rejected_without_expanding_context_or_calling_backend(self):
         messages = [{"role": "user", "content": "x" * 100000}]
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post") as post:
-            result = call_policy(_args(), "action_proposal", messages, SCHEMA)
+            result = call_policy(_args(), "edge_selection", messages, SCHEMA)
         self.assertEqual(result.error_type, "INPUT_CONTEXT_BUDGET_EXCEEDED")
         post.assert_not_called()
 
     def test_thinking_and_valid_content_are_both_preserved(self):
         response = _response(_envelope(thinking="deep", content='{"ok": true}'))
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response):
-            result = call_policy(_args(), "task_contract", _messages(), SCHEMA)
+            result = call_policy(_args(), "target_selection", _messages(), SCHEMA)
         self.assertEqual(result.thinking, "deep")
         self.assertEqual(result.parsed_decision, {"ok": True})
 
     def test_auto_thinking_is_disabled_for_bounded_structured_generation(self):
         response = _response(_envelope(content='{"ok": true}', include_thinking=False))
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response) as post:
-            result = call_policy(_args(), "grounded_task_plan", _messages(), SCHEMA)
+            result = call_policy(_args(), "edge_selection", _messages(), SCHEMA)
         self.assertEqual(result.parsed_decision, {"ok": True})
         self.assertFalse(post.call_args.kwargs["json"]["think"])
-
-    def test_explicit_thinking_remains_available_for_action_generation(self):
-        response = _response(_envelope(thinking="short", content='{"ok": true}'))
-        with patch("robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response) as post:
-            call_policy(_args(vlm_think_mode="on"), "action_proposal", _messages(), SCHEMA)
-        self.assertTrue(post.call_args.kwargs["json"]["think"])
 
     def test_cpu_diagnostic_mode_is_forwarded_to_ollama(self):
         response = _response(_envelope(content='{"ok": true}', include_thinking=False))
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response) as post:
-            call_policy(_args(vlm_num_gpu=0), "action_proposal", _messages(), SCHEMA)
+            call_policy(_args(vlm_num_gpu=0), "edge_selection", _messages(), SCHEMA)
         self.assertEqual(post.call_args.kwargs["json"]["options"]["num_gpu"], 0)
 
     def test_empty_content_after_thinking_uses_finalizer(self):
@@ -80,7 +71,7 @@ class OllamaPolicyClientTests(unittest.TestCase):
             _response(_envelope(content='{"ok": true}')),
         ]
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post", side_effect=responses) as post:
-            result = call_policy(_args(), "task_contract", _messages(), SCHEMA)
+            result = call_policy(_args(), "target_selection", _messages(), SCHEMA)
         self.assertEqual(result.generation_status, "parsed_after_finalization")
         self.assertEqual(post.call_count, 2)
         self.assertFalse(post.call_args_list[1].kwargs["json"]["think"])
@@ -91,7 +82,7 @@ class OllamaPolicyClientTests(unittest.TestCase):
             _response(_envelope(thinking="done", content='{"ok": true}')),
         ]
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post", side_effect=responses) as post:
-            result = call_policy(_args(), "task_contract", _messages(), SCHEMA)
+            result = call_policy(_args(), "target_selection", _messages(), SCHEMA)
         first = post.call_args_list[0].kwargs["json"]["options"]["num_predict"]
         second = post.call_args_list[1].kwargs["json"]["options"]["num_predict"]
         self.assertEqual(result.parsed_decision, {"ok": True})
@@ -102,7 +93,7 @@ class OllamaPolicyClientTests(unittest.TestCase):
             "robot_scene_pipeline.ollama_policy_client.requests.post",
             side_effect=[_response(_envelope())] * 3,
         ):
-            result = call_policy(_args(), "action_proposal", _messages(), SCHEMA)
+            result = call_policy(_args(), "edge_selection", _messages(), SCHEMA)
         self.assertIsNone(result.parsed_decision)
         self.assertEqual(result.error_type, "EMPTY_MODEL_MESSAGE")
 
@@ -110,14 +101,14 @@ class OllamaPolicyClientTests(unittest.TestCase):
         response = _response(_envelope(content='{"ok": true}', include_thinking=False))
         args = _args(model="qwen2.5vl:7b-q4_K_M")
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response) as post:
-            result = call_policy(args, "task_contract", _messages(), SCHEMA)
+            result = call_policy(args, "target_selection", _messages(), SCHEMA)
         self.assertEqual(result.parsed_decision, {"ok": True})
         self.assertNotIn("think", post.call_args.kwargs["json"])
 
     def test_http_500_preserves_body_and_fails_backend(self):
         response = _response({}, status=500, text="ollama crashed")
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response):
-            result = call_policy(_args(), "task_contract", _messages(), SCHEMA)
+            result = call_policy(_args(), "target_selection", _messages(), SCHEMA)
         self.assertEqual(result.error_type, "HTTP_ERROR")
         self.assertEqual(result.raw_response, "ollama crashed")
 
@@ -126,7 +117,7 @@ class OllamaPolicyClientTests(unittest.TestCase):
             "robot_scene_pipeline.ollama_policy_client.requests.post",
             side_effect=requests.Timeout("read timeout"),
         ):
-            result = call_policy(_args(), "task_contract", _messages(), SCHEMA)
+            result = call_policy(_args(), "target_selection", _messages(), SCHEMA)
         self.assertEqual(result.error_type, "REQUEST_TIMEOUT")
         self.assertIsNone(result.parsed_decision)
 
@@ -138,7 +129,7 @@ class OllamaPolicyClientTests(unittest.TestCase):
             _response(_envelope()),
         ]
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post", side_effect=responses):
-            result = call_policy(args, "task_contract", _messages(), SCHEMA)
+            result = call_policy(args, "target_selection", _messages(), SCHEMA)
         self.assertEqual(result.error_type, "FINALIZATION_FAILED")
         self.assertIsNone(result.parsed_decision)
 
@@ -149,32 +140,30 @@ class OllamaPolicyClientTests(unittest.TestCase):
             _response(_envelope(content='{"ok": true}')),
         ]
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post", side_effect=responses) as post:
-            result = call_policy(args, "task_contract", _messages(), SCHEMA)
+            result = call_policy(args, "target_selection", _messages(), SCHEMA)
         self.assertEqual(result.parsed_decision, {"ok": True})
         self.assertIn("think", post.call_args_list[0].kwargs["json"])
         self.assertNotIn("think", post.call_args_list[1].kwargs["json"])
 
-    def test_unsupported_assistant_thinking_replay_uses_internal_context(self):
+    def test_format_repair_is_a_fresh_request_without_assistant_history(self):
         args = _args(vlm_max_backend_retries=1)
         responses = [
-            _response(_envelope(thinking="finished reasoning", content="")),
-            _response({}, status=400, text="unsupported unknown assistant thinking field"),
+            _response(_envelope(content="not json")),
             _response(_envelope(content='{"ok": true}')),
         ]
         with patch("robot_scene_pipeline.ollama_policy_client.requests.post", side_effect=responses) as post:
-            result = call_policy(args, "task_contract", _messages(), SCHEMA)
+            result = call_policy(args, "target_selection", _messages(), SCHEMA)
         second_messages = post.call_args_list[1].kwargs["json"]["messages"]
-        third_messages = post.call_args_list[2].kwargs["json"]["messages"]
         self.assertEqual(result.parsed_decision, {"ok": True})
-        self.assertTrue(any(item.get("role") == "assistant" and "thinking" in item for item in second_messages))
-        self.assertFalse(any(item.get("role") == "assistant" and "thinking" in item for item in third_messages))
-        self.assertTrue(any("内部推理上下文" in item.get("content", "") for item in third_messages))
+        self.assertEqual([item.get("role") for item in second_messages], ["system", "user"])
+        self.assertFalse(any(item.get("role") == "assistant" for item in second_messages))
+        self.assertNotIn("images", second_messages[1])
 
     def test_diagnostics_files_include_thinking_content_and_token_fields(self):
         with tempfile.TemporaryDirectory() as output_dir:
             response = _response(_envelope(thinking="t", content='{"ok": true}'))
             with patch("robot_scene_pipeline.ollama_policy_client.requests.post", return_value=response):
-                call_policy(_args(output_dir=output_dir), "task_contract", _messages(), SCHEMA, artifact_dir=output_dir)
+                call_policy(_args(output_dir=output_dir), "target_selection", _messages(), SCHEMA, artifact_dir=output_dir)
             call_dirs = os.listdir(os.path.join(output_dir, "ollama_calls"))
             call_dir = os.path.join(output_dir, "ollama_calls", call_dirs[0])
             with open(os.path.join(call_dir, "ollama_diagnostics.json"), encoding="utf-8") as handle:

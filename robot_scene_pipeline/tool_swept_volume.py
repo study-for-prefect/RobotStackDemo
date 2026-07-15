@@ -177,9 +177,9 @@ def _controlled_contact_allowed(
     size = obj.get("dimensions_m") or obj.get("size_m") or []
     footprint_limit = 0.5 * min(float(value) for value in size[:2]) if len(size) >= 2 else 0.0
     loose_chain_contact = bool(config.get("allow_loose_chain_contact", False))
-    entry_side_clear = envelope.get("stage") not in {
-        "approach_to_contact", "contact_pose",
-    }
+    # Loose neighbouring-object contact is legal only during horizontal
+    # pushing.  It must never excuse descent, initial contact, or retreat.
+    entry_side_clear = envelope.get("stage") == "horizontal_push"
     checks = {
         "enabled": bool(config.get("enabled", True)),
         "loose_unprotected_object": (
@@ -200,9 +200,7 @@ def _controlled_contact_allowed(
             or obj.get("id") in contacted_ids
             or len(contacted_ids) < int(config.get("max_contacted_objects", 2))
         ),
-        "withdrawal_clear": (
-            loose_chain_contact or envelope.get("stage") != "retreat"
-        ),
+        "withdrawal_clear": envelope.get("stage") != "retreat",
         # A side push must descend through an empty contact-side column.  Loose
         # chain contact is permitted only once horizontal pushing has begun;
         # it must never justify descending on top of a neighbouring block.

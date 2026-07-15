@@ -11,6 +11,14 @@ import numpy as np
 SUPPORTED_VISUAL_COLORS = ("red", "green", "blue", "yellow")
 
 
+def object_label_contains(obj: Dict[str, Any], color: str) -> bool:
+    """Match authoritative visual color before falling back to label text."""
+    visual_color = str(obj.get("visual_color") or "").lower()
+    if visual_color:
+        return visual_color == str(color).lower()
+    return str(color).lower() in str(obj.get("label") or "").lower()
+
+
 def _color_for_hue(hue: np.ndarray) -> np.ndarray:
     """Map OpenCV hue values to supported colors; -1 means unsupported."""
     result = np.full(hue.shape, -1, dtype=np.int8)

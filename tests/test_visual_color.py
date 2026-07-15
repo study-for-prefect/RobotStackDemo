@@ -3,9 +3,8 @@ import unittest
 import cv2
 import numpy as np
 
-from robot_scene_pipeline.llm_stack_blocks import object_label_contains
-from robot_scene_pipeline.organize_scope import color_value_from_object, organize_scope_objects
-from robot_scene_pipeline.visual_color import attach_visual_colors
+from robot_scene_pipeline.object_semantics import infer_object_color
+from robot_scene_pipeline.visual_color import attach_visual_colors, object_label_contains
 
 
 class VisualColorTests(unittest.TestCase):
@@ -18,18 +17,22 @@ class VisualColorTests(unittest.TestCase):
             "yellow": (0, 190, 220),
         }
         detections = []
-        for index, (name, bgr) in enumerate(colors.items()):
+        for index, (_, bgr) in enumerate(colors.items()):
             left, right = index * 100 + 10, index * 100 + 90
             cv2.rectangle(image, (left, 10), (right, 90), bgr, -1)
             mask = np.zeros(image.shape[:2], dtype=bool)
             mask[10:91, left:right + 1] = True
             detections.append({
-                "id": index, "label": "uncolored shape", "bbox": [left, 10, right, 90],
+                "id": index,
+                "label": "uncolored shape",
+                "bbox": [left, 10, right, 90],
                 "_mask_bool": mask,
             })
         attach_visual_colors(detections, image)
         self.assertEqual([item.get("visual_color") for item in detections], list(colors))
-        self.assertTrue(all(item.get("visual_color_source") == "instance_mask_hsv" for item in detections))
+        self.assertTrue(
+            all(item.get("visual_color_source") == "instance_mask_hsv" for item in detections)
+        )
 
     def test_bbox_fallback_and_gray_rejection(self):
         image = np.full((80, 160, 3), 128, dtype=np.uint8)
@@ -46,53 +49,13 @@ class VisualColorTests(unittest.TestCase):
         obj = {"label": "square blue", "visual_color": "red"}
         self.assertTrue(object_label_contains(obj, "red"))
         self.assertFalse(object_label_contains(obj, "blue"))
-        self.assertEqual(color_value_from_object(obj), "red")
+        self.assertEqual(infer_object_color(obj), "red")
 
-    def test_organize_scope_accepts_shape_only_label_with_visual_color(self):
-        obj = {
-            "id": 7, "label": "semi square", "visual_color": "red", "confidence": 0.9,
-            "bbox_xyxy_px": [20, 20, 80, 80],
-            "geometry_center_m": [0.4, 0.1, 0.02], "dimensions_m": [0.04, 0.04, 0.04],
-        }
-        state = {
-            "objects": [obj], "camera_profile": {"color_width": 640, "color_height": 480},
-            "workspace_bounds": {"xmin": 0.2, "xmax": 0.65, "ymin": -0.1, "ymax": 0.4},
-        }
-        self.assertEqual([item["id"] for item in organize_scope_objects(state)], [7])
-
-    def test_edge_detection_is_kept_when_rgbd_geometry_is_usable(self):
-        obj = {
-            "id": 8, "label": "square yellow", "visual_color": "yellow",
-            "confidence": 0.9, "bbox_xyxy_px": [0, 20, 42, 78],
-            "geometry_center_m": [0.445, 0.335, -0.001],
-            "dimensions_m": [0.023, 0.020, 0.025],
-            "pointcloud_geometry_valid": True,
-            "depth_geometry_observable": True,
-        }
-        state = {
-            "objects": [obj], "camera_profile": {"color_width": 640, "color_height": 480},
-            "workspace_bounds": {
-                "xmin": 0.235, "xmax": 0.65, "ymin": -0.1, "ymax": 0.4,
-            },
-        }
-        self.assertEqual([item["id"] for item in organize_scope_objects(state)], [8])
-
-    def test_edge_detection_is_rejected_when_rgbd_geometry_is_invalid(self):
-        obj = {
-            "id": 9, "label": "square yellow", "visual_color": "yellow",
-            "confidence": 0.9, "bbox_xyxy_px": [0, 20, 42, 78],
-            "geometry_center_m": [0.445, 0.335, -0.001],
-            "dimensions_m": [0.023, 0.020, 0.025],
-            "pointcloud_geometry_valid": False,
-            "depth_geometry_observable": True,
-        }
-        state = {
-            "objects": [obj], "camera_profile": {"color_width": 640, "color_height": 480},
-            "workspace_bounds": {
-                "xmin": 0.235, "xmax": 0.65, "ymin": -0.1, "ymax": 0.4,
-            },
-        }
-        self.assertEqual(organize_scope_objects(state), [])
+    def test_shape_only_label_uses_measured_visual_color(self):
+        self.assertEqual(
+            infer_object_color({"label": "semi square", "visual_color": "yellow"}),
+            "yellow",
+        )
 
 
 if __name__ == "__main__":

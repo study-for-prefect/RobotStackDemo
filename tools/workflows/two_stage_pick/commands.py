@@ -34,7 +34,7 @@ def tf_lookup_command(args):
     ]
 
 
-def snapshot_command(args, output_dir, run_llm=False):
+def snapshot_command(args, output_dir):
     command = [
         "conda",
         "run",
@@ -66,34 +66,6 @@ def snapshot_command(args, output_dir, run_llm=False):
         "--detector-device",
         args.detector_device,
     ]
-    if run_llm:
-        command.extend(
-            [
-                "--model",
-                args.model,
-                "--instruction",
-                args.instruction,
-                "--compile-execution-plan",
-                "--place-offset-m",
-                str(args.place_offset_m),
-                "--approach-height-m",
-                str(args.approach_height_m),
-                "--pick-target-lift-m",
-                str(args.pick_target_lift_m),
-                "--place-target-lift-m",
-                str(args.place_target_lift_m),
-                "--left-right-axis",
-                args.left_right_axis,
-                "--left-direction-sign",
-                args.left_direction_sign,
-                "--front-back-axis",
-                args.front_back_axis,
-                "--front-direction-sign",
-                args.front_direction_sign,
-            ]
-        )
-    else:
-        command.append("--skip-llm")
     return command
 
 
@@ -219,12 +191,12 @@ def capture_second_snapshot_and_plan(args, second_private, second_plan):
     return False
 
 
-def capture_first_snapshot_until_target_visible(args, first_private, run_llm=False):
+def capture_first_snapshot_until_target_visible(args, first_private):
     attempts = max(0, int(args.first_snapshot_retry_count)) + 1
     for attempt in range(attempts):
         run(tf_lookup_command(args), args.execute)
-        run(snapshot_command(args, args.first_dir, run_llm=run_llm), args.execute)
-        if run_llm or not args.execute or target_visible(args, first_private):
+        run(snapshot_command(args, args.first_dir), args.execute)
+        if not args.execute or target_visible(args, first_private):
             return True
         print_missing_target("First snapshot", args, first_private)
         if attempt + 1 < attempts and float(args.first_snapshot_stable_wait_s) > 0.0:

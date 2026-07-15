@@ -10,12 +10,6 @@ def parse_args():
     parser.add_argument("--object-label", default="rectangle")
     parser.add_argument("--object-id", type=int, default=None)
     parser.add_argument("--nearest-base-xy", nargs=2, type=float, default=None)
-    parser.add_argument(
-        "--instruction",
-        default="",
-        help="Run LLM reasoning on the first snapshot and use its first pick target. Empty keeps deterministic target mode.",
-    )
-    parser.add_argument("--model", default="qwen2.5vl:7b-q4_K_M")
     parser.add_argument("--first-dir", default="/tmp/current_scene")
     parser.add_argument("--second-dir", default="/tmp/current_scene_second")
     parser.add_argument("--tf-json", default=DEFAULT_TF_JSON)
@@ -31,12 +25,6 @@ def parse_args():
     parser.add_argument("--detector-device", default="cuda:0")
     parser.add_argument("--approach-height-m", type=float, default=0.05)
     parser.add_argument("--pick-target-lift-m", type=float, default=0.010)
-    parser.add_argument("--place-target-lift-m", type=float, default=0.03)
-    parser.add_argument("--place-offset-m", type=float, default=0.08)
-    parser.add_argument("--left-right-axis", choices=("x", "y"), default="y")
-    parser.add_argument("--left-direction-sign", choices=("positive", "negative"), default="positive")
-    parser.add_argument("--front-back-axis", choices=("x", "y"), default="x")
-    parser.add_argument("--front-direction-sign", choices=("positive", "negative"), default="positive")
     parser.add_argument("--tcp-offset-tool", nargs=3, type=float, default=[0.0, 0.0, 0.15])
     parser.add_argument("--grasp-axis", choices=("long", "short"), default="long")
     parser.add_argument("--yaw-offset-deg", type=float, default=0.0)
@@ -91,13 +79,6 @@ def parse_args():
         dest="release_after_pick",
         default=True,
         help="Keep holding the object after pick instead of putting it back down and opening.",
-    )
-    parser.add_argument(
-        "--no-execute-remaining-plan",
-        action="store_false",
-        dest="execute_remaining_plan",
-        default=True,
-        help="In LLM mode, stop while holding the object instead of executing steps after the selected pick.",
     )
     parser.add_argument("--gripper-port", default="/dev/ttyUSB0")
     parser.add_argument("--post-close-wait", type=float, default=1.0)

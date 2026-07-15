@@ -1,0 +1,80 @@
+{
+  "schema_version": "stack_demo_planner_v1",
+  "coordinate_frame": "base_link",
+  "gripper": {
+    "open_outer_width_m": 0.112,
+    "open_inner_width_m": 0.049,
+    "finger_length_m": 0.120,
+    "fingertip_width_m": 0.025,
+    "fingertip_thickness_m": 0.010,
+    "upper_finger_width_m": 0.062,
+    "upper_finger_height_m": 0.070,
+    "palm_width_m": 0.112,
+    "palm_depth_m": 0.040,
+    "palm_height_m": 0.150,
+    "tcp_offset_tool_m": [0.0, 0.0, 0.150]
+  },
+  "safety": {
+    "object_clearance_m": 0.006,
+    "workspace_inset_m": 0.010,
+    "grasp_center_tolerance_m": 0.006,
+    "minimum_contact_length_m": 0.008,
+    "release_height_extra_m": 0.010,
+    "approach_height_m": 0.050,
+    "observation_height_m": 0.100,
+    "minimum_progress_translation_m": 0.015
+  },
+  "grasp": {
+    "yaw_scan_step_deg": 5.0,
+    "approach_envelope_length_m": 0.020,
+    "minimum_continuous_safe_yaw_span_deg": 10.0,
+    "interval_boundary_inset_deg": 2.0,
+    "maximum_edges_per_target": 3
+  },
+  "clearing": {
+    "push_distances_m": [0.030, 0.040, 0.050],
+    "push_directions_base": [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]],
+    "safe_wrist_yaws_deg": [0.0, 90.0],
+    "prepush_clearance_m": 0.015,
+    "push_contact_z_offset_m": 0.015,
+    "minimum_expected_clearance_gain_m": 0.003
+  },
+  "motion": {
+    "translation_velocity": 0.08,
+    "translation_acceleration": 0.08,
+    "high_clearance_rotation_velocity": 0.24,
+    "high_clearance_rotation_acceleration": 0.24,
+    "safe_pre_rotate_height_m": 0.120,
+    "near_object_velocity": 0.03,
+    "near_object_acceleration": 0.03
+  },
+  "policy": {
+    "model": "qwen3-vl:8b-instruct",
+    "temperature": 0.0,
+    "think": false,
+    "stream": false,
+    "num_ctx": 12288,
+    "num_predict": 768,
+    "recent_failure_limit": 5
+  },
+  "organize": {
+    "colors": ["red", "green", "blue", "yellow"],
+    "minimum_spacing_m": 0.015,
+    "alignment_tolerance_m": 0.012,
+    "observation_region_tolerance_m": 0.003
+  },
+  "house": {
+    "support_classes": ["square"],
+    "roof_classes": ["concave_rectangle", "rectangle"],
+    "triangle_classes": ["triangle"],
+    "origin_center_base_m": [0.360, 0.180, 0.020],
+    "left_right_spacing_m": 0.100,
+    "support_height_tolerance_m": 0.008,
+    "center_tolerance_m": 0.010,
+    "minimum_support_margin_m": 0.006,
+    "minimum_support_overlap_ratio": 0.20,
+    "orientation_tolerance_deg": 8.0,
+    "required_roof_groove_face_state": "opening_down",
+    "required_triangle_apex_direction": "up"
+  }
+}

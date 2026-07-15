@@ -12,8 +12,8 @@
 | `data/` | RealSense 数据集采集 |
 | `diagnostics/` | 静态场景和感知稳定性诊断 |
 | `monitoring/` | 实时 YOLO/深度监控 |
-| `planning/` | 场景决策到机器人执行计划 |
+| `planning/` | 确定性几何抓取计划等离线/底层计划工具 |
 | `robot/` | TF 查询、MoveIt 执行、夹爪运行时 |
-| `workflows/` | 两阶段抓取、闭环堆叠等完整流程 |
+| `workflows/` | 两阶段抓取、颜色整理和六角色房屋等完整流程 |
 
 从项目根目录执行脚本，以保证相对配置和模型路径正确。

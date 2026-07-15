@@ -1,345 +1,237 @@
 # Stack Demo Workflow
 
-`tools/workflows/stack_demo_pipeline.py` remains the single command-line entry.
-Its default semantic workflow supports `build_house` and `organize_blocks`.
-`--legacy-linear-stack` retains the previous `stack_blocks` compatibility path.
+`tools/workflows/stack_demo_pipeline.py` 是唯一主入口，最终任务只支持
+`organize_blocks` 和 `build_house`。旧 `stack_blocks`、通用 task contract、grounded task
+plan 和开放式 VLM 动作入口已删除，不存在新旧 planner 并行运行。
 
-The semantic workflow separates immutable task meaning from current detections:
+## 每轮数据流
 
 ```text
-instruction -> task_contract -> grounded_task_plan(scene_revision)
--> task_goal_progress -> one VLM action -> validation/MoveIt -> reobserve
+最新 D435i RGB-D + 实时 base_link TF
+  -> ClutterSceneState
+  -> 任务层给出当前合法 track/role
+  -> ClutterExtractionPlanner 生成物理可行首步边
+  -> QwenTargetSelector 从 TargetOption ID 中选目标
+  -> QwenEdgeSelector 从 PhysicalActionEdge ID 中选边
+  -> FinalSafetyGate 对原边重新验证
+  -> dry-run / MoveIt plan-only / 执行至多一条边
+  -> fresh observation
+  -> 验证真实结果并重新构建状态
 ```
 
-`task_contract` never contains a detection `object_id`. `grounded_task_plan`
-contains temporary current-scene bindings, and each action must echo its
-`scene_revision`; ID changes and ordinary motion cause reassociation/replanning,
-not task failure.
+代码不会预测动作后的多步场景。抓取、放置或推动后都用真实新观测生成下一轮候选。
 
-`build_house` is fixed to `two_column_two_level_roof_triangle`: four distinct
-square supports form two two-level columns, a concave rectangle (preferred)
-or rectangle bridges the upper supports, and a triangle is centered on the
-roof. The six legal role names are fixed; the old three-block house is invalid.
-`organize_blocks`
-uses the configured grouping rule, non-overlapping workspace regions, full
-oriented footprints, boundary spacing, and separate rows/columns/grid
-predicates. Required groups cannot complete while empty. Completion is
-computed from a new observation, never from VLM text.
+## 模块职责
 
-The current development objective starts from arbitrary scattered blocks, not
-from an already separated demonstration layout. For both organization and
-house building, the runtime must keep making progress when the first selected
-object is blocked: grasp another progress object when possible, grasp a movable
-blocker next, and use a geometry-checked 3--5 cm side push only when no robust
-grasp is available. A failed selection is a replanning/clearance condition, not
-permission to terminate an incomplete task.
-
-## Current organize recovery and safety gates
-
-The semantic `organize_blocks` path intentionally differs from the legacy
-linear-stack VLM-only action discovery path:
-
-- code scans all out-of-row blocks for physical grasp yaw feasibility;
-- a robust real grasp requires at least 10 degrees of continuous collision-free
-  yaw and selects an angle inside that interval, not at a narrow boundary;
-- when at least one robust grasp exists, a VLM choice of a blocked object,
-  `nudge`, `reobserve`, or `stop` is rebound to a robust grasp candidate;
-- color row regions are committed after their first valid construction and do
-  not drift after every observation;
-- VLM source-copy/no-op targets are replaced by a validated free slot in the
-  selected object's factual color row; motions below 15 mm do not count as
-  organization progress;
-- place validation checks both the moved block footprint and the open GF225
-  fingers against every current object, including blocks placed in earlier
-  rows. `target_pose_gripper_clearance_blocked` triggers another same-region
-  target search;
-- post-place row membership allows 3 mm of bounded observation footprint jitter,
-  while commanded target validation remains strict;
-- if all current grasps are blocked, code performs a bounded search over loose
-  objects, four base-frame push directions, and 0/90-degree wrist yaw. Each
-  candidate still passes semantic, workspace, segmented-tool and MoveIt
-  plan-only validation before execution.
-
-This bounded recovery exists to prevent repeated ineffective VLM actions; it
-does not bypass safety checks or generate unconstrained robot commands. For
-`build_house`, a graspable blocker is moved to a safe temporary area; completed
-supports/roof remain dynamically protected. Finish the organize real-robot
-acceptance before changing the house workflow.
-
-Every executable action carries `selected_object_id` and never VLM-emitted
-`object_id`. A house `pick_place`/`pick_reorient_place` also carries `role_id`; an organize action
-carries `group_id` and `target_region_id`. Code validates task semantics,
-grounding, workspace and the dynamically rebuilt protected structure. One
-adapter then copies the selected id to the legacy field immediately before
-the existing physical validator or execution handoff.
-
-After every observation, all distinct legal house role combinations are
-scored. Current satisfied roles become protected ids and footprint regions;
-changed detection ids replace old protection automatically, while a lost
-predicate removes protection and requests repair. Large movement and
-same-class reassignment are scene events rather than automatic task failure.
-
-The VLM receives the original RGB image, numbered overlay, candidate RGB/depth
-crops, bbox, dimensions, point-cloud height features, PCA axes, contour angles,
-and an explicit `house_frame`. Image-up is never treated as a fixed base-link
-direction. VLM output is limited to semantic orientation observations; code
-fuses them with depth/contour evidence and computes target quaternions.
-
-A wrong-face concave roof or triangle uses `pick_reorient_place`. The planner
-lifts first, derives the relative quaternion from current pose, target pose and
-object-to-tool grasp transform, then SLERPs at safe height. Pure yaw is rejected
-for a required flip. The angle is not fixed to 45 degrees. Every waypoint is
-MoveIt plan-only checked before execution, with joint-delta limits applied to
-the sequential motions. Placement is followed by a fresh RGB-D observation and
-orientation fusion. Triangle apex validation analyzes all three inner angles;
-the right-angle vertex is not assumed to be the apex.
-
-Ollama `format`, prompt `output_schema`, and local validators share the schemas
-in `robot_scene_pipeline/task_schemas.py`.
-
-Real execution is rejected before robot initialization whenever an offline,
-mock, or recorded perception source is enabled. Dry-run remains supported.
-
-Task logs include `task_contract_{input,raw,validated}.json`,
-`grounded_task_plan_{input,raw,validated}.json`,
-`task_goal_progress_revision_XX.json`, `role_assignment_candidates.json`,
-`selected_role_assignment.json`, `dynamic_protection.json`, and
-`task_action_semantic_validation.json`.
-
-## Responsibility Split
-
-| Module | Responsibility |
+| 模块 | 职责 |
 | --- | --- |
-| `arguments.py` | Command-line options and defaults |
-| `task_workflow.py` | Default task-contract orchestration and reobservation loop |
-| `task_execution.py` | VLM `pick_place` plan-only validation and execution handoff |
-| `robot_scene_pipeline/vlm_task_policy.py` | Task contract, temporary binding, and action VLM inputs |
-| `robot_scene_pipeline/task_semantic_validation.py` | Contract and current-scene binding validation |
-| `robot_scene_pipeline/task_goal_evaluator.py` | House/organization geometry predicate progress |
-| `robot_scene_pipeline/task_geometry.py` | Shared oriented-footprint predicates |
-| `robot_scene_pipeline/grasp_yaw_search.py` | Robust continuous-yaw grasp and exact open-gripper checks |
-| `robot_scene_pipeline/vlm_perception_review.py` | VLM-assisted recovery of missed/low-confidence detector classes |
-| `robot_scene_pipeline/task_dynamic_protection.py` | Per-revision protected roles, ids, regions, and relations |
-| `robot_scene_pipeline/task_action_adapter.py` | The only selected-id to legacy-id compatibility handoff |
-| `robot_scene_pipeline/house_task_definition.py` | Canonical six-role house ontology and assembly dependencies |
-| `robot_scene_pipeline/task_schemas.py` | Shared Ollama/prompt/local JSON Schemas |
-| `robot_scene_pipeline/orientation_assets.py` | Full-resolution roof/triangle RGB and depth crops |
-| `robot_scene_pipeline/orientation_fusion.py` | House frame, concavity and triangle-apex evidence fusion |
-| `robot_scene_pipeline/reorientation_planner.py` | Safe-height quaternion SLERP reorientation planning |
-| `execution_safety.py` | Shared offline-source real-execution guard |
-| `commands.py` | External process commands and observation capture |
-| `scene.py` | Initial VLM stack decision, scene lookup, target reacquisition, stack estimation |
-| `push_flow.py` | Autonomous VLM action loop and post-decision dispatch |
-| `vlm_action.py` | VLM action-intent workflow glue and MoveIt preflight handoff |
-| `vlm_action_loop.py` | Same-scene VLM rejection feedback, duplicate detection, and bounded replanning |
-| `pick_preflight.py` | Plan-only MoveIt validation for a VLM-selected normal pick |
-| `robot_scene_pipeline/vlm_stack_policy.py` | Initial stack-order prompt, call, and validation |
-| `robot_scene_pipeline/vlm_action_policy.py` | Autonomous action prompt, parsing, and objective input construction |
-| `clearance_execution.py` | Validated nudge and pick-away execution helpers |
-| `pick.py` | Pick plans, motion command construction, dry-run scene simulation |
-| `placement.py` | Place-on-stack geometry and safety validation |
-| `app.py` | Top-level cycle orchestration and final success/failure output |
+| `app.py` | 配置、任务选择、生命周期、异常和输出目录 |
+| `arguments.py` | 当前 CLI；不暴露动作几何覆盖参数 |
+| `commands.py` | 调用已有感知、MoveIt 和 GF225 接口 |
+| `common/config.py` | 加载统一 planner、工作区配置 |
+| `common/scene_state.py` | revision-scoped 对象和持久 track 状态 |
+| `common/action_edges.py` | 固定动作枚举、不可变物理边和 fingerprint |
+| `common/action_validation.py` | 最终安全门 |
+| `common/action_execution.py` | 分阶段执行、fresh observation 和门控 |
+| `common/result_verification.py` | 抓取、放置、推动结果验证 |
+| `clutter/grasp_edges.py` | 0--180 度连续抓取 yaw 搜索 |
+| `clutter/edge_generation.py` | 直接抓取、局部清障、中转和任务放置边 |
+| `clutter/path_safety.py` | 张开夹爪、持物运输和推动分段扫掠 |
+| `clutter/target_options.py` | 仅从存在可行首步的目标构建 TargetOption |
+| `clutter/extraction_planner.py` | 两级选择和最终安全门共享编排 |
+| `policy/` | 无状态 Qwen client、严格 schema 和两个 selector |
+| `organize/` | 颜色区域、槽位、状态和完成谓词 |
+| `house/` | 六角色、姿态、结构、放置和完成谓词 |
 
-## VLM Decisions
+共享层负责如何安全取出物体，任务层负责哪些物体/角色合法、最终放哪里以及何时完成。
 
-Initial stack decision output:
+## 状态与身份规则
+
+`ClutterSceneState.coordinate_frame` 固定为 `base_link`。对象至少带 detector ID、持久
+`track_id`、revision-scoped `object_ref`、语义、三维中心/尺寸/yaw、邻居、边缘余量、阻挡侧、
+安全侧、完成/protected/可见状态。
+
+初始稳定观测建立 `expected_tracks`。后续单帧漏检只把 track 放入
+`missing_expected_tracks`，不会减少任务总数。detector ID 不跨帧使用；跨帧只能通过 track 和
+显式一对一重绑定。重绑定歧义时不生成可执行边。
+
+## 物理边生成
+
+动作类型只能是：
+
+```text
+pick_place              extract_then_place       extract_to_staging
+regrasp_for_orientation pick_away_blocker         nudge_blocker
+place_house_role        repair_structure          reobserve
+```
+
+每条边已经包含 grasp/approach/lift/place/release pose，或 push direction/distance/start/end、
+任务角色、预期效果、净空收益、风险、protected track、预检和失败 fingerprint。Qwen 看不到可
+修改参数的接口。
+
+抓取 yaw 默认以 5 度扫描 `[0, 180)`，不要求沿检测 yaw 或物体边。代码验证开口、有效双指
+接触、中心偏差、指尖、掌部、下降、抬升及 MoveIt。连续安全区间至少 10 度，并从区间内部
+取角，不使用贴边角。单点角接触或窄安全区间不会成为边。
+
+目标不可抓时，只分析真正占用其抓取区间或夹爪扫掠的直接阻挡物。清障枚举配置中的
+`±x/±y`、3/4/5 cm 和安全腕角，可生成抓走、推动或安全中转。预推从接触侧空闲位置下降；
+松散接触只允许水平推动阶段。无净空收益、进入目标颜色区、损坏 protected/已完成结构或
+MoveIt plan-only 失败的候选不会交给 Qwen。
+
+`place_pose` 是期望物体最终位姿。代码保存抓取时物体相对夹爪 yaw，并由它计算不可由 Qwen
+修改的释放夹爪 yaw；`release_pose` 使用配置的额外 10 mm 释放间隙。放置边在选择前验证
+张开 GF225 下降、掌部、持物运输、释放和退回路径。
+
+## Qwen 选择协议
+
+默认 `qwen3-vl:8b-instruct`、`temperature=0`、`think=false`、`stream=false`，上下文和输出
+预算有界。每次请求是一个新的短 system + user 请求，只带最新 RGB、只标短 ID 的 overlay、
+最新 revision/state、当前候选和有限失败。不会携带历史 assistant 回答、旧图片或依靠聊天
+记忆保存机器人状态。
+
+目标响应：
 
 ```json
 {
-  "full_stack_order": [1, 2, 3],
-  "object_bindings": [
-    {"object_id": 1, "observed_label": "square red", "geometry_center_base_m": [0.30, 0.18, 0.02]},
-    {"object_id": 2, "observed_label": "square green", "geometry_center_base_m": [0.36, 0.06, 0.02]},
-    {"object_id": 3, "observed_label": "square blue", "geometry_center_base_m": [0.40, 0.09, 0.02]}
-  ],
-  "structure_plan": {},
-  "reason": "...",
-  "confidence": 0.8
+  "selected_target_option_id": "target_...",
+  "reason_codes": ["directly_graspable", "low_clearance_cost"]
 }
 ```
 
-`full_stack_order` is the only authoritative order emitted by the VLM. Code
-derives `base_object_id = full_stack_order[0]` and
-`stack_order = full_stack_order[1:]`; conflicting legacy copies are ignored.
-Missing, repeated, unknown, or instruction-inconsistent labels produce
-structured feedback and another VLM request up to `--max-vlm-stack-attempts`.
-
-Per-step action output:
+边响应：
 
 ```json
 {
-  "scene_problem": "...",
-  "action_type": "pick|nudge|pick_away|reobserve|stop",
-  "object_id": 2,
-  "object_label": "square yellow",
-  "object_center_base_m": [0.30, 0.10, 0.02],
-  "target_object_id": 1,
-  "target_object_label": "square green",
-  "target_object_center_base_m": [0.30, 0.05, 0.02],
-  "contact_side": "-x",
-  "direction_base": [1.0, 0.0, 0.0],
-  "distance_m": 0.025,
-  "gripper_yaw_rad": 0.0,
-  "safe_place_center_base_m": [0.20, -0.10, 0.02],
-  "predicted_scene_benefit": "...",
-  "risk_assessment": "...",
-  "reason": "...",
-  "confidence": 0.8
+  "selected_candidate_id": "edge_...",
+  "backup_candidate_ids": ["edge_..."],
+  "reason_codes": ["direct_task_progress", "lowest_structure_risk"]
 }
 ```
 
-The VLM input uses the original snapshot, optional depth visualization and numbered overlay, bbox,
-base-link object centers, dimensions, object state, task goal, protected ids,
-workspace/frame conventions, scene revision, failure history, and scene memory. It does not include camera intrinsics, grasp feasibility,
-blocking-object conclusions, generated action candidates, candidate scores,
-recommended directions, or raw robot control commands.
+解析拒绝未知/重复/空/过期 ID、候选外 backup、`task_complete`、object ID 和任何动作参数。
+非法 JSON 只允许一次全新短请求进行格式修复。再次失败、Ollama 连接失败、超时或预算失败
+记录为 `policy_invalid_output`，当前周期 reobserve/结束，绝不由代码静默换目标或动作。
 
-`task_goal.current_plan_focus` is advisory context from the earlier VLM stack
-plan. Code does not require a pick to use that object. `target_object_id` is the
-task object the VLM predicts will benefit from the action; code checks that it
-exists but does not replace it with a code-selected target.
-Executable decisions must echo the exact detector label and base-link center
-for both ids. This grounding check rejects an id that points to a different
-color/instance than the VLM claims. Initial stack decisions use the same rule
-through `object_bindings`.
+单一目标或单一边会跳过相应模型调用，真实记录 `single_feasible_target_option` 或
+`single_feasible_edge`，不会伪装成 Qwen 选择。
 
-## Code Safety Gates
+## 抓取后重新观测门控
 
-Code validates VLM intent before any motion:
+执行器将抓取拆成接近、下降、闭合、抬升、fresh observation、验证。只有新观测支持同一
+track 明显抬升/位移，或在视图连续证据及可选夹爪辅助证据支持下离开原位置，才继续运输。
+夹爪状态不能单独证明成功；目标仅因末端相机视角变化而消失也不算成功。
 
-- object ids must exist in the current observation;
-- object ids must be unique inside the current snapshot before VLM action
-  validation; if duplicate ids are found before action planning, the workflow
-  writes `scene_state_unique_object_ids.json` and gives VLM the reassigned ids;
-- same-label objects must be selected by numbered id, bbox, and `base_link`
-  center, not by color/label alone;
-- base, locked, placed, protected, or `pushable=false` objects cannot be moved;
-- `nudge` contact side must oppose its base-link unit XY direction, distance
-  must be `0.01..0.05 m`, and gripper yaw must be supplied by the VLM;
-- `nudge` end and swept path must avoid protected structure;
-- the GF225 precheck uses yaw-oriented segmented OBBs: 25 mm tip below 25 mm,
-  62 mm upper fingers from 25–70 mm, and 112 mm body from 70–150 mm; these
-  installed heights are calibration defaults and must be measured on hardware;
-- open-gripper grasp checks use two solid fingers and a non-solid 49 mm gap;
-- real grasps require a continuous feasible yaw interval of at least 10 degrees;
-- organize placement checks the open gripper against previously placed and
-  scattered blocks, not only the moved block footprint;
-- table/support/protected contact is strict; small loose-object contact may pass
-  only within intrusion, displacement, object-count, workspace, topple, and
-  withdrawal limits, and always requires reobservation;
-- pushed-object contact with an ordinary movable object is recorded as a
-  recoverable contact and does not by itself reject the proposal;
-- `pick_away` must have a VLM-proposed `safe_place_center_base_m` that avoids
-  visible objects, protected structure, future stack regions, and table bounds;
-- hardware clearing actions must pass existing MoveIt preflight before motion.
-- a normal VLM-selected `pick` must pass a MoveIt plan-only preflight before
-  real execution;
+失败会写 `grasp_failed`、yaw/pose/fingerprint，并跳过运输和放置。成功后才运输；放置后再次
+观测并运行任务谓词。推动结果也以实际方向位移、净空收益和 protected 稳定性验证。
 
-Invalid JSON, unknown ids, unsafe intent, tool collision, or MoveIt failure is
-returned to the VLM as structured JSON. The VLM must change at least one
-action field. Actions are normalized to track-based `ActionFingerprint` values
-before geometry: direction, distance (5 mm), and yaw (5 degrees) are bucketed,
-while prose and confidence are ignored. Failed fingerprints are hard-blacklisted.
-Replanning escalates from changing the physical action, to forbidding twice-failed
-action types, to requiring a new strategy. Safe-stop requires multiple unique
-failed fingerprints and strategies; otherwise the control result is `reobserve`.
-A fresh RGB-D observation increments the revision, invalidates old frame-local
-references, and rebinds stable tracks one-to-one.
-The legacy linear-stack workflow never invents geometry candidates. If its VLM
-supplied optional `alternative_actions`, anti-loop fallback may select the
-highest-confidence untried candidate that still passes reference and basic
-semantic checks. The semantic organize workflow is different: it performs the
-bounded, fully validated grasp/row-slot/clearance recovery described above so
-an incomplete organization task does not terminate after a poor model choice.
-Initial stack output is still not repaired or overridden by a color-rule parser.
+末端 D435i 可能看不到抬升后夹爪内部，因此当前实现采用保守多证据判断；证据不足时安全
+失败。这不等同于已经具备夹爪内物体检测。
 
-## Logs
+## OrganizePlanner
 
-Initial stage:
+整理状态独立维护 expected/visible/missing/completed/unresolved track、颜色区域、安全槽、占用、
+当前结果和最近失败。所有未完成合法对象参与目标比较，Qwen 能看到邻居数、最近邻、拥挤侧、
+安全 yaw、清障成本、释放其他物体的收益、任务收益、风险和失败次数。
+
+颜色区域、槽位、占用和完成均由代码计算。最终 yaw 不要求精确。只有最新观测确认所有预期
+track 在正确颜色区域、无缺失、无非法重叠且杂乱区无未完成对象时才能完成；无边不等于完成。
+
+## HousePlanner
+
+角色固定为：
 
 ```text
-initial_order_vlm/vlm_stack_decision_input.json
-initial_order_vlm/vlm_stack_decision_raw.json
-initial_order_vlm/vlm_stack_decision_validated.json
-initial_order_vlm/vlm_stack_attempt_XX_{input,output,validation}.json
-initial_order_vlm/vlm_stack_decision_history.json
+left_support_lower   right_support_lower
+left_support_upper   right_support_upper
+roof                 triangle_top
 ```
 
-Each action step:
+每轮先按代码前置条件产生合法的 `track × role` 组合，所以左右顺序不写死。上支撑依赖同侧
+稳定下支撑；roof 依赖两个稳定上支撑、合法间距/高差；triangle 依赖已验证 roof。完成结构
+自动成为 protected。
+
+凹槽屋顶显式维护 groove face、face up、长轴、抓取姿态、覆盖、中心偏差、两侧余量和稳定性；
+三角顶维护 apex/base direction、face、目标 yaw、底边接触、质心投影、支撑余量和 roof 相对
+位姿。代码用最新观测验证结构。姿态不满足时走 staging -> fresh observation -> regrasp，绝不
+假定 wrist yaw 能翻面。只有确定性感知给出可靠姿态证据时才生成最终放置边。
+
+## 最终安全门
+
+Qwen 选中后重新检查原 edge：revision/object ref、track/rebinding、任务前置条件、工作区、
+GF225 指尖/掌部、下降/抬升/运输/放置/释放/退回、推动预接近/水平/终点、protected/房屋、
+MoveIt plan-only 和 forbidden fingerprint。失败不会原地改 yaw、方向、距离或对象。
+
+相反推动方向会得到不同 fingerprint。fingerprint 使用持久 track 和完整签名，不因普通
+revision 变化而遗忘。
+
+## 日志
+
+每个 `cycle_NNN_revision_R/` 写：
 
 ```text
-cycle_*/vlm_action_decision_input.json
-cycle_*/vlm_action_decision_raw.json
-cycle_*/vlm_action_decision_validated.json
-cycle_*/vlm_action_safety_report.json
-cycle_*/vlm_action_attempt_XX_{input,output,validation}.json
-cycle_*/autonomous_action_history.json
-cycle_*/action_fingerprint.json
-cycle_*/failure_ledger.json
-cycle_*/replanning_context.json
-cycle_*/track_assignment.json
-cycle_*/gripper_collision_profile.json
-cycle_*/controlled_contact_evaluation.json
-cycle_*/selected_action.json
-cycle_*/clearance_verification.json
-cycle_*/clearance_step_XX_result.json
+scene_state.json               task_state.json
+target_options.json            physical_action_edges.json
+qwen_target_request.json       qwen_target_response.json
+selected_target.json           qwen_edge_request.json
+qwen_edge_response.json        selected_edge.json
+final_safety_gate.json         execution_result.json
+post_grasp_verification.json   post_place_verification.json
+action_history.json
 ```
 
-Hardware execution remains opt-in:
+不适用阶段写 `skipped_reason`；任务结果另写 `task_completion.json`。日志中的
+`decision_source` 只使用有限真实枚举，不存在隐藏改选。
+
+## 配置和运行
+
+- `config/stack_demo_planner.json`：GF225、抓取、推动、速度、释放、Qwen 和任务参数。
+- `config/workspace_bounds.json`：唯一工作区来源，`base_link` 下 x 0.235--0.65 m、
+  y -0.10--0.40 m。
+
+查看实际 CLI：
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py --help
+```
+
+完全离线 dry-run：
 
 ```bash
 python3 tools/workflows/stack_demo_pipeline.py \
-  ... \
-  --execute \
-  --execute-push-clearing
+  --task-type organize_blocks \
+  --offline-scene-state tests/fixtures/new_arch_single_red_scene.json \
+  --output-dir /tmp/robot_stack_new_arch_dry_run \
+  --no-image
 ```
 
-On the robot PC, the stable UR/MoveIt/camera/perception drivers are started by
-`Start_Robot_Stack.desktop`. Do not edit or duplicate those driver launches
-while debugging this workflow. The confirmed workspace is `base_link`
-`x=0.235..0.65 m`, `y=-0.10..0.40 m`. Main translation/approach and ready reset
-use 0.08 velocity/acceleration scaling; safe-height wrist Z pre-rotation defaults
-to three times those values (0.24/0.24). The latter must not be reused for
-near-object descent.
+在线感知但不运动：
 
-As of 2026-07-14, real organization has completed consecutive red and blue
-pick/place cycles, but the blue cycle exposed a narrow-yaw grasp collision risk
-and an open-gripper place collision with the prior red row. Both checks are now
-implemented and covered by focused tests/recorded-scene replay, but have not yet
-been revalidated by another real motion. The full color task and house task are
-therefore not yet accepted as complete.
-
-## Qwen3 reasoning and policy protocols
-
-All Ollama chat requests are issued by `ollama_policy_client.py`. Qwen3 reasoning
-preserves `message.thinking`; empty or malformed final content is converted by a
-separate no-thinking finalization call. Backend retries and token-budget retries
-finish before `Order Attempt` or `Action Attempt` begins. A failed transport never
-creates a stop action, object reference, fingerprint, geometry check, or MoveIt call.
-
-Task contracts are routed before the VLM call and use separate house and organization
-schemas. Organization prompts contain no house definition. House grounded output is
-the concise `grounded_house_plan_v1`; code resolves role refs, restores observed facts,
-and injects canonical assembly steps. Four-color linear stacks use `stack_binding_v2`
-and an independent OrderFingerprint blacklist.
-
-Ollama diagnostics are stored below `ollama_calls/<logical-call>/`:
-
-```text
-ollama_request.json
-ollama_response.json
-ollama_thinking.txt
-ollama_content.txt
-ollama_diagnostics.json
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  --task-type organize_blocks \
+  --instruction "按颜色整理积木" \
+  --output-dir runtime/organize_blocks_dry_run
 ```
 
-`model_runtime_diagnostics.json` records load duration, token counts, context budget,
-generation budget, keep-alive, and possible repeated model loading. Real execution
-remains forbidden when workspace bounds are absent or until dry-run and MoveIt
-plan-only have reached the first legal action for every task family.
+使用已有 MoveIt 做 plan-only：
 
-`--max-vlm-action-attempts` limits same-scene rejected action proposals;
-`--max-vlm-stack-attempts` limits initial semantic-order proposals. Both stop
-fail-safe at their limits. `--push-tool-finger-length-m`,
-`--push-tool-depth-m`, and `--push-tool-fingertip-thickness-m` describe the
-conservative GF225 OBB; MoveIt remains the final collision/IK authority.
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  --task-type build_house \
+  --instruction "搭一个房子" \
+  --moveit-plan-only \
+  --output-dir runtime/build_house_plan_only
+```
+
+实机路径要求 `--execute --yes`；nudge 还需 `--execute-push-clearing`。本次重构没有运行这些
+参数。离线/mock 输入和 `--execute` 的组合会在机器人初始化之前被拒绝。
+
+已删除旧 `--legacy-linear-stack`、stack order/base ID/decision JSON、task contract/grounded plan、
+resume、开放式 VLM action 尝试次数，以及分散的抓取/推动几何覆盖参数。当前参数以 `--help`
+为准，几何常量只从统一配置加载。
+
+## 尚未实机验证
+
+新决策架构只通过离线、mock、编译和静态检查。尚未验证真实末端相机抓取成功证据、真实 GF225
+斜角接触、实际清障、完整颜色整理、六角色结构、凹槽面/三角尖端可靠感知、中转重抓及真实
+放置稳定性。不得把当前测试结果解释为实机成功。

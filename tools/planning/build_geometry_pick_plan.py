@@ -6,7 +6,6 @@ import json
 import math
 import os
 import sys
-from types import SimpleNamespace
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -14,7 +13,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from robot_scene_pipeline.xy_correction import apply_step_xyz_correction, load_xy_correction
-from tools.planning.decision_to_execution import compile_plan, write_json
+from robot_scene_pipeline.io_utils import write_json
 
 
 DEFAULT_PRIVATE = "/tmp/robot_scene_geometry/private_scene_state.json"
@@ -286,29 +285,53 @@ def main():
     geometry_center = object_base_point(obj, require_geometry_center=True)
     if require_geometry_center and geometry_center is None:
         raise RuntimeError("Stack demo requires a valid base_link geometry_center_m; bbox/depth-center fallback is disabled.")
-    decision = {
-        "action_plan": [
-            {
-                "step": 1,
-                "action": "pick",
-                "object_id": int(obj["id"]),
-                "reference_object_id": None,
-                "relative_position": None,
-                "reason": "Deterministic geometry pick test.",
-            }
-        ]
+    target = object_base_point(obj, require_geometry_center=require_geometry_center)
+    if target is None:
+        raise RuntimeError("Selected object has no usable three-dimensional base_link center.")
+    target = [float(target[0]), float(target[1]), float(target[2]) + float(args.pick_target_lift_m)]
+    step = {
+        "step": 1,
+        "action": "pick",
+        "object_id": int(obj["id"]),
+        "object_label": obj.get("label"),
+        "reference_object_id": None,
+        "relative_position": None,
+        "reason": "Deterministic geometry pick test.",
+        "status": "planned",
+        "geometry_center_m": obj.get("geometry_center_m") if obj.get("geometry_frame") == "base_link" else None,
+        "geometry_frame": obj.get("geometry_frame"),
+        "pointcloud_geometry_valid": bool(obj.get("pointcloud_geometry_valid")),
+        "object_dimensions_m": obj.get("dimensions_m"),
+        "target_yaw_deg": obj.get("table_yaw_deg") if obj.get("table_yaw_valid") else None,
+        "target_yaw_valid": bool(obj.get("table_yaw_valid")),
+        "estimated_yaw_deg": obj.get("table_yaw_deg"),
+        "yaw_source": obj.get("table_yaw_source"),
+        "yaw_frame": obj.get("geometry_frame"),
+        "target_position_m": [round(value, 5) for value in target],
+        "approach_position_m": [
+            round(target[0], 5), round(target[1], 5),
+            round(target[2] + float(args.approach_height_m), 5),
+        ],
+        "coordinate_source": "private_scene_state",
+        "coordinate_frame": "base_frame",
     }
-    plan_args = SimpleNamespace(
-        place_offset_m=0.08,
-        approach_height_m=args.approach_height_m,
-        pick_target_lift_m=args.pick_target_lift_m,
-        place_target_lift_m=0.0,
-        left_right_axis="y",
-        left_direction_sign="positive",
-        front_back_axis="x",
-        front_direction_sign="positive",
-    )
-    plan = compile_plan(decision, state, plan_args)
+    plan = {
+        "schema_version": "robot_execution_plan_v1",
+        "frame_id": state.get("frame_id"),
+        "timestamp": state.get("timestamp"),
+        "execution_status": "not_executed",
+        "coordinate_convention": {
+            "frame": state.get("base_frame") or "base_link",
+            "unit": "meter",
+            "x": "robot base x axis", "y": "robot base y axis", "z": "positive upward",
+        },
+        "steps": [step],
+        "safety_checks": [
+            "verify target object is still visible before motion",
+            "verify current TF before sending robot motion",
+            "stop if the deterministic step is not planned",
+        ],
+    }
     if plan.get("steps"):
         step = plan["steps"][0]
         if require_geometry_center:

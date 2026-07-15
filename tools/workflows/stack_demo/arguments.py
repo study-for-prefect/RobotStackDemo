@@ -1,312 +1,65 @@
-"""Command-line arguments for the stack demo workflow."""
+"""Command-line arguments for the two supported closed-loop tasks."""
+
+from __future__ import annotations
 
 import argparse
 import os
 
 from .constants import PROJECT_ROOT
 
-DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
-DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run a closed-loop semantic block task.")
-    parser.add_argument("--instruction", default="搭一个房子")
-    parser.add_argument("--output-dir", default=os.path.join(PROJECT_ROOT, "runtime"))
-    parser.add_argument("--stack-decision-json", default="")
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Plan organize_blocks or build_house using code-generated physical edges.",
+    )
+    parser.add_argument("--instruction", default="按颜色整理积木")
+    parser.add_argument("--task-type", choices=("auto", "organize_blocks", "build_house"), default="auto")
+    parser.add_argument("--output-dir", default=os.path.join(PROJECT_ROOT, "runtime", "stack_demo"))
+    parser.add_argument("--planner-config", default="config/stack_demo_planner.json")
+    parser.add_argument("--workspace-bounds-json", default="config/workspace_bounds.json")
     parser.add_argument("--offline-scene-state", default="")
-    parser.add_argument(
-        "--resume-reference-state-json", default="",
-        help="Prior live scene state used only to recover VLM-confirmed detector misses after an interrupted action.",
-    )
-    parser.add_argument(
-        "--resume-reference-action-json", default="",
-        help="Validated action that was executed before --resume-reference-state-json became stale.",
-    )
-    parser.add_argument(
-        "--resume-reference-execution-json", default="",
-        help=(
-            "Optional executed_and_reobserved log proving the resume action completed. "
-            "When supplied, recovery uses the known action result instead of asking the VLM "
-            "to confirm an object that may now be outside the camera view."
-        ),
-    )
-    parser.add_argument("--base-object-id", type=int, default=None)
-    parser.add_argument("--stack-order", nargs="+", type=int, default=None)
-    parser.add_argument("--legacy-linear-stack", action="store_true", help="Use the old stack_blocks-only compatibility workflow.")
-    parser.add_argument("--task-contract-json", default="", help="Optional offline task_contract_v1 JSON.")
-    parser.add_argument("--grounded-task-plan-json", default="", help="Optional current-scene grounded_task_plan_v1 JSON.")
-    parser.add_argument("--task-semantics-config", default="config/task_semantics.json")
-    parser.add_argument(
-        "--workspace-bounds-json",
-        default="config/workspace_bounds.json",
-        help="Calibrated six-direction workspace bounds in base_link meters.",
-    )
-    parser.add_argument("--max-vlm-task-plan-attempts", type=int, default=5)
-    parser.add_argument("--max-task-steps", type=int, default=12)
+    parser.add_argument("--mock-policy-response-dir", default="")
+    parser.add_argument("--max-task-steps", type=int, default=20)
+
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument(
-        "--moveit-plan-only",
-        action="store_true",
-        help="Run real MoveIt preflight without executing trajectories or operating the gripper.",
-    )
-    parser.add_argument(
-        "--execute-push-clearing",
-        action="store_true",
-        help="Allow execution of VLM-selected nudge or pick-away actions after physical and MoveIt validation.",
-    )
-    parser.add_argument(
-        "--push-clearing-lift-m",
-        type=float,
-        default=0.05,
-        help="Lift height before and after push clearing.",
-    )
-    parser.add_argument(
-        "--push-clearing-contact-z-offset-m",
-        type=float,
-        default=0.015,
-        help="Contact z offset above table for push clearing.",
-    )
-    parser.add_argument(
-        "--push-tool-finger-length-m",
-        type=float,
-        default=0.12,
-        help="Conservative closed-gripper finger length used by nudge swept-volume validation.",
-    )
-    parser.add_argument("--push-tool-depth-m", type=float, default=0.04)
-    parser.add_argument("--push-tool-fingertip-thickness-m", type=float, default=0.01)
-    parser.add_argument(
-        "--push-tool-yaw-offset-deg",
-        type=float,
-        default=0.0,
-        help="Calibrated yaw offset from base_link push direction to the closed-gripper pushing face.",
-    )
-    parser.add_argument("--push-tool-safety-margin-m", type=float, default=0.005)
-    parser.add_argument("--grasp-gripper-side-clearance-m", type=float, default=0.006)
-    parser.add_argument(
-        "--grasp-min-feasible-yaw-span-deg",
-        type=float,
-        default=10.0,
-        help="Minimum continuous collision-free yaw interval accepted for a real grasp.",
-    )
-    parser.add_argument("--gripper-closed-tip-width-m", type=float, default=0.025)
-    parser.add_argument("--gripper-closed-upper-width-m", type=float, default=0.062)
-    parser.add_argument("--gripper-tip-height-m", type=float, default=0.025)
-    parser.add_argument("--gripper-upper-height-m", type=float, default=0.070)
-    parser.add_argument("--gripper-body-height-m", type=float, default=0.150)
-    parser.add_argument("--controlled-contact-enabled", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--controlled-contact-max-intrusion-m", type=float, default=0.005)
-    parser.add_argument("--controlled-contact-max-displacement-m", type=float, default=0.015)
-    parser.add_argument("--controlled-contact-max-objects", type=int, default=2)
-    parser.add_argument("--replanning-temperature", type=float, default=0.15)
-    parser.add_argument("--replanning-top-p", type=float, default=0.85)
-    parser.add_argument(
-        "--max-vlm-action-attempts",
-        type=int,
-        default=8,
-        help="Per-observation action proposals; allows coordinate correction before physical clearing alternatives.",
-    )
-    parser.add_argument("--max-vlm-stack-attempts", type=int, default=5)
     parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--moveit-plan-only", action="store_true")
+    parser.add_argument(
+        "--execute-push-clearing", action="store_true",
+        help="Additional opt-in required before executing a selected nudge edge.",
+    )
+
+    parser.add_argument("--model", default="", help="Override planner-config policy.model.")
+    parser.add_argument("--ollama-url", default="http://127.0.0.1:11434/api/chat")
+    parser.add_argument("--vlm-think-mode", choices=("off",), default="off")
+    parser.add_argument("--vlm-num-ctx", type=int, default=0)
+    parser.add_argument("--vlm-num-predict", type=int, default=0)
+    parser.add_argument("--vlm-num-gpu", type=int, default=-1)
+    parser.add_argument("--vlm-finalizer-num-predict", type=int, default=768)
+    parser.add_argument("--vlm-read-timeout-sec", type=float, default=120.0)
+    parser.add_argument("--vlm-keep-alive", default="1h")
+    parser.add_argument("--vlm-max-backend-retries", type=int, default=2)
+    parser.add_argument("--vlm-max-budget-retries", type=int, default=2)
+    parser.add_argument("--unload-model-after-task", action="store_true")
+    parser.add_argument("--no-image", action="store_true")
+
+    parser.add_argument("--perception-server-url", default=os.environ.get("ROBOT_SCENE_PERCEPTION_URL", "http://127.0.0.1:8765"))
+    parser.add_argument("--perception-server-timeout-s", type=float, default=15.0)
+    parser.add_argument("--allow-snapshot-subprocess-fallback", action="store_true")
     parser.add_argument("--conda-env", default="yolo")
     parser.add_argument("--ros-python", default="/usr/bin/python3")
-    parser.add_argument("--model", default="qwen3-vl:8b-instruct")
-    parser.add_argument("--ollama-url", default="http://127.0.0.1:11434/api/chat")
-    parser.add_argument("--timeout", type=int, default=600)
-    parser.add_argument("--num-predict", type=int, default=1024)
-    parser.add_argument("--vlm-think-mode", choices=("auto", "on", "off"), default="auto")
-    parser.add_argument("--vlm-num-ctx", type=int, default=0, help="Override policy-specific Ollama context budget; 0 uses policy defaults.")
-    parser.add_argument("--vlm-num-predict", type=int, default=0, help="Override policy-specific generation budget; 0 uses policy defaults.")
-    parser.add_argument(
-        "--vlm-num-gpu", type=int, default=-1,
-        help="Ollama GPU layers: -1 uses backend default; 0 forces CPU for power-safe diagnostics.",
-    )
-    parser.add_argument("--vlm-finalizer-num-predict", type=int, default=2048)
-    parser.add_argument("--vlm-read-timeout-sec", type=float, default=1200.0)
-    parser.add_argument("--vlm-keep-alive", default="1h")
-    parser.add_argument("--vlm-max-backend-retries", type=int, default=3)
-    parser.add_argument("--vlm-max-budget-retries", type=int, default=3)
-    parser.add_argument("--unload-model-after-task", action="store_true")
-    parser.add_argument(
-        "--unload-vlm-before-execution",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Release the Ollama model before each physical action so post-action YOLO "
-            "observation does not overlap a resident VLM GPU workload."
-        ),
-    )
-    parser.add_argument("--no-image", action="store_true")
     parser.add_argument("--detector-weight", default="models/yolo/weights/best.pt")
-    parser.add_argument(
-        "--perception-server-url",
-        default=os.environ.get("ROBOT_SCENE_PERCEPTION_URL", "http://127.0.0.1:8765"),
-        help="Persistent perception server base URL. Use empty string only with --allow-snapshot-subprocess-fallback.",
-    )
-    parser.add_argument("--perception-server-timeout-s", type=float, default=15.0)
-    parser.add_argument(
-        "--allow-snapshot-subprocess-fallback",
-        action="store_true",
-        help="Allow legacy snapshot_pipeline subprocess if the persistent perception server is unavailable.",
-    )
     parser.add_argument("--score-thresh", type=float, default=0.5)
-    parser.add_argument(
-        "--initial-detector-recovery-score-thresh",
-        type=float,
-        default=0.05,
-        help=(
-            "Secondary initial-observation YOLO threshold. Candidates absent from the normal "
-            "observation are accepted only after VLM image confirmation; 0 disables recovery."
-        ),
-    )
     parser.add_argument("--detector-imgsz", type=int, default=960)
     parser.add_argument("--detector-iou", type=float, default=0.45)
     parser.add_argument("--detector-device", default="cuda:0")
-    parser.add_argument("--tf-json", default=DEFAULT_TF_JSON)
+    parser.add_argument("--tf-json", default="/tmp/scene_tf_base_color_optical.json")
     parser.add_argument("--base-frame", default="base_link")
-    parser.add_argument("--camera-frame", default=DEFAULT_CAMERA_FRAME)
+    parser.add_argument("--camera-frame", default="camera_color_optical_frame")
     parser.add_argument("--tool-frame", default="tool0")
+    parser.add_argument("--tf-timeout", type=float, default=8.0)
     parser.add_argument("--ready-pose-json", default="config/rectangle_ready_pose.json")
     parser.add_argument("--init-stable-wait-s", type=float, default=1.0)
-    parser.add_argument("--initial-observation-retry-count", type=int, default=1)
-    parser.add_argument("--initial-observation-stable-wait-s", type=float, default=0.5)
-    parser.add_argument(
-        "--initial-observation-recovery-offsets-base",
-        default="0,0,-0.04;0.03,0,-0.02;-0.03,0,-0.02;0,0.03,-0.02;0,-0.03,-0.02",
-        help="Semicolon-separated base_link XYZ offsets used between initial observation retries.",
-    )
-    parser.add_argument("--xy-correction-json", default="")
-    parser.add_argument(
-        "--calibration-json",
-        default="",
-        help=(
-            "Unified calibration JSON. Supports affine_xy, grasp_base_bias_m, "
-            "place_base_bias_m, tcp_offset_tool_m, and max_correction_m. "
-            "When set, it supersedes --xy-correction-json for stack pick/place correction."
-        ),
-    )
-    parser.add_argument("--search-radius-m", type=float, default=0.06)
-    parser.add_argument("--close-stack-search-radius-m", type=float, default=0.04)
-    parser.add_argument("--target-exclusion-radius-m", type=float, default=0.035)
-    parser.add_argument("--min-pick-place-xy-distance-m", type=float, default=0.04)
-    parser.add_argument("--max-place-second-snapshot-correction-m", type=float, default=0.015)
-    parser.add_argument("--held-base-top-z-tolerance-m", type=float, default=0.015)
-    parser.add_argument("--approach-height-m", type=float, default=0.05)
-    parser.add_argument(
-        "--pick-observation-offset-base",
-        nargs=3,
-        type=float,
-        default=[0.0, 0.0, 0.0],
-        help="Deprecated compatibility option; close-observation retry now uses optical camera offsets only.",
-    )
-    parser.add_argument(
-        "--pick-observation-offset-camera",
-        nargs=3,
-        type=float,
-        default=[0.0, 0.04, 0.0],
-        help="Optical-camera offset used only when the close target observation misses the object.",
-    )
-    parser.add_argument(
-        "--place-observation-offset-camera",
-        nargs=3,
-        type=float,
-        default=[0.0, 0.04, 0.0],
-        help="Optical-camera offset used only when the held-object close base observation misses the base.",
-    )
-    parser.add_argument("--grasp-bias-base", nargs=2, type=float, default=[0.0, 0.0])
-    parser.add_argument("--grasp-bias-camera", nargs=2, type=float, default=[0.0, 0.0])
-    parser.add_argument("--pick-target-lift-m", type=float, default=0.010)
-    parser.add_argument("--pick-target-z-margin-m", type=float, default=0.002)
-    parser.add_argument("--release-gap-m", type=float, default=0.010)
-    parser.add_argument("--place-top-z-bias-m", type=float, default=0.0)
-    parser.add_argument("--fixed-square-yaw-deg", type=float, default=0.0)
-    parser.add_argument("--stack-square-yaw-mode", choices=("detected", "fixed"), default="detected")
-    parser.add_argument("--square-yaw-snap-tolerance-deg", type=float, default=0.0)
-    parser.add_argument("--grasp-axis", choices=("long", "short"), default="long")
-    parser.add_argument("--gripper-yaw-offset-deg", type=float, default=0.0)
-    parser.add_argument("--grasp-gripper-outer-width-m", type=float, default=0.112)
-    parser.add_argument("--grasp-gripper-inner-width-m", type=float, default=0.049)
-    parser.add_argument(
-        "--grasp-approach-length-m",
-        type=float,
-        default=0.02,
-        help="Planar top-grasp envelope extension along the gripper axis; keep small for vertical tabletop grasps.",
-    )
-    parser.add_argument("--max-grasp-yaw-error-deg", type=float, default=5.0)
-    parser.add_argument("--max-grasp-orientation-error-deg", type=float, default=0.5)
-    parser.add_argument("--pre-rotate-wrist-yaw-sign", choices=("auto", "positive", "negative"), default="negative")
-    parser.add_argument("--max-pre-rotate-joint-delta", type=float, default=3.1416)
-    parser.add_argument("--max-second-snapshot-correction-m", type=float, default=0.006)
-    parser.add_argument("--second-snapshot-max-z-error-m", type=float, default=0.06)
-    parser.add_argument("--second-snapshot-hover-above-object-m", type=float, default=0.10)
-    parser.add_argument("--max-grasp-offset-m", type=float, default=0.05)
-    parser.add_argument(
-        "--enable-second-pick-snapshot",
-        action="store_true",
-        help=(
-            "After the first pick approach, capture a close target snapshot and use it only for XY correction. "
-            "Default is off so execution picks from the locked first observation."
-        ),
-    )
     parser.add_argument("--second-snapshot-stable-wait-s", type=float, default=0.5)
-    parser.add_argument("--second-snapshot-retry-offset-camera", nargs=3, type=float, default=[0.0, 0.04, 0.0])
-    parser.add_argument("--close-observation-retry-count", type=int, default=1)
-    parser.add_argument("--close-observation-retry-base-offset", nargs=3, type=float, default=[0.0, 0.0, 0.0])
-    parser.add_argument(
-        "--scoped-observation-recovery-offsets-base",
-        default="0,0,0;0.04,0,0;-0.04,0,0;0,0.04,0;0,-0.04,0",
-        help=(
-            "Semicolon-separated base_link XYZ offsets for scoped recovery observations, "
-            "for example '0,0,0;0.04,0,0;0,0.04,0'."
-        ),
-    )
-    parser.add_argument("--scoped-observation-max-attempts", type=int, default=5)
-    parser.add_argument("--scoped-observation-match-distance-m", type=float, default=0.07)
-    parser.add_argument("--post-place-match-z-tolerance-m", type=float, default=0.025)
-    parser.add_argument("--place-yaw-strategy", choices=("stack", "base", "held"), default="base")
-    parser.add_argument("--place-center-strategy", choices=("top", "base"), default="top")
-    parser.add_argument("--max-stack-top-center-offset-m", type=float, default=0.015)
-    parser.add_argument("--object-offset-tool", nargs=2, type=float, default=[0.0, 0.0])
-    parser.add_argument("--place-bias-base", nargs=2, type=float, default=[0.0, 0.0])
-    parser.add_argument("--max-place-bias-base-m", type=float, default=0.01)
-    parser.add_argument("--tcp-offset-tool", nargs=3, type=float, default=[0.0, 0.0, 0.15])
-    parser.add_argument("--velocity", type=float, default=0.08)
-    parser.add_argument("--acceleration", type=float, default=0.08)
-    parser.add_argument(
-        "--pre-rotate-velocity",
-        type=float,
-        default=None,
-        help="End-effector Z pre-rotation velocity scale. Default: 3x --velocity (clamped to 1.0).",
-    )
-    parser.add_argument(
-        "--pre-rotate-acceleration",
-        type=float,
-        default=None,
-        help="End-effector Z pre-rotation acceleration scale. Default: 3x --acceleration (clamped to 1.0).",
-    )
-    parser.add_argument("--ready-max-joint-delta", type=float, default=1.30)
-    parser.add_argument("--ready-joint-tolerance", type=float, default=0.15)
-    parser.add_argument("--place-velocity", type=float, default=0.03)
-    parser.add_argument("--place-acceleration", type=float, default=0.03)
-    parser.add_argument("--tf-timeout", type=float, default=8.0)
     parser.add_argument("--gripper-port", default="/dev/ttyUSB0")
-    parser.add_argument(
-        "--memory-json",
-        default=None,
-        help="Path to scene memory json. Default: <output-dir>/scene_memory.json",
-    )
-
-    parser.add_argument(
-        "--resume-memory",
-        action="store_true",
-        help="Resume existing scene memory instead of starting from current run.",
-    )
-    args = parser.parse_args()
-    # Wrist-only Z pre-rotation is performed at the safe approach height.  Keep
-    # object approach/reset on the conservative main scale, but make this
-    # in-place rotation three times faster by default as requested on the real
-    # robot.  Explicit CLI overrides remain authoritative.
-    if args.pre_rotate_velocity is None:
-        args.pre_rotate_velocity = min(1.0, 3.0 * args.velocity)
-    if args.pre_rotate_acceleration is None:
-        args.pre_rotate_acceleration = min(1.0, 3.0 * args.acceleration)
-    return args
+    return parser.parse_args(argv)

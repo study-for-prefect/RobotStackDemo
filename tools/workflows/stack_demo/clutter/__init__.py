@@ -1,0 +1,2 @@
+"""Shared clutter extraction planning."""
+

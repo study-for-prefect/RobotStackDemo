@@ -1,14 +1,12 @@
 """Shared single-frame perception runtime for snapshot and server paths."""
 
 import os
-from types import SimpleNamespace
 from typing import Any, Dict, Tuple
 
 import cv2
 
 from .depth_geometry import attach_3d, build_private_state, coordinate_convention, draw_annotated
 from .io_utils import write_json
-from .llm_scene_reasoner import build_llm_input
 from .snapshot_pipeline import drop_transient_detection_fields
 from .tabletop_geometry import attach_tabletop_geometry
 from .tf_transform import (
@@ -37,7 +35,6 @@ def scene_output_paths(output_dir: str) -> Dict[str, str]:
         "annotated": os.path.join(output_dir, "annotated_detector.jpg"),
         "objects": os.path.join(output_dir, "detector_objects_3d.json"),
         "candidates": os.path.join(output_dir, "detector_candidates.json"),
-        "llm_input": os.path.join(output_dir, "llm_input.json"),
         "private_state": os.path.join(output_dir, "private_scene_state.json"),
         "tf_status": os.path.join(output_dir, "tf_status.json"),
         "tabletop": os.path.join(output_dir, "tabletop_geometry.json"),
@@ -107,10 +104,6 @@ def process_rgbd_scene(
             }
         )
     write_json(paths["tabletop"], tabletop_payload)
-
-    llm_args = SimpleNamespace(**vars(args))
-    llm_input = build_llm_input(llm_args, detections, paths["snapshot"], used_profile)
-    write_json(paths["llm_input"], llm_input)
 
     detections = drop_transient_detection_fields(detections)
     write_json(

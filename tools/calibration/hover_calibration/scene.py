@@ -9,7 +9,6 @@ def snapshot_command(args, snapshot_dir):
         "conda", "run", "-n", args.conda_env, "python", "-m",
         "robot_scene_pipeline.snapshot_pipeline",
         "--output-dir", snapshot_dir,
-        "--skip-llm",
         "--estimate-tabletop",
         "--detector-config", args.detector_config,
         "--base-frame", args.base_frame,

@@ -172,7 +172,7 @@ def analyze_dataset(dataset):
 
 
 def build_stack_calibration(report):
-    """Convert a diagnosis report into stack_demo --calibration-json format."""
+    """Build a legacy review artifact; current stack_demo does not load it directly."""
     calibration = {
         "schema_version": "stack_demo_calibration_v1",
         "source": "xy_bias_diagnosis.analyze",

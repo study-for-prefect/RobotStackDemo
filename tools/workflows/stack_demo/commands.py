@@ -1,53 +1,39 @@
-"""External command construction and observation capture."""
+"""Existing observation, TF, MoveIt, and GF225 command boundary."""
+
+from __future__ import annotations
 
 import json
 import os
 import subprocess
 import time
+from typing import Any, Sequence
 from urllib.parse import urlencode
 from urllib.request import urlopen
-
-from tools.workflows.two_stage_visual_pick import camera_optical_vector_to_base
 
 from .constants import PROJECT_ROOT
 from .workspace import attach_configured_workspace
 
+
 DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
-DEFAULT_TF_POINT_MODE = "direct"
 
 
-def format_motion_float(value):
-    return "{:.6f}".format(float(value))
+def load_json(path: str) -> dict[str, Any]:
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
 
 
-def perception_camera_frame(args):
-    camera_frame = str(getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME) or DEFAULT_CAMERA_FRAME).lstrip("/")
-    if camera_frame == "camera_link":
-        return DEFAULT_CAMERA_FRAME
-    return camera_frame
-
-
-def load_json(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def run(command):
+def run(command: Sequence[str]) -> None:
     print("\n$ {}".format(" ".join(command)), flush=True)
-    subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    subprocess.run(list(command), cwd=PROJECT_ROOT, check=True)
 
 
-def plan_only_command(command):
-    """Strip every trajectory/gripper execution option from a MoveIt command."""
+def plan_only_command(command: Sequence[str]) -> list[str]:
+    """Remove every trajectory and gripper execution option."""
     output = list(command)
     for flag, value_count in (
-        ("--execute", 0),
-        ("--enable-gripper", 0),
-        ("--skip-gripper-init", 0),
-        ("--close-gripper-for-push", 0),
-        ("--gripper-open-only", 0),
-        ("--gripper-close-only", 0),
-        ("--gripper-port", 1),
+        ("--execute", 0), ("--enable-gripper", 0), ("--skip-gripper-init", 0),
+        ("--close-gripper-for-push", 0), ("--gripper-open-only", 0),
+        ("--gripper-close-only", 0), ("--gripper-port", 1),
     ):
         while flag in output:
             index = output.index(flag)
@@ -55,20 +41,19 @@ def plan_only_command(command):
     return output
 
 
-def tf_lookup_command(args, require_tool=True):
+def perception_camera_frame(args: Any) -> str:
+    frame = str(getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME) or DEFAULT_CAMERA_FRAME).lstrip("/")
+    return DEFAULT_CAMERA_FRAME if frame == "camera_link" else frame
+
+
+def tf_lookup_command(args: Any, require_tool: bool = True) -> list[str]:
     command = [
-        args.ros_python,
-        "tools/robot/tf_lookup_json.py",
-        "--output",
-        args.tf_json,
-        "--base-frame",
-        getattr(args, "base_frame", "base_link"),
-        "--camera-frame",
-        perception_camera_frame(args),
-        "--tool-frame",
-        getattr(args, "tool_frame", "tool0"),
-        "--timeout",
-        str(getattr(args, "tf_timeout", 8.0)),
+        args.ros_python, "tools/robot/tf_lookup_json.py",
+        "--output", args.tf_json,
+        "--base-frame", args.base_frame,
+        "--camera-frame", perception_camera_frame(args),
+        "--tool-frame", args.tool_frame,
+        "--timeout", str(args.tf_timeout),
         "--once",
     ]
     if require_tool:
@@ -76,36 +61,23 @@ def tf_lookup_command(args, require_tool=True):
     return command
 
 
-def moveit_frame_args(args):
-    return [
-        "--base-link",
-        getattr(args, "base_frame", "base_link"),
-        "--end-effector",
-        getattr(args, "tool_frame", "tool0"),
-    ]
+def moveit_frame_args(args: Any) -> list[str]:
+    return ["--base-link", args.base_frame, "--end-effector", args.tool_frame]
 
 
-def failure_state_path(args):
-    return os.path.join(args.output_dir, "failure_state.json")
-
-
-def pose_command(args, pose_json):
+def pose_command(args: Any, pose_json: str) -> list[str]:
     command = [
         args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--ready-only", "--ready-joint-pose-json", pose_json,
         "--velocity", str(args.velocity), "--acceleration", str(args.acceleration),
-        "--max-joint-delta", str(getattr(args, "ready_max_joint_delta", 1.30)),
-        "--ready-joint-tolerance", str(getattr(args, "ready_joint_tolerance", 0.15)),
-        *moveit_frame_args(args),
-        "--tf-timeout", str(getattr(args, "tf_timeout", 8.0)),
-        "--execute",
+        *moveit_frame_args(args), "--tf-timeout", str(args.tf_timeout), "--execute",
     ]
     if args.yes:
         command.append("--yes")
     return command
 
 
-def open_gripper_command(args):
+def open_gripper_command(args: Any) -> list[str]:
     command = [
         args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--gripper-open-only", "--enable-gripper",
@@ -116,7 +88,7 @@ def open_gripper_command(args):
     return command
 
 
-def close_gripper_command(args):
+def close_gripper_command(args: Any) -> list[str]:
     command = [
         args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--gripper-close-only", "--enable-gripper",
@@ -127,45 +99,37 @@ def close_gripper_command(args):
     return command
 
 
-def init_ready_pose(args):
-    """Put the empty-gripper robot in the configured observation pose."""
-    if args.execute:
-        print("\ninit_ready_pose: moving to ready pose", flush=True)
-        if not args.ready_pose_json or not os.path.isfile(args.ready_pose_json):
-            raise RuntimeError(
-                "Ready pose JSON not found: {}. Set --ready-pose-json/READY_POSE_JSON to an existing init pose.".format(
-                    args.ready_pose_json
-                )
-            )
-        run(pose_command(args, args.ready_pose_json))
-    else:
-        print("\ninit_ready_pose: motion skipped (execution disabled)", flush=True)
-
-    if args.execute:
-        print("init_ready_pose: opening gripper", flush=True)
-        run(open_gripper_command(args))
-        if args.init_stable_wait_s > 0:
-            time.sleep(float(args.init_stable_wait_s))
-    else:
-        print("init_ready_pose: gripper open skipped (execution disabled)", flush=True)
-    print("init_ready_pose: stable, start snapshot", flush=True)
+def init_ready_pose(args: Any) -> None:
+    if not args.execute:
+        return
+    if not args.ready_pose_json or not os.path.isfile(args.ready_pose_json):
+        raise RuntimeError(f"ready pose JSON not found: {args.ready_pose_json}")
+    run(pose_command(args, args.ready_pose_json))
+    run(open_gripper_command(args))
+    if args.init_stable_wait_s > 0:
+        time.sleep(float(args.init_stable_wait_s))
 
 
-def capture_empty_observation(args, output_dir, held_object_id):
+def capture_empty_observation(args: Any, output_dir: str, held_object_id: str | None) -> dict[str, Any] | None:
     if held_object_id is not None:
-        raise RuntimeError("Snapshot forbidden while holding object {}.".format(held_object_id))
+        raise RuntimeError(f"ready observation forbidden while holding {held_object_id}")
     init_ready_pose(args)
     if args.offline_scene_state:
         return None
     capture_scene_observation(args, output_dir)
-    return attach_configured_workspace(
-        load_json(os.path.join(output_dir, "private_scene_state.json")), args,
-    )
+    return attach_configured_workspace(load_json(os.path.join(output_dir, "private_scene_state.json")), args)
 
 
-def capture_empty_current_pose(args, output_dir, held_object_id, allow_holding=False, refresh_tf=False):
+def capture_empty_current_pose(
+    args: Any,
+    output_dir: str,
+    held_object_id: str | None,
+    *,
+    allow_holding: bool = False,
+    refresh_tf: bool = False,
+) -> dict[str, Any] | None:
     if held_object_id is not None and not allow_holding:
-        raise RuntimeError("Second snapshot forbidden while holding object {}.".format(held_object_id))
+        raise RuntimeError(f"observation forbidden while holding {held_object_id}")
     if args.offline_scene_state:
         return None
     if args.second_snapshot_stable_wait_s > 0:
@@ -173,178 +137,46 @@ def capture_empty_current_pose(args, output_dir, held_object_id, allow_holding=F
     if refresh_tf:
         run(tf_lookup_command(args))
     capture_scene_observation(args, output_dir)
-    return attach_configured_workspace(
-        load_json(os.path.join(output_dir, "private_scene_state.json")), args,
-    )
+    return attach_configured_workspace(load_json(os.path.join(output_dir, "private_scene_state.json")), args)
 
 
-def perception_server_snapshot(args, output_dir, score_thresh=None):
-    base_url = str(getattr(args, "perception_server_url", "") or "").rstrip("/")
+def perception_server_snapshot(args: Any, output_dir: str) -> dict[str, Any]:
+    base_url = str(args.perception_server_url or "").rstrip("/")
     if not base_url:
-        raise RuntimeError("No --perception-server-url configured.")
-    query_values = {
+        raise RuntimeError("no perception server URL configured")
+    query = urlencode({
         "output_dir": output_dir,
-        "instruction": getattr(args, "instruction", ""),
         "camera_frame": perception_camera_frame(args),
-    }
-    if score_thresh is not None:
-        query_values["score_thresh"] = float(score_thresh)
-    query = urlencode(query_values)
-    url = "{}/snapshot?{}".format(base_url, query)
-    with urlopen(url, timeout=float(getattr(args, "perception_server_timeout_s", 10.0))) as response:
+        "score_thresh": float(args.score_thresh),
+    })
+    with urlopen(f"{base_url}/snapshot?{query}", timeout=float(args.perception_server_timeout_s)) as response:
         payload = json.loads(response.read().decode("utf-8"))
     if not payload.get("ok"):
         raise RuntimeError(payload.get("error") or "perception server snapshot failed")
     return payload
 
 
-def capture_scene_observation(args, output_dir, score_thresh=None):
-    # The wrist camera moves with every robot trajectory.  The background TF
-    # bridge may still contain a transform sampled during the return motion,
-    # so force one post-motion lookup before the persistent server consumes it.
+def capture_scene_observation(args: Any, output_dir: str) -> None:
+    """Force fresh live TF before every wrist-camera scene acquisition."""
     run(tf_lookup_command(args))
     try:
-        payload = perception_server_snapshot(args, output_dir, score_thresh=score_thresh)
-        print(
-            "Perception server snapshot: output={} objects={} frame_seq={}".format(
-                output_dir,
-                payload.get("object_count"),
-                payload.get("frame_color_seq"),
-            ),
-            flush=True,
-        )
+        perception_server_snapshot(args, output_dir)
         return
     except Exception as exc:
-        if not getattr(args, "allow_snapshot_subprocess_fallback", False):
-            raise RuntimeError(
-                "Persistent perception server snapshot failed and subprocess fallback is disabled: {}".format(exc)
-            )
-        print("Perception server failed; using legacy snapshot subprocess: {}".format(exc), flush=True)
+        if not args.allow_snapshot_subprocess_fallback:
+            raise RuntimeError(f"perception server failed and fallback is disabled: {exc}") from exc
     run(tf_lookup_command(args))
     run(snapshot_command(args, output_dir))
 
 
-def relative_translate_command(args, offset_base):
-    command = [
-        args.ros_python, "tools/robot/moveit_plan_preview.py",
-        "--relative-tool-translation-base", *[format_motion_float(value) for value in offset_base],
-        "--velocity", str(args.velocity), "--acceleration", str(args.acceleration),
-        *moveit_frame_args(args),
-        "--tf-timeout", str(getattr(args, "tf_timeout", 8.0)),
-        "--execute",
-    ]
-    if args.yes:
-        command.append("--yes")
-    return command
-
-
-def push_clear_command(args, push_plan_path):
-    command = [
-        args.ros_python,
-        "tools/robot/moveit_plan_preview.py",
-        "--push-plan-json",
-        push_plan_path,
-        "--enable-gripper",
-        "--close-gripper-for-push",
-        "--gripper-port",
-        args.gripper_port,
-        "--tcp-offset-tool",
-        *[str(value) for value in args.tcp_offset_tool],
-        "--velocity",
-        str(args.velocity),
-        "--acceleration",
-        str(args.acceleration),
-        "--tf-timeout",
-        str(getattr(args, "tf_timeout", 8.0)),
-        *moveit_frame_args(args),
-        "--execute",
-    ]
-    if args.yes:
-        command.append("--yes")
-    return command
-
-
-def push_preflight_command(args, push_plan_path):
-    command = [
-        args.ros_python,
-        "tools/robot/moveit_plan_preview.py",
-        "--push-plan-json",
-        push_plan_path,
-        "--tcp-offset-tool",
-        *[str(value) for value in getattr(args, "tcp_offset_tool", [0.0, 0.0, 0.0])],
-        "--velocity",
-        str(getattr(args, "velocity", 0.20)),
-        "--acceleration",
-        str(getattr(args, "acceleration", 0.20)),
-        "--tf-timeout",
-        str(getattr(args, "tf_timeout", 8.0)),
-        *moveit_frame_args(args),
-    ]
-    if args.yes:
-        command.append("--yes")
-    return command
-
-
-def retry_close_observation(
-    args,
-    output_dir,
-    held_object_id,
-    parse_state,
-    description,
-    allow_holding=False,
-    retry_count=None,
-    retry_offset_camera=None,
-    refresh_tf=False,
-):
-    retries = args.close_observation_retry_count if retry_count is None else retry_count
-    attempts = max(0, int(retries)) + 1
-    last_error = None
-    for attempt in range(attempts):
-        attempt_dir = os.path.join(output_dir, "attempt_{:02d}".format(attempt + 1))
-        state = capture_empty_current_pose(
-            args,
-            attempt_dir,
-            held_object_id,
-            allow_holding=allow_holding,
-            refresh_tf=bool(refresh_tf),
-        )
-        if state is None:
-            return None, None
-        try:
-            return state, parse_state(state)
-        except RuntimeError as exc:
-            last_error = exc
-        if attempt + 1 < attempts:
-            if retry_offset_camera is not None:
-                camera_offset = [float(value) for value in retry_offset_camera]
-                offset = camera_optical_vector_to_base(args.tf_json, camera_offset)
-                print(
-                    "{} detection failed: {}. Retry after optical camera offset {} -> base_link offset {}.".format(
-                        description, last_error, camera_offset, offset
-                    ),
-                    flush=True,
-                )
-            else:
-                offset = [float(value) for value in args.close_observation_retry_base_offset]
-                print(
-                    "{} detection failed: {}. Retry after base_link offset {}.".format(
-                        description, last_error, offset
-                    ),
-                    flush=True,
-                )
-            run(relative_translate_command(args, offset))
-    raise RuntimeError("{} detection failed after {} attempts: {}".format(description, attempts, last_error))
-
-
-def snapshot_command(args, output_dir):
-    command = [
-        "conda", "run", "-n", args.conda_env, "python", "-m",
-        "robot_scene_pipeline.snapshot_pipeline",
+def snapshot_command(args: Any, output_dir: str) -> list[str]:
+    return [
+        "conda", "run", "-n", args.conda_env, "python", "-m", "robot_scene_pipeline.snapshot_pipeline",
         "--output-dir", output_dir,
         "--use-tf", "--tf-json", args.tf_json,
-        "--base-frame", getattr(args, "base_frame", "base_link"),
+        "--base-frame", args.base_frame,
         "--camera-frame", perception_camera_frame(args),
-        "--tf-point-mode", DEFAULT_TF_POINT_MODE,
+        "--tf-point-mode", "direct",
         "--estimate-tabletop",
         "--detector-weight", args.detector_weight,
         "--score-thresh", str(args.score_thresh),
@@ -352,5 +184,3 @@ def snapshot_command(args, output_dir):
         "--detector-iou", str(args.detector_iou),
         "--detector-device", args.detector_device,
     ]
-    command.append("--skip-llm")
-    return command

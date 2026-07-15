@@ -9,20 +9,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .task_schemas import validate_against_schema
+from .schema_validation import validate_against_schema
 
 
 POLICY_GENERATION_CONFIG = {
-    "stack_order": {"num_ctx": 12288, "num_predict": 4096},
-    # Keep the structured task policies on one runner layout.  Switching the
-    # same model between 8K/12K/16K makes Ollama unload and reload GPU weights
-    # between calls, causing avoidable power transients on the robot host.
-    "task_contract": {"num_ctx": 12288, "num_predict": 2048},
-    "grounded_task_plan": {"num_ctx": 12288, "num_predict": 4096},
-    "action_proposal": {"num_ctx": 12288, "num_predict": 2048},
-    "action_replan": {"num_ctx": 12288, "num_predict": 2048},
+    "target_selection": {"num_ctx": 12288, "num_predict": 768},
+    "edge_selection": {"num_ctx": 12288, "num_predict": 768},
     "orientation_analysis": {"num_ctx": 24576, "num_predict": 8192},
-    "final_json_generation": {"num_ctx": 12288, "num_predict": 2048},
+    "final_json_generation": {"num_ctx": 12288, "num_predict": 768},
 }
 _MODEL_RUNTIME: Dict[str, dict] = {}
 
@@ -267,14 +261,7 @@ def _single_http_call(
         if result.http_status is not None and not 200 <= result.http_status < 300:
             body = getattr(response, "text", "")
             result.raw_response = body
-            replay = any(
-                message.get("role") == "assistant" and "thinking" in message
-                for message in payload.get("messages", [])
-            )
-            if replay and _think_unsupported(body):
-                result.error_type = "ASSISTANT_THINKING_REPLAY_UNSUPPORTED"
-            else:
-                result.error_type = "THINK_PARAMETER_UNSUPPORTED" if _think_unsupported(body) else "HTTP_ERROR"
+            result.error_type = "THINK_PARAMETER_UNSUPPORTED" if _think_unsupported(body) else "HTTP_ERROR"
             result.error_message = "HTTP {}: {}".format(result.http_status, body[:500])
             return result
         try:
@@ -321,49 +308,43 @@ def _finalize_policy(
     num_ctx: int, max_backend: int,
 ) -> PolicyCallResult:
     final_predict = int(getattr(args, "vlm_finalizer_num_predict", 4096))
-    replay_supported = True
-    for final_attempt in range(1, 3):
-        print("Finalization Attempt {}/2".format(final_attempt), flush=True)
-        final_messages = list(messages)
-        if replay_supported:
-            final_messages.append({
-                "role": "assistant", "thinking": reasoning.thinking,
-                "content": reasoning.content,
-            })
-        else:
-            final_messages.append({
-                "role": "user",
-                "content": "内部推理上下文（不要重新分析图像）：\n{}".format(reasoning.thinking),
-            })
-        final_messages.append({
+    print("Finalization Attempt 1/1", flush=True)
+    repair_input = {
+        "repair_task": "format_only_no_replanning",
+        "invalid_output": str(reasoning.content or "")[:4096],
+        "instruction": "Return only one JSON object matching the supplied schema.",
+    }
+    final_messages = [
+        {
+            "role": "system",
+            "content": "只修复JSON格式，不重新分析场景，不创建或修改任何选择、对象或动作参数。",
+        },
+        {
             "role": "user",
-            "content": (
-                "基于你刚才已经完成的推理，不要重新分析图像，不要输出解释。"
-                "仅输出一个完全符合给定JSON Schema的JSON对象，不得使用Markdown代码围栏。"
-            ),
-        })
-        result, _ = _backend_retry_call(
-            args, "final_json_generation", final_messages, response_schema,
-            artifact_dir, reasoning_attempt, final_attempt, max_backend, False,
-            num_ctx, final_predict, 0.0, 0.8, 1,
-        )
-        if result.error_type == "ASSISTANT_THINKING_REPLAY_UNSUPPORTED" and replay_supported:
-            replay_supported = False
-            continue
-        if result.transport_status != "ok":
-            result.generation_status = "finalization_failed"
-            result.error_type = result.error_type or "FINALIZATION_FAILED"
-            continue
-        parsed, schema_errors = _parse_and_validate(result.content, response_schema)
-        valid = parsed is not None and not schema_errors
-        print("final_content_json_valid={}".format(str(valid).lower()), flush=True)
-        if valid:
-            result.policy_kind = policy_kind
-            result.parsed_decision = parsed
-            result.schema_valid = True
-            result.generation_status = "parsed_after_finalization"
-            result.thinking = reasoning.thinking
-            return result
+            "content": json.dumps(repair_input, ensure_ascii=False, separators=(",", ":")),
+        },
+    ]
+    result, _ = _backend_retry_call(
+        args, "final_json_generation", final_messages, response_schema,
+        artifact_dir, reasoning_attempt, 1, max_backend, False,
+        num_ctx, final_predict, 0.0, 0.8, 1,
+    )
+    if result.transport_status != "ok":
+        transport_error = result.error_type or "unknown transport error"
+        result.generation_status = "finalization_failed"
+        result.error_type = "FINALIZATION_FAILED"
+        result.error_message = "format repair failed: {}".format(transport_error)
+        return result
+    parsed, schema_errors = _parse_and_validate(result.content, response_schema)
+    valid = parsed is not None and not schema_errors
+    print("final_content_json_valid={}".format(str(valid).lower()), flush=True)
+    if valid:
+        result.policy_kind = policy_kind
+        result.parsed_decision = parsed
+        result.schema_valid = True
+        result.generation_status = "parsed_after_finalization"
+        result.thinking = reasoning.thinking
+        return result
     result.generation_status = "finalization_failed"
     result.error_type = "FINALIZATION_FAILED"
     result.error_message = "Finalizer did not return valid schema JSON"
@@ -399,7 +380,7 @@ def _request_payload(
 
 
 def _generation_budget(args: Any, policy_kind: str) -> Tuple[int, int]:
-    config = POLICY_GENERATION_CONFIG.get(policy_kind, POLICY_GENERATION_CONFIG["action_proposal"])
+    config = POLICY_GENERATION_CONFIG.get(policy_kind, POLICY_GENERATION_CONFIG["edge_selection"])
     num_ctx = int(getattr(args, "vlm_num_ctx", 0) or config["num_ctx"])
     num_predict = int(getattr(args, "vlm_num_predict", 0) or config["num_predict"])
     return num_ctx, num_predict

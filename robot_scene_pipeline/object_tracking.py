@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import math
-import re
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 from .geometry_relations import get_center, get_size
-from .task_semantic_validation import infer_object_shape
+from .object_semantics import infer_object_shape
 
 
 def object_ref(scene_revision: int, detector_object_id: Any) -> str:
@@ -23,7 +22,13 @@ def update_scene_tracks(
 ) -> Tuple[dict, List[dict]]:
     """Assign previous tracks to current detections with a global one-to-one greedy cost ordering."""
     tracks = memory.setdefault("tracks", {})
-    previous = [track for track in tracks.values() if track.get("visible", True)]
+    # A wrist-camera observation can legitimately miss a grasped object for one
+    # or two revisions.  Keep recently seen tracks eligible for explicit
+    # rebinding instead of replacing their identity with a detector id.
+    previous = [
+        track for track in tracks.values()
+        if int(scene_revision) - int(track.get("last_seen_revision", scene_revision)) <= 3
+    ]
     if mark_unseen_invisible:
         for track in tracks.values():
             track["visible"] = False
@@ -77,53 +82,6 @@ def _minimum_cost_one_to_one(candidates: List[tuple]) -> List[tuple]:
     return list(solve(0, 0)[2])
 
 
-def resolve_action_references(action: dict, state: dict, scene_revision: int) -> Tuple[Optional[dict], Optional[dict]]:
-    """Resolve track/object refs to current detector ids and reject stale or ambiguous bindings."""
-    objects = [obj for obj in state.get("objects", []) if isinstance(obj, dict)]
-    output = dict(action)
-    for prefix in ("object", "target_object"):
-        reference = action.get("{}_ref".format(prefix))
-        track_id = action.get("{}_track_id".format(prefix))
-        legacy_id = action.get("{}_id".format(prefix))
-        obj = None
-        reference_object = None
-        track_object = None
-        if track_id:
-            track_object = next((item for item in objects if str(item.get("track_id")) == str(track_id)), None)
-            obj = track_object
-        if reference:
-            parsed = parse_object_ref(reference)
-            if parsed is None or parsed[0] != int(scene_revision):
-                return None, {"reason": "stale_or_invalid_object_ref", "field": "{}_ref".format(prefix)}
-            reference_object = next((item for item in objects if str(item.get("id")) == parsed[1]), None)
-            obj = reference_object
-        if track_object is not None and reference_object is not None and track_object is not reference_object:
-            return None, {"reason": "object_reference_track_mismatch", "field": prefix}
-        if track_id and track_object is None:
-            return None, {"reason": "selected_track_not_visible", "field": "{}_track_id".format(prefix)}
-        if not track_id and not reference and legacy_id is not None:
-            declared_revision = action.get("scene_revision", state.get("scene_revision"))
-            if declared_revision is None:
-                return None, {"reason": "legacy_object_id_requires_scene_revision", "field": "{}_id".format(prefix)}
-            if int(declared_revision) != int(scene_revision):
-                return None, {"reason": "stale_legacy_object_id", "field": "{}_id".format(prefix)}
-            obj = next((item for item in objects if str(item.get("id")) == str(legacy_id)), None)
-        if obj is None and prefix == "object":
-            return None, {"reason": "selected_object_reference_not_found", "field": prefix}
-        if obj is not None:
-            if obj.get("tracking_ambiguous"):
-                return None, {"reason": "ambiguous_track_requires_reobserve", "track_id": obj.get("track_id")}
-            output["{}_id".format(prefix)] = obj.get("id")
-            output["{}_ref".format(prefix)] = obj.get("object_ref") or object_ref(scene_revision, obj.get("id"))
-            output["{}_track_id".format(prefix)] = obj.get("track_id")
-    return output, None
-
-
-def parse_object_ref(value: Any) -> Optional[Tuple[int, str]]:
-    match = re.fullmatch(r"scene_(\d+):obj_(.+)", str(value or ""))
-    return (int(match.group(1)), match.group(2)) if match else None
-
-
 def _bind(track: dict, detection: dict, revision: int, features: dict, ambiguous: bool) -> dict:
     previous_ref = track.get("current_object_ref")
     current_ref = object_ref(revision, detection.get("id"))
@@ -141,6 +99,7 @@ def _bind(track: dict, detection: dict, revision: int, features: dict, ambiguous
         "dimensions_m": get_size(detection), "bbox": detection.get("bbox_xyxy_px") or detection.get("bbox"),
         "role": detection.get("role", track.get("role")), "state": detection.get("state", track.get("state")),
         "visible": True, "tracking_ambiguous": ambiguous,
+        "last_seen_revision": int(revision),
     })
     record = {"track_id": track["track_id"], "previous_object_ref": previous_ref, "current_object_ref": current_ref, "match_confidence": confidence, "ambiguous": ambiguous, "match_features": features}
     track.setdefault("history", []).append(record)

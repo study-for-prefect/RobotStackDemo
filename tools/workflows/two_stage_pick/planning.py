@@ -13,55 +13,6 @@ def first_planned_step(plan):
     raise RuntimeError("No planned target step found.")
 
 
-def select_llm_pick_step(plan):
-    for index, step in enumerate(plan.get("steps", [])):
-        if step.get("action") == "pick" and step.get("status") == "planned" and step.get("object_id") is not None:
-            return index, step
-    raise RuntimeError("LLM execution plan has no planned pick step with an object_id.")
-
-
-def remaining_plan_after_step(plan, selected_index):
-    remaining = json.loads(json.dumps(plan))
-    remaining["steps"] = remaining.get("steps", [])[selected_index + 1 :]
-    remaining["execution_status"] = "not_executed"
-    return remaining
-
-
-def reject_additional_pick_steps(plan, selected_index):
-    additional = [
-        step
-        for step in plan.get("steps", [])[selected_index + 1 :]
-        if step.get("action") == "pick" and step.get("status") == "planned"
-    ]
-    if additional:
-        raise RuntimeError(
-            "Integrated two-stage execution supports one pick per run; found another planned pick at step {}.".format(
-                additional[0].get("step")
-            )
-        )
-
-
-def reject_incomplete_remaining_motion_steps(plan, selected_index):
-    for step in plan.get("steps", [])[selected_index + 1 :]:
-        if step.get("action") in ("ask_user", "stop"):
-            continue
-        if step.get("status") != "planned" or not step.get("approach_position_m") or not step.get("target_position_m"):
-            raise RuntimeError(
-                "LLM step {} after pick is not executable: action={} status={}.".format(
-                    step.get("step"),
-                    step.get("action"),
-                    step.get("status"),
-                )
-            )
-
-
-def has_planned_motion(plan):
-    return any(
-        step.get("status") == "planned" and step.get("approach_position_m")
-        for step in plan.get("steps", [])
-    )
-
-
 def plan_has_reliable_yaw(path):
     step = first_planned_step(load_json(path))
     return bool(step.get("target_yaw_valid") and step.get("target_yaw_deg") is not None)

@@ -11,9 +11,9 @@ workflow entry points:
 - perception capture and detector runtime
 - RGB-D and tabletop geometry
 - TF transforms
-- scene memory and stack-state estimation
+- cross-frame track rebinding and revision-scoped scene facts
 - geometry relations and XY correction
-- symbolic scene reasoning
+- GF225 swept-volume and grasp-yaw geometry
 
 ## Public command entry points
 
@@ -46,7 +46,7 @@ tools/
 │   ├── moveit_preview/          # arguments, poses, push, trajectories, execution, TF node
 │   └── push_primitives.py       # pure push-target geometry
 └── workflows/
-    ├── stack_demo/              # closed-loop stack workflow
+    ├── stack_demo/              # organize/house code-state, edge, policy, verification loop
     └── two_stage_pick/          # two-snapshot visual pick workflow
 ```
 
@@ -60,7 +60,7 @@ workflow/tool packages
 robot_scene_pipeline
 ```
 
-Core geometry, memory, and reasoning modules must not import robot workflow
+Core perception and geometry modules must not import robot workflow
 entry scripts. Hardware movement remains opt-in through explicit `--execute`
 flags.
 

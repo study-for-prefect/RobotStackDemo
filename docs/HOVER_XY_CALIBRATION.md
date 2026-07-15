@@ -129,18 +129,12 @@ python3 tools/calibration/xy_bias_diagnosis.py analyze \
   --output-calibration-json runtime/stack_calibration_yaw.json
 ```
 
-The optional calibration output is directly consumable by stack demo:
-
-```bash
-python3 tools/workflows/stack_demo_pipeline.py \
-  ... \
-  --calibration-json runtime/stack_calibration_yaw.json
-```
-
-Its fields are `affine_xy`, `grasp_base_bias_m`, `place_base_bias_m`,
-`tcp_offset_tool_m`, and `max_correction_m`. Camera-frame offsets are not a
-default execution path; convert any measured camera vector through TF and store
-the resulting base/tool correction in this JSON.
+The optional calibration output is an analysis artifact. The current stack demo
+does not accept the removed `--calibration-json` override: review a fitted value,
+validate it independently, then update the single applicable configuration source
+in a separate, explicitly reviewed change. Do not feed an analysis file directly
+to robot execution. Camera-frame offsets are not a default execution path; convert
+any measured camera vector through TF before evaluating a base/tool correction.
 
 ## Validation
 

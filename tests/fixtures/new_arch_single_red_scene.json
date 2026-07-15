@@ -1,0 +1,19 @@
+{
+  "scene_revision": 1,
+  "frame_id": "base_link",
+  "timestamp": "2026-07-15T00:00:00Z",
+  "objects": [
+    {
+      "id": 7,
+      "track_id": "track_red_01",
+      "label": "square red",
+      "color": "red",
+      "shape": "square",
+      "geometry_center_m": [0.500, 0.000, 0.020],
+      "dimensions_m": [0.030, 0.030, 0.040],
+      "yaw_deg": 17.0,
+      "orientation_confidence": 0.9,
+      "bbox": [100, 100, 160, 160]
+    }
+  ]
+}

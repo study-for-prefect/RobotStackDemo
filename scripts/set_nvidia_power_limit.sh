@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-power_limit_w="${1:-300}"
+power_limit_w="${1:-250}"
 attempt=0
 while ! /usr/bin/nvidia-smi -L >/dev/null 2>&1; do
   attempt=$((attempt + 1))

@@ -73,13 +73,27 @@ echo "检查并刷新 TF：base_link <- camera_color_optical_frame, tool0"
     exit 1
   }
 
+TASK_TYPE="${1:-organize_blocks}"
+case "$TASK_TYPE" in
+  organize_blocks)
+    INSTRUCTION="按颜色整理积木"
+    ;;
+  build_house)
+    INSTRUCTION="使用六个固定角色搭一个房子"
+    ;;
+  *)
+    echo "ERROR: 任务只支持 organize_blocks 或 build_house"
+    exit 2
+    ;;
+esac
+
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
-OUTPUT_DIR="runtime/stack_push_execute_${RUN_ID}"
+OUTPUT_DIR="runtime/${TASK_TYPE}_execute_${RUN_ID}"
 
 python3 tools/workflows/stack_demo_pipeline.py \
-  --instruction "以红色积木为底，把绿色积木放到红色上面，再把蓝色积木放到绿色上面，再把黄色积木放到蓝色上面" \
+  --task-type "$TASK_TYPE" \
+  --instruction "$INSTRUCTION" \
   --output-dir "$OUTPUT_DIR" \
-  --memory-json runtime/stack_push_execute/scene_memory.json \
   --detector-weight models/yolo/weights/best.pt \
   --tf-json /tmp/scene_tf_base_color_optical.json \
   --base-frame base_link \

@@ -57,6 +57,6 @@ def parse_args():
     analyze.add_argument(
         "--output-calibration-json",
         default="",
-        help="Optional stack_demo --calibration-json output path.",
+        help="Optional legacy calibration analysis artifact; current stack_demo does not consume it.",
     )
     return parser.parse_args()

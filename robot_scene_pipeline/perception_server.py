@@ -28,7 +28,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Persistent YOLO + RGB-D perception server.")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--instruction", default="")
     parser.add_argument("--request-timeout-s", type=float, default=3.0)
     parser.add_argument("--detector-config", default="config/yolo_detector.json")
     add_ros_topic_args(parser)
@@ -105,10 +104,8 @@ class PerceptionServerState:
         if not output_dir:
             raise ValueError("Missing output_dir query parameter.")
         output_dir = project_path(str(output_dir))
-        instruction = str(query.get("instruction") or self.args.instruction or "")
         request_args = SimpleNamespace(**vars(self.args))
         request_args.output_dir = output_dir
-        request_args.instruction = instruction
         if query.get("tf_json"):
             request_args.tf_json = project_path(str(query["tf_json"]))
         if query.get("camera_frame"):
