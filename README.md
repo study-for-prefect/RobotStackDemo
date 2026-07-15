@@ -33,6 +33,25 @@ D435i RGB-D
 
 每轮只规划并执行一条真实边，不预测执行后的多步几何。动作后必须用最新观测重新生成边。
 
+## 0715retry4 感知 500 修复
+
+原始失败证据位于 `runtime/organize_blocks_plan_only_20260715/`；任务中提到的
+`runtime/0715retry4` 实际不存在，原目录未被覆盖。该轮已经写出 RGB、YOLO、深度、TF 和桌面
+几何，却在 `private_scene_state.json` 生成前返回 HTTP 500。安全复现得到服务端原始异常：
+
+```text
+'types.SimpleNamespace' object has no attribute 'instruction'
+```
+
+根因是感知层 `build_private_state` 仍读取任务层 `args.instruction`，而持久感知服务器构造的是
+与任务无关的 `SimpleNamespace`；同时旧客户端丢弃了 HTTPError 正文，只留下笼统的
+`HTTP Error 500: Internal Server Error`。完整证据与排除项记录在
+`runtime/0715retry4_analysis.json`。
+
+当前感知状态不再依赖任务 instruction，`scene_id` 与坐标系字段也已分离。客户端会保留 JSON
+和非 JSON 错误正文，并把相机未就绪、TF 请求错误、detector 失败和场景处理失败区分为结构化
+错误；这些错误都不会被解释为任务完成。
+
 ## 状态与身份
 
 `ClutterSceneState` 明确记录 `scene_revision`、`base_link` 时间戳、当前对象、初始
@@ -150,6 +169,27 @@ face、目标 yaw、底边接触、质心投影、支撑余量和屋顶相对位
 - MoveIt 成功不是 GF225 安全证明；代码侧指尖、掌部和分阶段扫掠检查不可省略。
 - 实机驱动由外部维护；本入口不会启动或重复启动 UR5、RealSense、MoveIt 或 GF225 驱动。
 
+## 感知 client/server 契约
+
+每次快照请求显式发送绝对 `output_dir`、绝对 `tf_json`、`base_frame`、`camera_frame`、
+`tf_point_mode`、`score_thresh`、request ID、capture reason、scene revision、客户端超时和 TF
+最大年龄。服务端先验证 TF 文件存在、JSON/4x4 矩阵有限、parent/child 匹配且时间新鲜，再使用
+当前请求参数处理同一组同步 RGB-D 帧，不再依赖服务启动时残留的 TF 路径。
+
+`GET /health` 返回 RGB/depth/camera-info readiness、序号/时间戳/来源 frame、三个 topic、固定
+base/camera/frame mode、detector weight/imgsz/iou/device、server PID 和配置 fingerprint。pipeline
+在 `/snapshot` 前逐项比较固定配置；不一致会以
+`perception_server_config_mismatch` 拒绝继续。`score_thresh` 和当前 `tf_json` 是每次 snapshot
+的动态参数，不是服务端固定配置。
+
+结构化错误使用 `ok=false`、HTTP status、`error_code`、`error_type`、`error`、`request_id` 和
+`effective_config`。请求/TF 错误通常为 400；`camera_not_ready`、RGB-D 不同步为 503；
+`detector_failed`、`scene_processing_failed` 和意外内部错误为 500。
+
+snapshot subprocess fallback 默认关闭。只有显式给出
+`--allow-snapshot-subprocess-fallback` 才会启用，并保留原服务端错误、记录实际 fallback 命令，
+且使用与 server 请求相同的 TF/frame/detector/topic 参数。
+
 ## 运行
 
 查看真实参数：
@@ -185,6 +225,44 @@ python3 tools/workflows/stack_demo_pipeline.py \
   --instruction "搭一个房子" \
   --moveit-plan-only \
   --output-dir runtime/build_house_plan_only
+```
+
+使用真实相机、最新 TF、真实 Ollama 和已有 MoveIt 做一次中央强制无运动集成检查：
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  --task-type build_house \
+  --instruction "用六个固定角色搭建房屋" \
+  --live-integration-check \
+  --max-task-steps 1 \
+  --perception-server-url http://127.0.0.1:8765 \
+  --tf-json /tmp/scene_tf_base_color_optical.json \
+  --base-frame base_link \
+  --camera-frame camera_color_optical_frame \
+  --tool-frame tool0 \
+  --tf-point-mode direct \
+  --output-dir runtime/build_house_live_integration_20260715_resume3
+```
+
+`--live-integration-check` 与 `--execute`、`--yes`、`--execute-push-clearing` 互斥，并强制
+`execute=false`、`moveit_plan_only=true`、`max_task_steps=1`。所有子进程还会由中央守卫再次拒绝
+执行/夹爪 flag；它不执行 ready pose、轨迹、nudge、pick-away 或动作后模拟。
+
+已有 8765 服务由外部维护，不应为了测试重启。需要隔离验证新 server 时可在 8766 启动专用
+进程，并在测试后只停止自己启动的 PID：
+
+```bash
+python3 -m robot_scene_pipeline.perception_server \
+  --host 127.0.0.1 --port 8766 \
+  --camera-source ros-topic \
+  --color-topic /camera/camera/color/image_raw \
+  --depth-topic /camera/camera/aligned_depth_to_color/image_raw \
+  --camera-info-topic /camera/camera/color/camera_info \
+  --detector-weight models/yolo/weights/best.pt \
+  --detector-imgsz 960 --detector-iou 0.45 --detector-device cuda:0 \
+  --use-tf --base-frame base_link \
+  --camera-frame camera_color_optical_frame --tf-point-mode direct \
+  --estimate-tabletop
 ```
 
 实机命令保留如下，但本次重构未执行：
@@ -225,9 +303,17 @@ action_history.json
 
 ## 验证状态
 
-本次只运行离线 dry-run、编译和 mock/单元测试，没有执行真实 UR5 运动、夹爪闭合、推动或
-机器人驱动启动。新架构尚待按“单目标抓取门控 -> 单次颜色放置 -> 受控清障 -> 完整整理 ->
-左右支撑 -> 屋顶中转/重抓 -> 三角顶”的顺序实机验证。
+本次通过真实 D435i、实时 TF、`qwen3-vl:8b-instruct` 和已有 MoveIt 完成了一次
+`build_house --live-integration-check`。报告位于
+`runtime/build_house_live_integration_20260715_resume3/integration_report.json`：相机、TF、感知契约、
+Qwen 两级 ID 选择、32 条通过边和最终 MoveIt plan-only 均成功；前后关节最大差
+`6.01e-05 rad`，`robot_motion_executed=false`、`gripper_command_executed=false`。
+
+同一场景的 organize 安全检查位于
+`runtime/organize_blocks_live_integration_20260715_resume2/integration_report.json`。感知链路全部通过，
+但当前四个未完成目标没有完整安全边，流程正确地以“非完成、重新观测”结束，没有调用 Qwen
+或 MoveIt，未放宽碰撞门。尚未执行真实抓取、放置、清障或房屋结构搭建；下一步仍应按
+“孤立目标抓取门控 -> 单次颜色放置 -> 受控清障 -> 完整整理 -> 支撑 -> 屋顶 -> 三角顶”验证。
 
 更详细的模块和日志说明见
 [`tools/workflows/stack_demo/README.md`](tools/workflows/stack_demo/README.md)，感知说明见

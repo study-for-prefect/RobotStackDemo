@@ -8,7 +8,7 @@ from unittest.mock import patch
 from robot_scene_pipeline.object_tracking import update_scene_tracks
 from robot_scene_pipeline.ollama_policy_client import call_policy
 from tools.workflows.stack_demo.app import main
-from tools.workflows.stack_demo.clutter.edge_generation import generate_physical_edges
+from tools.workflows.stack_demo.clutter.edge_generation import _opposite_side, generate_physical_edges
 from tools.workflows.stack_demo.clutter.grasp_edges import scan_grasp_yaws
 from tools.workflows.stack_demo.clutter.target_options import build_target_options
 from tools.workflows.stack_demo.policy.qwen_client import StatelessQwenClient
@@ -24,6 +24,12 @@ from tests.new_arch_fixtures import MockQwenClient, config, edge, placement, raw
 
 
 class NewSceneEdgePolicyTests(unittest.TestCase):
+    def test_code_owned_push_direction_has_opposite_contact_side(self):
+        self.assertEqual(_opposite_side([1.0, 0.0, 0.0]), "-x")
+        self.assertEqual(_opposite_side([-1.0, 0.0, 0.0]), "+x")
+        self.assertEqual(_opposite_side([0.0, 1.0, 0.0]), "-y")
+        self.assertEqual(_opposite_side([0.0, -1.0, 0.0]), "+y")
+
     def test_01_main_entry_loads_new_planner(self):
         fixture = Path(__file__).parent / "fixtures" / "new_arch_single_red_scene.json"
         with tempfile.TemporaryDirectory() as output:

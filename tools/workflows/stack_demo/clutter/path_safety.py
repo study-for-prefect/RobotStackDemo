@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from robot_scene_pipeline.geometry_relations import object_xy_aabb
-from robot_scene_pipeline.tool_swept_volume import check_tool_swept_volume
+from robot_scene_pipeline.tool_swept_volume import check_tool_swept_volume, check_transport_swept_volume
 from tools.robot.push_primitives import build_push_targets
 
 from ..common.config import StackDemoConfig
@@ -34,21 +33,41 @@ def placement_path_checks(
         }
     )
     obstacles = [other for other in scene.current_objects if other.track_id != obj.track_id]
+    release_pose = physical.get("release_pose") or {}
+    release_yaw = float(release_pose.get("yaw_deg", physical.get("release_gripper_yaw_deg", obj.yaw_deg)))
     clearance = evaluate_gripper_pose_clearance(
         moved, [moved, *obstacles],
-        float(place_pose.get("yaw_deg", obj.yaw_deg)), config,
+        release_yaw, config,
     )
-    transport_safe = _held_transport_path_safe(
-        obj, physical.get("transport_path", ()), obstacles, config,
+    gripper = config.section("gripper")
+    transport = check_transport_swept_volume(
+        physical.get("transport_path", ()),
+        [_geometry_object_dict(item) for item in obstacles],
+        held_object_id=obj.track_id,
+        held_size_m=obj.size_xyz_m,
+        gripper_outer_width_m=float(gripper["open_outer_width_m"]),
+        fingertip_width_m=float(gripper["fingertip_width_m"]),
+        upper_finger_width_m=float(gripper["upper_finger_width_m"]),
+        upper_finger_height_m=float(gripper["upper_finger_height_m"]),
+        palm_width_m=float(gripper["palm_width_m"]),
+        palm_depth_m=float(gripper["palm_depth_m"]),
+        palm_height_m=float(gripper["palm_height_m"]),
+        tcp_offset_tool_m=gripper["tcp_offset_tool_m"],
+        safety_margin_m=float(config.section("safety")["object_clearance_m"]),
     )
     place_clear = bool(clearance.get("finger_safe") and clearance.get("palm_safe"))
     return {
-        "transport_safe": transport_safe,
+        "transport_safe": bool(transport.get("feasible")),
         "place_descent_safe": place_clear,
         "release_safe": place_clear,
         "return_safe": place_clear,
         "place_finger_safe": bool(clearance.get("finger_safe")),
         "place_palm_safe": bool(clearance.get("palm_safe")),
+        "place_blocking_track_ids": list(clearance.get("blocking_track_ids", [])),
+        "release_gripper_yaw_deg": release_yaw,
+        "transport_checked_components": transport.get("checked_components", []),
+        "transport_blocking_track_ids": sorted({str(item.get("id")) for item in transport.get("collisions", [])}),
+        "transport_swept_volume_reason": transport.get("reason"),
     }
 
 
@@ -116,34 +135,6 @@ def nudge_sweep_checks(
     }
 
 
-def _held_transport_path_safe(
-    held: SceneObjectState,
-    path: Sequence[Mapping[str, Any]],
-    obstacles: Sequence[SceneObjectState],
-    config: StackDemoConfig,
-) -> bool:
-    positions = [pose.get("position_m") for pose in path if isinstance(pose, Mapping)]
-    positions = [item for item in positions if isinstance(item, (list, tuple)) and len(item) >= 3]
-    if len(positions) < 2:
-        return False
-    margin = float(config.section("safety")["object_clearance_m"])
-    half = [0.5 * value + margin for value in held.size_xyz_m]
-    for start, end in zip(positions, positions[1:]):
-        swept = {
-            "xmin": min(float(start[0]), float(end[0])) - half[0],
-            "xmax": max(float(start[0]), float(end[0])) + half[0],
-            "ymin": min(float(start[1]), float(end[1])) - half[1],
-            "ymax": max(float(start[1]), float(end[1])) + half[1],
-            "zmin": min(float(start[2]), float(end[2])) - half[2],
-            "zmax": max(float(start[2]), float(end[2])) + half[2],
-        }
-        for obstacle in obstacles:
-            bounds = object_xy_aabb(_geometry_object_dict(obstacle))
-            if bounds and _aabb_overlap_3d(swept, bounds):
-                return False
-    return True
-
-
 def _push_plan(
     blocker: SceneObjectState,
     direction: Sequence[float],
@@ -176,13 +167,6 @@ def _geometry_object_dict(obj: SceneObjectState) -> dict[str, Any]:
         "dimensions_m": list(obj.size_xyz_m),
         "table_yaw_deg": obj.yaw_deg,
     }
-
-
-def _aabb_overlap_3d(first: Mapping[str, float], second: Mapping[str, float]) -> bool:
-    return all(
-        min(float(first[high]), float(second[high])) > max(float(first[low]), float(second[low]))
-        for low, high in (("xmin", "xmax"), ("ymin", "ymax"), ("zmin", "zmax"))
-    )
 
 
 def _opposite_side(direction: Sequence[float]) -> str:

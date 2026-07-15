@@ -80,6 +80,17 @@ def _target_request(
         "target_options": [item.to_dict() for item in options],
         "recent_failures": [dict(item) for item in scene.recent_action_results[-failure_limit:]] if failure_limit else [],
         "forbidden_action_fingerprints": list(scene.forbidden_action_fingerprints),
+        "selection_priority": [
+            "direct_task_progress_with_low_physical_risk",
+            "wider_continuous_safe_grasp_yaw_interval",
+            "larger_nearest_neighbor_clearance",
+            "fewer_neighbors",
+            "lower_clearance_cost",
+            "releases_more_unfinished_tracks",
+            "farther_from_protected_structure",
+            "avoid_recently_failed_target",
+            "never_use_object_id_array_or_image_order",
+        ],
         "output_contract": {
             "selected_target_option_id": "one exact supplied target_option_id",
             "reason_codes": "short comparison codes only",

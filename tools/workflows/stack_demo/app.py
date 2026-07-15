@@ -23,11 +23,19 @@ from .common.cycle_logging import CycleLogger
 from .common.moveit_adapter import MoveItEdgeAdapter
 from .common.policy_images import build_policy_images
 from .common.scene_state import ClutterSceneState, SceneObjectState, build_clutter_scene_state
+from .common.track_lifecycle import mark_track_after_place, mark_track_held, predicted_track_centers
 from .execution_safety import validate_execution_source
 from .house.completion import evaluate_house_completion
 from .house.planner import HousePlanner
 from .house.state import HouseTaskState, build_house_task_state
 from .house.structure import role_observation_checks
+from .live_integration import (
+    LiveIntegrationReport,
+    capture_after_joint_state,
+    capture_ros_preflight,
+    validate_live_snapshot,
+    validate_live_integration_args,
+)
 from .organize.completion import evaluate_organize_completion
 from .organize.planner import OrganizePlanner
 from .organize.state import OrganizeTaskState, build_organize_task_state
@@ -38,6 +46,7 @@ from .policy.target_selector import QwenTargetSelector
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    validate_live_integration_args(args)
     validate_execution_source(args)
     if args.execute and not args.yes:
         raise RuntimeError("real execution requires both --execute and --yes")
@@ -48,8 +57,17 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("stack_demo_pipeline now supports only organize_blocks and build_house")
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    integration = LiveIntegrationReport(output) if args.live_integration_check else None
+    preflight_complete = False
     try:
-        return _run(args, config, task_type, output)
+        if integration is not None:
+            integration.write()
+            preflight = capture_ros_preflight(args, output)
+            preflight_complete = True
+            integration.update(camera_topics_ok=bool(preflight.get("camera_topics_ok")))
+            integration.artifact("ros_preflight", output / "ros_preflight.json")
+            integration.artifact("before_joint_state", output / "before_joint_state.json")
+        return _run(args, config, task_type, output, integration=integration)
     except Exception as exc:
         (output / "failure_state.json").write_text(json.dumps({
             "task_type": task_type,
@@ -57,14 +75,49 @@ def main(argv: list[str] | None = None) -> int:
             "error": str(exc),
             "task_complete": False,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
+        if integration is not None:
+            integration.fail(integration.values.get("failure_stage") or "pipeline", exc)
         raise
     finally:
+        if integration is not None and preflight_complete:
+            try:
+                delta = capture_after_joint_state(args, output)
+                integration.update(joint_state_delta=delta)
+                integration.artifact("after_joint_state", output / "after_joint_state.json")
+                integration.artifact("joint_state_delta", output / "joint_state_delta.json")
+            except Exception as exc:
+                integration.fail("after_joint_state", exc)
         if args.unload_model_after_task and not args.mock_policy_response_dir:
             unload_model(args, str(output))
 
 
-def _run(args: Any, config: StackDemoConfig, task_type: str, output: Path) -> int:
+def _run(
+    args: Any,
+    config: StackDemoConfig,
+    task_type: str,
+    output: Path,
+    *,
+    integration: LiveIntegrationReport | None = None,
+) -> int:
     raw = _initial_observation(args, output)
+    if integration is not None:
+        initial = output / "initial_observation"
+        snapshot_validation = validate_live_snapshot(initial, raw)
+        integration.update(
+            tf_ok=(initial / "tf_status.json").is_file(),
+            perception_health_ok=(initial / "perception_server_health.json").is_file(),
+            snapshot_ok=(initial / "private_scene_state.json").is_file(),
+            parameter_contract_ok=(initial / "perception_snapshot_response.json").is_file(),
+            snapshot_validation=snapshot_validation,
+        )
+        for name in (
+            "snapshot.jpg", "annotated_detector.jpg", "private_scene_state.json",
+            "detector_objects_3d.json", "tabletop_geometry.json", "tf_status.json",
+            "perception_server_health.json", "perception_snapshot_request.json",
+        ):
+            path = initial / name
+            if path.is_file():
+                integration.artifact(name, path)
     track_memory: dict[str, Any] = {}
     _bind_observation_tracks(raw, track_memory, trust_recorded_ids=bool(args.offline_scene_state))
     scene = build_clutter_scene_state(raw, config.workspace)
@@ -112,9 +165,36 @@ def _run(args: Any, config: StackDemoConfig, task_type: str, output: Path) -> in
             cycle = HousePlanner(config, extraction).plan_cycle(scene, house_state, logger, image_paths=images)
         if cycle.selected_edge is None:
             logger.ensure_execution_artifacts(cycle.decision_source)
+            if integration is not None:
+                edges = _load_json_list(cycle_dir / "physical_action_edges.json")
+                integration.update(
+                    physical_edges_generated=bool(edges),
+                    qwen_ok=False,
+                    failure_stage="no_selected_physical_edge",
+                )
             return 2
         if not args.execute:
             logger.ensure_execution_artifacts("moveit_plan_only" if args.moveit_plan_only else "dry_run_no_motion")
+            if integration is not None:
+                edges = _load_json_list(cycle_dir / "physical_action_edges.json")
+                qwen_ok = bool(
+                    cycle.target_selection.decision_source == "qwen_target_selection"
+                    and cycle.edge_selection is not None
+                    and cycle.edge_selection.decision_source == "qwen_edge_selection"
+                )
+                moveit_ok = bool(cycle.safety_gate and cycle.safety_gate.passed)
+                integration.update(
+                    physical_edges_generated=bool(edges),
+                    qwen_ok=qwen_ok,
+                    selected_edge=cycle.selected_edge.candidate_id,
+                    moveit_plan_only_attempted=True,
+                    moveit_plan_only_ok=moveit_ok,
+                    failure_stage=None if qwen_ok and moveit_ok else (
+                        "qwen_selection_skipped_or_failed" if not qwen_ok else "moveit_plan_only_failed"
+                    ),
+                )
+                integration.artifact("selected_edge", cycle_dir / "selected_edge.json")
+                integration.artifact("final_safety_gate", cycle_dir / "final_safety_gate.json")
             return 0
 
         observer = _LiveObserver(
@@ -146,6 +226,14 @@ def _run(args: Any, config: StackDemoConfig, task_type: str, output: Path) -> in
         scene = result.final_scene
         raw = observer.latest_raw
     return 2
+
+
+def _load_json_list(path: Path) -> list[Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return value if isinstance(value, list) else []
 
 
 def _decorate_task_scene(
@@ -239,7 +327,9 @@ class _LiveObserver(SceneObserver):
         _bind_observation_tracks(
             raw,
             self._track_memory,
-            predicted_displacements=_predicted_displacements(self._selected_edge, reason),
+            predicted_centers=predicted_track_centers(
+                self._selected_edge, reason, self._track_memory,
+            ),
         )
         self.latest_raw = raw
         return build_clutter_scene_state(
@@ -247,6 +337,24 @@ class _LiveObserver(SceneObserver):
             expected_tracks=self._expected,
             recent_action_results=self._history[-5:],
             forbidden_action_fingerprints=self._forbidden,
+        )
+
+    def mark_held(self, edge, verification) -> None:
+        evidence = verification.evidence
+        confidence = 0.9 if evidence.get("target_moved_from_original_position") else 0.75
+        mark_track_held(
+            self._track_memory,
+            edge,
+            verification.scene_revision,
+            held_state_confidence=confidence,
+        )
+
+    def mark_after_place(self, edge, verification) -> None:
+        mark_track_after_place(
+            self._track_memory,
+            edge,
+            verification.scene_revision,
+            success=verification.success,
         )
 
 
@@ -323,6 +431,7 @@ def _bind_observation_tracks(
     *,
     trust_recorded_ids: bool = False,
     predicted_displacements: Mapping[str, list[float]] | None = None,
+    predicted_centers: Mapping[str, list[float]] | None = None,
 ) -> None:
     objects = [item for item in raw.get("objects", []) if isinstance(item, dict)]
     revision = int(raw.get("scene_revision", 1))
@@ -340,35 +449,9 @@ def _bind_observation_tracks(
         objects,
         revision,
         predicted_displacements=dict(predicted_displacements or {}),
+        predicted_centers=dict(predicted_centers or {}),
     )
     raw["track_rebinding_results"] = {
         "source": "explicit_one_to_one_rebinding",
         "assignments": assignments,
-    }
-
-
-def _predicted_displacements(edge, reason: str) -> dict[str, list[float]]:
-    obj = edge.decision_metadata.get("acted_object_geometry", {})
-    center = obj.get("geometry_center_m")
-    if reason == "post_place":
-        center = edge.physical_parameters.get("lift_pose", {}).get("position_m")
-    if not isinstance(center, (list, tuple)) or len(center) < 3:
-        grasp = edge.physical_parameters.get("grasp_pose", {}).get("position_m")
-        center = grasp
-    if not isinstance(center, (list, tuple)) or len(center) < 3:
-        return {}
-    destination = None
-    if reason == "post_place":
-        destination = edge.physical_parameters.get("place_pose", {}).get("position_m")
-    elif reason == "post_nudge":
-        direction = edge.physical_parameters.get("push_direction_base", ())
-        distance = float(edge.physical_parameters.get("push_distance_m", 0.0))
-        if len(direction) >= 3:
-            destination = [float(center[i]) + float(direction[i]) * distance for i in range(3)]
-    elif reason == "post_grasp_at_safe_height":
-        destination = edge.physical_parameters.get("lift_pose", {}).get("position_m")
-    if not isinstance(destination, (list, tuple)) or len(destination) < 3:
-        return {}
-    return {
-        edge.acted_object_track_id: [float(destination[i]) - float(center[i]) for i in range(3)]
     }

@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 from robot_scene_pipeline.grasp_orientation import downward_quaternion_for_yaw
 
-from ..commands import close_gripper_command, open_gripper_command, run
+from ..commands import close_gripper_command, open_gripper_command, run, run_non_actuating
 from .action_edges import ActionType, PhysicalActionEdge
 from .config import StackDemoConfig
 
@@ -26,7 +26,7 @@ class MoveItEdgeAdapter:
         try:
             if edge.action_type == ActionType.NUDGE_BLOCKER:
                 path = self._write_push_plan(edge)
-                run(self._push_command(path, execute=False))
+                run_non_actuating(self._push_command(path, execute=False))
             else:
                 for name in ("approach_pose", "grasp_pose", "lift_pose"):
                     self._run_pose(edge, name, execute=False)
@@ -116,7 +116,10 @@ class MoveItEdgeAdapter:
         ]
         if execute:
             command.extend(["--execute", "--yes"])
-        run(command)
+        if execute:
+            run(command)
+        else:
+            run_non_actuating(command)
 
     def _write_push_plan(self, edge: PhysicalActionEdge) -> Path:
         geometry = edge.decision_metadata.get("acted_object_geometry")

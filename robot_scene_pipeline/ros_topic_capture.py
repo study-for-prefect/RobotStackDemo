@@ -297,6 +297,22 @@ class RosRgbdSubscriber:
     def ready(self, require_depth: bool = True) -> bool:
         return self._ready(require_depth)
 
+    def status(self) -> dict:
+        """Return a lock-consistent, read-only readiness snapshot for /health."""
+        with self._lock:
+            return {
+                "rgb_ready": self.color_bgr is not None,
+                "depth_ready": self.depth_frame is not None,
+                "camera_info_ready": self.intrinsics is not None,
+                "latest_color_seq": int(self.color_seq),
+                "latest_color_timestamp": self.color_stamp,
+                "latest_depth_timestamp": self.depth_stamp,
+                "color_frame_id": self.color_frame_id,
+                "depth_frame_id": self.depth_frame_id,
+                "camera_info_frame_id": self.camera_info_frame_id,
+                "last_error": self.last_error,
+            }
+
     def wait_for_frame(
         self,
         timeout_sec: float,

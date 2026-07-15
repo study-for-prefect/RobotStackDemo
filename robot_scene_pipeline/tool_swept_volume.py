@@ -17,6 +17,127 @@ DEFAULT_PUSH_PROFILE = [
 ]
 
 
+def check_transport_swept_volume(
+    path: Sequence[dict],
+    objects: Iterable[ObjectDict],
+    *,
+    held_object_id: Any,
+    held_size_m: Sequence[float],
+    gripper_outer_width_m: float,
+    fingertip_width_m: float,
+    upper_finger_width_m: float,
+    upper_finger_height_m: float,
+    palm_width_m: float,
+    palm_depth_m: float,
+    palm_height_m: float,
+    tcp_offset_tool_m: Sequence[float],
+    safety_margin_m: float,
+    sample_step_m: float = 0.01,
+) -> Dict[str, Any]:
+    """Check held object plus every GF225 body profile along the full path."""
+    envelopes = transport_tool_swept_obbs(
+        path,
+        held_size_m=held_size_m,
+        gripper_outer_width_m=gripper_outer_width_m,
+        fingertip_width_m=fingertip_width_m,
+        upper_finger_width_m=upper_finger_width_m,
+        upper_finger_height_m=upper_finger_height_m,
+        palm_width_m=palm_width_m,
+        palm_depth_m=palm_depth_m,
+        palm_height_m=palm_height_m,
+        tcp_offset_tool_m=tcp_offset_tool_m,
+        safety_margin_m=safety_margin_m,
+        sample_step_m=sample_step_m,
+    )
+    collisions: List[Dict[str, Any]] = []
+    for obj in objects:
+        if not isinstance(obj, dict) or str(obj.get("id")) == str(held_object_id):
+            continue
+        bounds = object_xy_aabb(obj)
+        if not bounds:
+            continue
+        for envelope in envelopes:
+            overlap = _obb_aabb_overlap(envelope, bounds)
+            if overlap is not None:
+                collisions.append({
+                    "id": obj.get("id"),
+                    "component": envelope["profile_name"],
+                    "segment_index": envelope["segment_index"],
+                    "minimum_clearance_m": round(-overlap, 6),
+                })
+                break
+    return {
+        "feasible": not collisions,
+        "reason": "transport_swept_volume_clear" if not collisions else "transport_swept_volume_collision",
+        "collisions": collisions,
+        "checked_components": sorted({item["profile_name"] for item in envelopes}),
+        "sampled_envelope_count": len(envelopes),
+    }
+
+
+def transport_tool_swept_obbs(
+    path: Sequence[dict],
+    *,
+    held_size_m: Sequence[float],
+    gripper_outer_width_m: float,
+    fingertip_width_m: float,
+    upper_finger_width_m: float,
+    upper_finger_height_m: float,
+    palm_width_m: float,
+    palm_depth_m: float,
+    palm_height_m: float,
+    tcp_offset_tool_m: Sequence[float],
+    safety_margin_m: float,
+    sample_step_m: float,
+) -> List[Dict[str, Any]]:
+    if len(path) < 2 or len(held_size_m) < 3:
+        return []
+    held = [abs(float(value)) for value in held_size_m[:3]]
+    profiles = (
+        ("held_object", held[1], held[0], -0.5 * held[2], 0.5 * held[2]),
+        ("fingertips", float(gripper_outer_width_m), float(fingertip_width_m), -0.5 * held[2], 0.025),
+        ("upper_fingers", float(upper_finger_width_m), float(palm_depth_m), 0.025, float(upper_finger_height_m)),
+        ("palm", float(palm_width_m), float(palm_depth_m), float(upper_finger_height_m), float(palm_height_m)),
+        ("tcp_to_gripper_body", float(palm_width_m), float(palm_depth_m), 0.0, abs(float(tcp_offset_tool_m[2]))),
+    )
+    output: List[Dict[str, Any]] = []
+    for segment_index, (start_pose, end_pose) in enumerate(zip(path, path[1:])):
+        start = start_pose.get("position_m") if isinstance(start_pose, dict) else None
+        end = end_pose.get("position_m") if isinstance(end_pose, dict) else None
+        if not isinstance(start, (list, tuple)) or not isinstance(end, (list, tuple)) or len(start) < 3 or len(end) < 3:
+            continue
+        start_yaw = float(start_pose.get("yaw_deg", 0.0))
+        end_yaw = float(end_pose.get("yaw_deg", start_yaw))
+        yaw_delta = (end_yaw - start_yaw + 90.0) % 180.0 - 90.0
+        distance = math.dist([float(value) for value in start[:3]], [float(value) for value in end[:3]])
+        divisions = max(1, int(math.ceil(max(distance / max(1e-6, sample_step_m), abs(yaw_delta) / 5.0))))
+        for index in range(divisions):
+            first_ratio, second_ratio = index / divisions, (index + 1) / divisions
+            first = _interpolate3(start, end, first_ratio)
+            second = _interpolate3(start, end, second_ratio)
+            yaw = math.radians(start_yaw + yaw_delta * 0.5 * (first_ratio + second_ratio))
+            for name, width, depth, zmin_offset, zmax_offset in profiles:
+                envelope = _segment_obb(
+                    "transport", first, second, yaw,
+                    0.5 * depth + safety_margin_m,
+                    0.5 * width + safety_margin_m,
+                    0.0, 0.0,
+                )
+                envelope.update({
+                    "profile_name": name,
+                    "segment_index": segment_index,
+                    "zmin": min(first[2], second[2]) + zmin_offset - safety_margin_m,
+                    "zmax": max(first[2], second[2]) + zmax_offset + safety_margin_m,
+                })
+                envelope["diagnostic_aabb"] = _obb_aabb(envelope)
+                output.append(envelope)
+    return output
+
+
+def _interpolate3(start: Sequence[float], end: Sequence[float], ratio: float) -> List[float]:
+    return [float(start[index]) + (float(end[index]) - float(start[index])) * ratio for index in range(3)]
+
+
 def push_tool_swept_obbs(
     push_plan: Dict[str, Any],
     gripper_outer_width_m: float = 0.112,

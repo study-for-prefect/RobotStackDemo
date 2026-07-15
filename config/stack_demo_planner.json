@@ -34,7 +34,7 @@
   "clearing": {
     "push_distances_m": [0.030, 0.040, 0.050],
     "push_directions_base": [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]],
-    "safe_wrist_yaws_deg": [0.0, 90.0],
+    "safe_wrist_yaws_deg": [0.0, 90.0, 135.0],
     "prepush_clearance_m": 0.015,
     "push_contact_z_offset_m": 0.015,
     "minimum_expected_clearance_gain_m": 0.003

@@ -26,6 +26,7 @@ class PlacementTarget:
     task_progress_gain: float
     expected_effects: tuple[str, ...]
     precheck_results: Mapping[str, Any] | None = None
+    additional_physical_parameters: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -84,15 +85,26 @@ def generate_physical_edges(
             (lambda obj, interval: variant_placement_provider(obj, interval, spec.task_role))
             if variant_placement_provider is not None else placement_provider
         )
-        edges = _direct_edges(
+        direct_edges = _direct_edges(
             scene, target, scan, task_type, config, provider, checker,
             candidate_suffix=_candidate_suffix(spec.option_key, spec.track_id),
         )
-        if not scan.graspable:
+        edges = list(direct_edges)
+        if not any(edge.precheck_results.get("passed") for edge in direct_edges):
+            if scan.safe_intervals:
+                staging = staging_provider(target)
+                if staging is not None:
+                    edges.extend(_staging_edges(
+                        scene, target, scan, task_type, config, staging, checker,
+                        task_role=spec.task_role,
+                        candidate_suffix=_candidate_suffix(spec.option_key, spec.track_id),
+                    ))
+            direct_failure_blockers = _direct_failure_blockers(direct_edges)
             edges.extend(_clearance_edges(
                 scene, target, scan, scans, task_type, config, staging_provider, checker,
                 task_role=spec.task_role,
                 candidate_suffix=_candidate_suffix(spec.option_key, spec.track_id),
+                additional_blocker_track_ids=direct_failure_blockers,
             ))
         output[spec.option_key] = tuple(edge for edge in edges if edge.precheck_results.get("passed"))
     return EdgeGenerationResult(edges_by_target=output, grasp_scans=scans)
@@ -170,9 +182,11 @@ def _clearance_edges(
     *,
     task_role: str | None = None,
     candidate_suffix: str = "",
+    additional_blocker_track_ids: Sequence[str] = (),
 ) -> list[PhysicalActionEdge]:
     edges: list[PhysicalActionEdge] = []
-    for blocker_id in scan.blocker_track_ids:
+    blocker_ids = tuple(dict.fromkeys((*scan.blocker_track_ids, *additional_blocker_track_ids)))
+    for blocker_id in blocker_ids:
         blocker = scene.object_by_track(blocker_id)
         if (
             blocker is None or blocker.protected or blocker.already_completed
@@ -228,6 +242,58 @@ def _clearance_edges(
             scene, target, blocker, task_type, config, checker, scan,
             task_role=task_role, candidate_suffix=candidate_suffix,
         ))
+    return edges
+
+
+def _staging_edges(
+    scene: ClutterSceneState,
+    target: SceneObjectState,
+    scan: GraspScanResult,
+    task_type: str,
+    config: StackDemoConfig,
+    staging: PlacementTarget,
+    checker: PlanChecker,
+    *,
+    task_role: str | None,
+    candidate_suffix: str,
+) -> list[PhysicalActionEdge]:
+    edges: list[PhysicalActionEdge] = []
+    if staging.action_type not in {ActionType.EXTRACT_TO_STAGING, ActionType.REGRASP_FOR_ORIENTATION}:
+        return edges
+    for index, interval in enumerate(scan.safe_intervals[:1], start=1):
+        physical = _pick_parameters(target, interval, staging, config)
+        checks = {
+            "finger_safe": True,
+            "palm_safe": True,
+            "descent_safe": True,
+            "lift_safe": True,
+            **dict(staging.precheck_results or {}),
+            **placement_path_checks(scene, target, staging.place_pose, physical, config),
+        }
+        checks["passed"] = all(value for value in checks.values() if isinstance(value, bool))
+        checks["geometry_checks_passed"] = checks["passed"]
+        edge = make_edge(
+            candidate_id=f"edge_r{scene.scene_revision}_{target.track_id}{candidate_suffix}_staging_{index}",
+            scene_revision=scene.scene_revision,
+            action_type=staging.action_type,
+            task_type=task_type,
+            primary_target_track_id=target.track_id,
+            acted_object_track_id=target.track_id,
+            task_role=task_role,
+            target_region_id=staging.target_region_id,
+            physical_parameters=physical,
+            expected_effects=staging.expected_effects,
+            task_progress_gain=staging.task_progress_gain,
+            risk_score=0.4 + _grasp_risk(interval),
+            protected_tracks=scene.protected_tracks,
+            precheck_results=checks,
+            decision_metadata={
+                "grasp_interval": interval.to_dict(),
+                "object_ref": target.object_ref,
+                "staging_position_tolerance_m": 0.025,
+            },
+        )
+        edges.append(_with_plan_check(edge, checker))
     return edges
 
 
@@ -345,6 +411,7 @@ def _pick_parameters(
             },
         ],
         "grasp_checks": dict(interval.selected_check),
+        **dict(placement.additional_physical_parameters or {}),
     }
 
 
@@ -357,7 +424,15 @@ def _normalize_axis_yaw_deg(value: float) -> float:
 
 
 def _with_plan_check(edge: PhysicalActionEdge, checker: PlanChecker) -> PhysicalActionEdge:
-    result = dict(checker(edge))
+    result = (
+        dict(checker(edge))
+        if bool(edge.precheck_results.get("passed"))
+        else {
+            "passed": False,
+            "moveit_plan_only": False,
+            "mode": "skipped_geometry_precheck_failed",
+        }
+    )
     merged = {**dict(edge.precheck_results), **result}
     merged["passed"] = bool(edge.precheck_results.get("passed")) and bool(result.get("passed"))
     return make_edge(
@@ -379,6 +454,16 @@ def _with_plan_check(edge: PhysicalActionEdge, checker: PlanChecker) -> Physical
         precheck_results=merged,
         decision_metadata=edge.decision_metadata,
     )
+
+
+def _direct_failure_blockers(edges: Sequence[PhysicalActionEdge]) -> tuple[str, ...]:
+    return tuple(sorted({
+        str(track_id)
+        for edge in edges
+        for key in ("transport_blocking_track_ids", "place_blocking_track_ids")
+        for track_id in edge.precheck_results.get(key, [])
+        if track_id
+    }))
 
 
 def _released_neighbors(scene: ClutterSceneState, target: SceneObjectState) -> tuple[str, ...]:
@@ -454,6 +539,13 @@ def _direction_name(direction: Sequence[float]) -> str:
     if abs(float(direction[0])) >= abs(float(direction[1])):
         return "px" if float(direction[0]) > 0 else "nx"
     return "py" if float(direction[1]) > 0 else "ny"
+
+
+def _opposite_side(direction: Sequence[float]) -> str:
+    """Return the block contact side opposite a code-owned push direction."""
+    if abs(float(direction[0])) >= abs(float(direction[1])):
+        return "-x" if float(direction[0]) > 0 else "+x"
+    return "-y" if float(direction[1]) > 0 else "+y"
 
 
 def _blocked_intervals_for(scan: GraspScanResult, blocker_id: str) -> list[float]:

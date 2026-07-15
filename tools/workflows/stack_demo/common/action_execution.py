@@ -93,6 +93,11 @@ def execute_one_edge(
         stages.append({"stage": "place", "status": "skipped", "reason": "grasp_failed"})
         return EdgeExecutionResult("grasp_failed", edge.candidate_id, tuple(stages), grasp, None, after_lift)
 
+    mark_held = getattr(observer, "mark_held", None)
+    if callable(mark_held):
+        mark_held(edge, grasp)
+        stages.append({"stage": "track_state", "status": "held_by_gripper"})
+
     executor.transport(edge)
     stages.append({"stage": "transport", "status": "executed_after_grasp_verification"})
     executor.descend_place(edge)
@@ -103,7 +108,14 @@ def execute_one_edge(
     stages.append({"stage": "retreat", "status": "executed"})
     after_place = observer.observe("post_place")
     stages.append({"stage": "fresh_post_place_observation", "scene_revision": after_place.scene_revision})
-    place = verify_place_result(edge, after_place, destination_check)
+    place = verify_place_result(edge, before, after_place, destination_check)
+    mark_after_place = getattr(observer, "mark_after_place", None)
+    if callable(mark_after_place):
+        mark_after_place(edge, place)
+        stages.append({
+            "stage": "track_state",
+            "status": "placed" if place.success else "unresolved",
+        })
     return EdgeExecutionResult(
         "place_verified" if place.success else "place_failed",
         edge.candidate_id,

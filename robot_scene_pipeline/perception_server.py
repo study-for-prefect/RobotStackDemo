@@ -14,6 +14,14 @@ from urllib.parse import parse_qs, urlparse
 from .depth_geometry import add_depth_args
 from .detector_runtime import DetectorModel, add_detector_args
 from .io_utils import project_path
+from .perception_contract import (
+    DetectorProcessingError,
+    PerceptionRequestError,
+    SceneProcessingError,
+    config_fingerprint,
+    parse_snapshot_request,
+    structured_error_payload,
+)
 from .perception_runtime import process_rgbd_scene
 from .ros_topic_capture import RosRgbdSubscriber, add_ros_topic_args
 from .tabletop_geometry import add_tabletop_args
@@ -29,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--request-timeout-s", type=float, default=3.0)
+    parser.add_argument("--max-tf-age-s", type=float, default=30.0)
+    parser.add_argument("--max-rgb-depth-skew-s", type=float, default=0.25)
     parser.add_argument("--detector-config", default="config/yolo_detector.json")
     add_ros_topic_args(parser)
     add_detector_args(parser)
@@ -99,37 +109,75 @@ class PerceptionServerState:
             time.sleep(0.02)
         raise TimeoutError("No latest RGB-D frame is ready after {:.2f}s.".format(float(timeout_s)))
 
+    def effective_config(self) -> Dict[str, Any]:
+        return {
+            "color_topic": str(self.args.color_topic),
+            "depth_topic": str(self.args.depth_topic),
+            "camera_info_topic": str(self.args.camera_info_topic),
+            "configured_camera_frame": str(self.args.camera_frame).lstrip("/"),
+            "base_frame": str(self.args.base_frame).lstrip("/"),
+            "tf_point_mode": str(self.args.tf_point_mode),
+            "detector_weight": os.path.abspath(str(self.args.detector_weight)),
+            "detector_imgsz": int(self.args.detector_imgsz),
+            "detector_iou": float(self.args.detector_iou),
+            "detector_device": str(self.args.detector_device),
+            "request_timeout_s": float(self.args.request_timeout_s),
+            "max_tf_age_s": float(self.args.max_tf_age_s),
+            "max_rgb_depth_skew_s": float(self.args.max_rgb_depth_skew_s),
+        }
+
+    def health(self) -> Dict[str, Any]:
+        status = self.subscriber.status()
+        config = self.effective_config()
+        ready = bool(status["rgb_ready"] and status["depth_ready"] and status["camera_info_ready"])
+        return {
+            "ok": True,
+            "ready": ready,
+            **status,
+            "color_topic": config["color_topic"],
+            "depth_topic": config["depth_topic"],
+            "camera_info_topic": config["camera_info_topic"],
+            "source_camera_frame": (
+                status.get("camera_info_frame_id")
+                or status.get("depth_frame_id")
+                or status.get("color_frame_id")
+            ),
+            **{key: value for key, value in config.items() if key not in {"color_topic", "depth_topic", "camera_info_topic"}},
+            "server_pid": os.getpid(),
+            "config_fingerprint": config_fingerprint(config),
+        }
+
     def snapshot(self, query: Dict[str, Any]) -> Dict[str, Any]:
-        output_dir = query.get("output_dir") or query.get("output-dir")
-        if not output_dir:
-            raise ValueError("Missing output_dir query parameter.")
-        output_dir = project_path(str(output_dir))
+        request = parse_snapshot_request(query, default_tf_max_age_s=float(self.args.max_tf_age_s))
+        output_dir = request.output_dir
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as exc:
+            raise PerceptionRequestError("invalid_request", f"output_dir cannot be created: {exc}") from exc
         request_args = SimpleNamespace(**vars(self.args))
         request_args.output_dir = output_dir
-        if query.get("tf_json"):
-            request_args.tf_json = project_path(str(query["tf_json"]))
-        if query.get("camera_frame"):
-            request_args.camera_frame = str(query["camera_frame"]).lstrip("/")
-        if query.get("score_thresh") is not None:
-            requested_threshold = float(query["score_thresh"])
-            if not 0.01 <= requested_threshold <= 1.0:
-                raise ValueError("score_thresh must be in [0.01, 1.0]")
-            request_args.score_thresh = requested_threshold
+        request_args.tf_json = request.tf_json
+        request_args.base_frame = request.base_frame
+        request_args.camera_frame = request.camera_frame
+        request_args.tf_point_mode = request.tf_point_mode
+        request_args.score_thresh = request.score_thresh
         frame = self.wait_latest_frame(float(self.args.request_timeout_s))
-        source_frame = str((frame.profile or {}).get("coordinate_frame") or "")
-        if source_frame and request_args.use_tf and request_args.tf_point_mode == DEFAULT_TF_POINT_MODE:
-            if not frame_matches(source_frame, request_args.camera_frame):
-                request_args.camera_frame = source_frame
+        self._validate_frame(frame, request.camera_frame)
         with self._request_lock:
-            private_state, paths = process_rgbd_scene(
-                request_args,
-                self.detector,
-                frame.frame_bgr,
-                frame.depth_frame,
-                frame.intrinsics,
-                frame.profile,
-                output_dir,
-            )
+            try:
+                private_state, paths = process_rgbd_scene(
+                    request_args,
+                    self.detector,
+                    frame.frame_bgr,
+                    frame.depth_frame,
+                    frame.intrinsics,
+                    frame.profile,
+                    output_dir,
+                )
+            except (DetectorProcessingError, SceneProcessingError):
+                raise
+            except Exception as exc:
+                raise SceneProcessingError(str(exc)) from exc
         return {
             "ok": True,
             "output_dir": output_dir,
@@ -137,7 +185,44 @@ class PerceptionServerState:
             "frame_color_seq": frame.color_seq,
             "object_count": len(private_state.get("objects", [])),
             "private_state": private_state,
+            "request_id": request.request_id,
+            "scene_revision": request.scene_revision,
+            "capture_reason": request.capture_reason,
+            "effective_config": self.effective_config(),
         }
+
+    def _validate_frame(self, frame: Any, expected_camera_frame: str) -> None:
+        profile = frame.profile or {}
+        source_frame = str(profile.get("coordinate_frame") or "")
+        frames = [
+            str(profile.get("color_frame_id") or ""),
+            str(profile.get("depth_frame_id") or ""),
+            str(profile.get("camera_info_frame_id") or ""),
+        ]
+        present = [value for value in frames if value]
+        if source_frame and not frame_matches(source_frame, expected_camera_frame):
+            raise PerceptionRequestError(
+                "tf_frame_mismatch",
+                f"RGB-D source frame {source_frame} does not match requested {expected_camera_frame}",
+            )
+        if any(not frame_matches(value, expected_camera_frame) for value in present):
+            raise PerceptionRequestError(
+                "rgb_depth_not_synchronized",
+                f"RGB/depth/camera_info frames do not agree: {frames}",
+                status=503,
+            )
+        color_stamp, depth_stamp = profile.get("color_stamp"), profile.get("depth_stamp")
+        if color_stamp is None or depth_stamp is None:
+            raise PerceptionRequestError(
+                "camera_not_ready", "RGB/depth timestamps are unavailable", status=503,
+            )
+        skew = abs(float(color_stamp) - float(depth_stamp))
+        if skew > float(self.args.max_rgb_depth_skew_s):
+            raise PerceptionRequestError(
+                "rgb_depth_not_synchronized",
+                f"RGB/depth timestamp skew {skew:.6f}s exceeds {self.args.max_rgb_depth_skew_s:.6f}s",
+                status=503,
+            )
 
 
 def make_handler(state: PerceptionServerState):
@@ -153,7 +238,7 @@ def make_handler(state: PerceptionServerState):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/health":
-                self._send_json(200, {"ok": True, "ready": state.subscriber.ready(require_depth=True)})
+                self._send_json(200, state.health())
                 return
             if parsed.path != "/snapshot":
                 self._send_json(404, {"ok": False, "error": "Unknown path: {}".format(parsed.path)})
@@ -162,12 +247,38 @@ def make_handler(state: PerceptionServerState):
             try:
                 self._send_json(200, state.snapshot(query))
             except Exception as exc:
-                self._send_json(500, {"ok": False, "error": str(exc)})
+                status, payload = server_error_response(
+                    exc,
+                    request_id=query.get("request_id"),
+                    effective_config=state.effective_config(),
+                )
+                self._send_json(status, payload)
 
         def log_message(self, fmt: str, *values: Any) -> None:
             print("[perception_server] " + fmt % values, flush=True)
 
     return Handler
+
+
+def server_error_response(
+    exc: Exception,
+    *,
+    request_id: str | None,
+    effective_config: Dict[str, Any],
+) -> tuple[int, Dict[str, Any]]:
+    if isinstance(exc, PerceptionRequestError):
+        status, error_code = exc.status, exc.error_code
+    elif isinstance(exc, TimeoutError):
+        status, error_code = 503, "camera_not_ready"
+    elif isinstance(exc, DetectorProcessingError):
+        status, error_code = 500, "detector_failed"
+    elif isinstance(exc, SceneProcessingError):
+        status, error_code = 500, "scene_processing_failed"
+    else:
+        status, error_code = 500, "internal_server_error"
+    return status, structured_error_payload(
+        error_code, exc, request_id=request_id, effective_config=effective_config,
+    )
 
 
 def main() -> int:

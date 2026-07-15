@@ -21,13 +21,31 @@ plan 和开放式 VLM 动作入口已删除，不存在新旧 planner 并行运�
 
 代码不会预测动作后的多步场景。抓取、放置或推动后都用真实新观测生成下一轮候选。
 
+## 0715retry4 根因与修复
+
+原始运行目录是 `runtime/organize_blocks_plan_only_20260715`，不是不存在的
+`runtime/0715retry4`。原目录已有 `snapshot.jpg`、detector 结果、有效
+`base_link <- camera_color_optical_frame` TF 和 `tabletop_geometry.json`，但缺少
+`private_scene_state.json`。安全复现的服务端正文为：
+
+```text
+'types.SimpleNamespace' object has no attribute 'instruction'
+```
+
+`depth_geometry.build_private_state` 把感知状态错误地绑定到任务参数 `instruction`，而
+`perception_server` 的请求 namespace 故意不含任务字段；旧 urllib 客户端又丢掉了 HTTP 500
+正文。现在感知状态完全 task-independent，错误正文会原样进入结构化日志。完整调查记录在
+`runtime/0715retry4_analysis.json`，原失败目录没有被修改。
+
 ## 模块职责
 
 | 模块 | 职责 |
 | --- | --- |
 | `app.py` | 配置、任务选择、生命周期、异常和输出目录 |
 | `arguments.py` | 当前 CLI；不暴露动作几何覆盖参数 |
-| `commands.py` | 调用已有感知、MoveIt 和 GF225 接口 |
+| `commands.py` | TF、MoveIt、GF225 和场景采集命令边界 |
+| `perception_client.py` | 感知 server 健康检查、严格请求契约和结构化 HTTP 错误 |
+| `live_integration.py` | ROS/topic 前检、无运动参数守卫、关节差值和集成报告 |
 | `common/config.py` | 加载统一 planner、工作区配置 |
 | `common/scene_state.py` | revision-scoped 对象和持久 track 状态 |
 | `common/action_edges.py` | 固定动作枚举、不可变物理边和 fingerprint |
@@ -44,6 +62,37 @@ plan 和开放式 VLM 动作入口已删除，不存在新旧 planner 并行运�
 | `house/` | 六角色、姿态、结构、放置和完成谓词 |
 
 共享层负责如何安全取出物体，任务层负责哪些物体/角色合法、最终放哪里以及何时完成。
+
+## 感知参数契约
+
+pipeline 每轮先用 `tf_lookup_json.py` 写最新 TF，再向 server 发送同一个绝对 `tf_json`。主要
+衔接如下：
+
+| 参数 | pipeline CLI | TF lookup | `/snapshot` | server / MoveIt |
+| --- | --- | --- | --- | --- |
+| 输出目录 | `--output-dir` | 不使用 | 当前 observation 的绝对路径 | server 只写该绝对路径 |
+| TF 文件 | `--tf-json` | 写入该路径 | 绝对路径、必填 | server 验证并读取最新文件 |
+| base frame | `--base-frame` | `--base-frame` | `base_frame` | server 固定配置比对；MoveIt `--base-link` |
+| camera frame | `--camera-frame` | `--camera-frame` | `camera_frame` | 与 camera_info/source frame 和 server 固定配置比对 |
+| tool frame | `--tool-frame` | `--tool-frame --require-tool` | 不作为点变换 frame | MoveIt `--end-effector` |
+| TF 点模式 | `--tf-point-mode` | 不使用 | `tf_point_mode` | server 固定配置比对 |
+| detector | weight/imgsz/iou/device CLI | 不使用 | 固定配置不在请求中重复修改 | `/health` 与 pipeline 严格比对 |
+| threshold | `--score-thresh` | 不使用 | 每请求 `score_thresh` | snapshot 动态值 |
+
+请求还包含 `request_id`、`capture_reason`、`scene_revision`、client timeout 和最大 TF 年龄。
+server 验证 TF 文件存在、JSON 和矩阵有限、parent/child 正确、timestamp 新鲜；验证 RGB/depth/
+camera_info frame 一致且时间偏差不超过配置。
+
+`/health` 返回实际 topic、frame、TF mode、detector 固定参数、RGB-D readiness/seq/timestamp、PID
+和 config fingerprint。固定配置不一致时客户端在 snapshot 前以 409
+`perception_server_config_mismatch` 停止。结构化错误区分：
+
+- 400：缺失/非法请求、TF 文件缺失/无效/过期、frame mismatch；
+- 503：`camera_not_ready`、RGB-D 不同步；
+- 500：`detector_failed`、`scene_processing_failed` 或不可预期内部错误。
+
+fallback 默认禁止。显式 `--allow-snapshot-subprocess-fallback` 后才可回退，并记录原 server
+错误和完整 fallback 命令；回退的 TF/frame/topic/detector 参数与 server 请求保持一致。
 
 ## 状态与身份规则
 
@@ -223,6 +272,32 @@ python3 tools/workflows/stack_demo_pipeline.py \
   --output-dir runtime/build_house_plan_only
 ```
 
+真实设备链路、严格无运动的集成模式：
+
+```bash
+python3 tools/workflows/stack_demo_pipeline.py \
+  --task-type build_house \
+  --instruction "用六个固定角色搭建房屋" \
+  --live-integration-check \
+  --max-task-steps 1 \
+  --perception-server-url http://127.0.0.1:8765 \
+  --tf-json /tmp/scene_tf_base_color_optical.json \
+  --base-frame base_link \
+  --camera-frame camera_color_optical_frame \
+  --tool-frame tool0 \
+  --tf-point-mode direct \
+  --output-dir runtime/build_house_live_integration_20260715_resume3
+```
+
+该模式与 `--execute`、`--yes`、`--execute-push-clearing` 互斥，并强制 plan-only、单轮、禁用
+ready pose/轨迹/夹爪/动作后模拟。`assert_non_actuating_command` 在每个 subprocess 前再次拒绝
+已知执行和夹爪 flag。报告包含 `before_joint_state.json`、`after_joint_state.json`、
+`joint_state_delta.json` 和 `integration_report.json`。
+
+8765 是外部维护的日常服务，不应由 workflow 重启。需要隔离 server 时使用 8766 独立进程；
+启动参数必须显式匹配 `/health` 所列 topic、base/camera/TF mode 和 detector 配置，测试后只停止
+自己启动的 PID。
+
 实机路径要求 `--execute --yes`；nudge 还需 `--execute-push-clearing`。本次重构没有运行这些
 参数。离线/mock 输入和 `--execute` 的组合会在机器人初始化之前被拒绝。
 
@@ -232,6 +307,13 @@ resume、开放式 VLM action 尝试次数，以及分散的抓取/推动几何�
 
 ## 尚未实机验证
 
-新决策架构只通过离线、mock、编译和静态检查。尚未验证真实末端相机抓取成功证据、真实 GF225
-斜角接触、实际清障、完整颜色整理、六角色结构、凹槽面/三角尖端可靠感知、中转重抓及真实
-放置稳定性。不得把当前测试结果解释为实机成功。
+真实无运动检查已验证 D435i topic/快照、最新 TF、感知契约、无状态 Qwen target/edge 选择和
+MoveIt plan-only。成功报告是
+`runtime/build_house_live_integration_20260715_resume3/integration_report.json`，其中
+`robot_motion_executed=false`、`gripper_command_executed=false`。organize 同场景报告在
+`runtime/organize_blocks_live_integration_20260715_resume2/`：感知成功，但没有完整安全边，未把
+无边当完成。
+
+仍未验证真实末端相机抓取成功证据、GF225 斜角接触、实际清障、真实 pick/place、完整颜色
+整理、六角色结构、凹槽面/三角尖端可靠感知、中转重抓或放置稳定性。不得把 plan-only 结果
+解释为动作成功。

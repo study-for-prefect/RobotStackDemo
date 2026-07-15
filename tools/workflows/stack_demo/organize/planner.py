@@ -69,9 +69,6 @@ class OrganizePlanner:
         )
 
     def _staging(self, state: OrganizeTaskState, obj: SceneObjectState) -> PlacementTarget | None:
-        direct = self._placement(state, obj)
-        if direct is not None:
-            return direct
         x = float(self._config.workspace["xmax"]) - 0.06
         y = float(self._config.workspace["ymin"]) + 0.06
         return PlacementTarget(

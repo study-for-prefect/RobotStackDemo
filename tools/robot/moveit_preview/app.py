@@ -556,10 +556,18 @@ def main() -> Optional[int]:
         if gripper is not None:
             gripper.close()
         try:
-            node.destroy_node()
-        except Exception:
-            pass
-        try:
             rclpy.shutdown()
         except ExternalShutdownException:
+            pass
+        # TransformListener(spin_thread=True) owns a background executor that
+        # also sees MoveIt's action clients.  Let that executor leave its wait
+        # set before destroying the node; the reverse order can emit a benign
+        # RCLError during repeated plan-only subprocesses on ROS 2 Humble.
+        listener = getattr(node, "tf_listener", None)
+        thread = getattr(listener, "dedicated_listener_thread", None)
+        if thread is not None:
+            thread.join(timeout=2.0)
+        try:
+            node.destroy_node()
+        except Exception:
             pass

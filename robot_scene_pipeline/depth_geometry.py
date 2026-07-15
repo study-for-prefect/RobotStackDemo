@@ -139,10 +139,9 @@ def draw_annotated(frame_bgr, detections):
         x1, y1, x2, y2 = [int(round(v)) for v in det["bbox"]]
         color = color_for_label(det["label_id"])
         cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
-        text = "{}:{} {:.2f}".format(det["id"], det["label"], det["confidence"])
-        if det.get("center_3d_m"):
-            x, y, z = det["center_3d_m"]
-            text += " xyz[{:.2f},{:.2f},{:.2f}]".format(x, y, z)
+        # The image is policy-facing: keep only a short current-frame ID.
+        # Labels, confidence, and geometry remain in detector JSON artifacts.
+        text = str(det["id"])
         cv2.putText(output, text, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
     return output
 
@@ -199,13 +198,16 @@ def public_object(det):
 
 
 def build_private_state(args, detections, snapshot_path, annotated_path, used_profile, table_plane=None):
+    """Build perception facts without depending on any task or policy input."""
     camera_frame = getattr(args, "camera_frame", "camera_color_optical_frame")
     base_frame = getattr(args, "base_frame", None)
+    coordinate_frame = base_frame if bool(getattr(args, "use_tf", False)) else camera_frame
     return {
         "schema_version": "private_scene_state_v1",
-        "frame_id": "snapshot_{}".format(int(time.time() * 1000)),
+        "scene_id": "snapshot_{}".format(int(time.time() * 1000)),
+        "frame_id": coordinate_frame,
+        "coordinate_frame": coordinate_frame,
         "timestamp": time.time(),
-        "instruction": args.instruction,
         "snapshot_image": snapshot_path,
         "annotated_image": annotated_path,
         "camera_profile": used_profile,

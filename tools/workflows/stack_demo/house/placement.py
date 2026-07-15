@@ -55,22 +55,108 @@ def staging_orientation_target(
     obj: SceneObjectState,
     role: str,
     config: StackDemoConfig,
-) -> PlacementTarget:
+) -> PlacementTarget | None:
     x = float(config.workspace["xmax"]) - 0.06
     y = float(config.workspace["ymin"]) + 0.06
-    regrasp = bool(obj.source.get("at_staging") and obj.source.get("orientation_regrasp_feasible"))
+    staging_pose = {"frame_id": "base_link", "position_m": [x, y, obj.center_xyz_m[2]], "yaw_deg": obj.yaw_deg}
+    if role not in {"roof", "triangle_top"}:
+        return PlacementTarget(
+            action_type=ActionType.EXTRACT_TO_STAGING,
+            target_region_id="house_blocker_staging",
+            task_role=role,
+            place_pose=staging_pose,
+            task_progress_gain=0.0,
+            expected_effects=("remove_blocker_to_staging",),
+            precheck_results=_staging_checks(),
+        )
+    at_staging = bool(obj.source.get("at_staging"))
+    transition = obj.source.get("orientation_transition")
+    if at_staging:
+        if not isinstance(transition, Mapping) or not bool(transition.get("geometry_verified")):
+            return None
+        regrasp_pose = transition.get("regrasp_pose")
+        next_pose = transition.get("staging_place_pose")
+        expected = transition.get("expected_orientation_after")
+        if not all(isinstance(value, Mapping) for value in (regrasp_pose, next_pose, expected)):
+            return None
+        orientation_plan = _orientation_plan(obj, role, next_pose, expected, transition)
+        return PlacementTarget(
+            action_type=ActionType.REGRASP_FOR_ORIENTATION,
+            target_region_id="house_orientation_staging",
+            task_role=role,
+            place_pose=dict(next_pose),
+            task_progress_gain=0.0,
+            expected_effects=("verified_orientation_regrasp", "require_fresh_orientation_observation"),
+            precheck_results=_staging_checks(),
+            additional_physical_parameters={
+                "grasp_pose": dict(regrasp_pose),
+                "orientation_plan": orientation_plan,
+            },
+        )
+    expected = _current_orientation_evidence(obj, role)
+    orientation_plan = _orientation_plan(obj, role, staging_pose, expected, {})
     return PlacementTarget(
-        action_type=ActionType.REGRASP_FOR_ORIENTATION if regrasp else ActionType.EXTRACT_TO_STAGING,
+        action_type=ActionType.EXTRACT_TO_STAGING,
         target_region_id="house_orientation_staging",
         task_role=role,
-        place_pose={"frame_id": "base_link", "position_m": [x, y, obj.center_xyz_m[2]], "yaw_deg": obj.yaw_deg},
+        place_pose=staging_pose,
         task_progress_gain=0.0,
         expected_effects=("stage_for_orientation_reobservation", "do_not_assume_airborne_flip"),
-        precheck_results={
-            "transport_safe": True, "place_descent_safe": True,
-            "release_safe": True, "return_safe": True, "protected_safe": True,
-        },
+        precheck_results=_staging_checks(),
+        additional_physical_parameters={"orientation_plan": orientation_plan},
     )
+
+
+def _orientation_plan(
+    obj: SceneObjectState,
+    role: str,
+    staging_pose: Mapping[str, Any],
+    expected_after: Mapping[str, Any],
+    transition: Mapping[str, Any],
+) -> dict[str, Any]:
+    current = _current_orientation_evidence(obj, role)
+    if role == "roof":
+        return {
+            "role": role,
+            "current_groove_face_state": current.get("groove_face_state", "unknown"),
+            "target_groove_face_state": transition.get("target_groove_face_state", "opening_down"),
+            "current_long_axis_yaw_deg": current.get("long_axis_yaw_deg"),
+            "staging_pose": dict(staging_pose),
+            "regrasp_pose": transition.get("regrasp_pose"),
+            "final_roof_orientation": transition.get("final_roof_orientation"),
+            "face_change_geometry_verified": bool(transition.get("geometry_verified")),
+            "expected_orientation_after": dict(expected_after),
+        }
+    return {
+        "role": role,
+        "current_apex_direction": current.get("apex_direction", "unknown"),
+        "current_base_edge_direction": current.get("base_edge_direction", "unknown"),
+        "current_face_state": current.get("face_state", "unknown"),
+        "staging_pose": dict(staging_pose),
+        "regrasp_pose": transition.get("regrasp_pose"),
+        "final_triangle_yaw_deg": transition.get("final_triangle_yaw_deg"),
+        "face_change_geometry_verified": bool(transition.get("geometry_verified")),
+        "expected_orientation_after": dict(expected_after),
+    }
+
+
+def _current_orientation_evidence(obj: SceneObjectState, role: str) -> dict[str, Any]:
+    keys = (
+        ("groove_face_state", "face_up", "long_axis_yaw_deg")
+        if role == "roof"
+        else ("apex_direction", "base_edge_direction", "face_state", "target_yaw_deg")
+    )
+    return {key: obj.source[key] for key in keys if key in obj.source}
+
+
+def _staging_checks() -> dict[str, bool]:
+    return {
+        "transport_safe": True,
+        "place_descent_safe": True,
+        "release_safe": True,
+        "return_safe": True,
+        "protected_safe": True,
+    }
 
 
 def _role_pose(

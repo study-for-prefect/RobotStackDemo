@@ -59,7 +59,7 @@ class StatelessQwenClient:
                 "role": "system",
                 "content": (
                     "只比较输入中的受限ID并输出严格JSON。不得创建动作、对象、参数或完成声明；"
-                    "不得依赖数组顺序、图片阅读顺序或任何历史消息。"
+                    "严格按输入selection_priority从前到后比较；不得依赖数组顺序、图片阅读顺序或任何历史消息。"
                 ),
             },
             user_message,

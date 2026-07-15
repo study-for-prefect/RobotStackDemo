@@ -7,6 +7,7 @@ import cv2
 
 from .depth_geometry import attach_3d, build_private_state, coordinate_convention, draw_annotated
 from .io_utils import write_json
+from .perception_contract import DetectorProcessingError, SceneProcessingError
 from .snapshot_pipeline import drop_transient_detection_fields
 from .tabletop_geometry import attach_tabletop_geometry
 from .tf_transform import (
@@ -55,17 +56,23 @@ def process_rgbd_scene(
     paths = scene_output_paths(output_dir)
     cv2.imwrite(paths["snapshot"], frame_bgr)
 
-    detections, candidates = detector.predict(
-        frame_bgr,
-        args.score_thresh,
-        args.detector_scale,
-        args.max_detections,
-    )
+    try:
+        detections, candidates = detector.predict(
+            frame_bgr,
+            args.score_thresh,
+            args.detector_scale,
+            args.max_detections,
+        )
+    except Exception as exc:
+        raise DetectorProcessingError(str(exc)) from exc
     detections = attach_visual_colors(detections, frame_bgr, candidates)
     metadata = detector_metadata(args)
     write_json(paths["candidates"], {**metadata, "candidates": candidates[: args.debug_topk]})
 
-    detections = attach_3d(detections, depth_frame, intrinsics, args.depth_window)
+    try:
+        detections = attach_3d(detections, depth_frame, intrinsics, args.depth_window)
+    except Exception as exc:
+        raise SceneProcessingError(f"depth geometry failed: {exc}") from exc
     tf_payload = {
         "enabled": bool(args.use_tf),
         "base_frame": args.base_frame,

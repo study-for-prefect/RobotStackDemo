@@ -25,6 +25,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--moveit-plan-only", action="store_true")
     parser.add_argument(
+        "--live-integration-check",
+        action="store_true",
+        help="Use real camera/TF/Ollama/MoveIt planning while centrally forbidding all actuation.",
+    )
+    parser.add_argument(
         "--execute-push-clearing", action="store_true",
         help="Additional opt-in required before executing a selected nudge edge.",
     )
@@ -45,6 +50,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     parser.add_argument("--perception-server-url", default=os.environ.get("ROBOT_SCENE_PERCEPTION_URL", "http://127.0.0.1:8765"))
     parser.add_argument("--perception-server-timeout-s", type=float, default=15.0)
+    parser.add_argument("--tf-max-age-s", type=float, default=30.0)
     parser.add_argument("--allow-snapshot-subprocess-fallback", action="store_true")
     parser.add_argument("--conda-env", default="yolo")
     parser.add_argument("--ros-python", default="/usr/bin/python3")
@@ -53,10 +59,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--detector-imgsz", type=int, default=960)
     parser.add_argument("--detector-iou", type=float, default=0.45)
     parser.add_argument("--detector-device", default="cuda:0")
+    parser.add_argument("--color-topic", default="/camera/camera/color/image_raw")
+    parser.add_argument("--depth-topic", default="/camera/camera/aligned_depth_to_color/image_raw")
+    parser.add_argument("--camera-info-topic", default="/camera/camera/color/camera_info")
     parser.add_argument("--tf-json", default="/tmp/scene_tf_base_color_optical.json")
     parser.add_argument("--base-frame", default="base_link")
     parser.add_argument("--camera-frame", default="camera_color_optical_frame")
     parser.add_argument("--tool-frame", default="tool0")
+    parser.add_argument(
+        "--tf-point-mode",
+        choices=("direct", "optical-to-camera-link"),
+        default="direct",
+    )
     parser.add_argument("--tf-timeout", type=float, default=8.0)
     parser.add_argument("--ready-pose-json", default="config/rectangle_ready_pose.json")
     parser.add_argument("--init-stable-wait-s", type=float, default=1.0)

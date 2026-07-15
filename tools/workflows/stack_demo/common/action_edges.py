@@ -121,6 +121,7 @@ def build_failure_fingerprint(
         "grasp_pose": _pose_bin(physical_parameters.get("grasp_pose")),
         "push_direction_base": _vector_bin(physical_parameters.get("push_direction_base")),
         "push_distance_m": _quantize(physical_parameters.get("push_distance_m"), 0.005),
+        "push_wrist_yaw_deg": _quantize(physical_parameters.get("push_wrist_yaw_deg"), 5.0),
         "push_start": _pose_bin(physical_parameters.get("push_start")),
         "push_end": _pose_bin(physical_parameters.get("push_end")),
         "place_pose": _pose_bin(physical_parameters.get("place_pose")),

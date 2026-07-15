@@ -7,14 +7,17 @@ import os
 import subprocess
 import time
 from typing import Any, Sequence
-from urllib.parse import urlencode
-from urllib.request import urlopen
+
+from robot_scene_pipeline.perception_contract import PerceptionServerError
 
 from .constants import PROJECT_ROOT
+from .perception_client import (
+    build_perception_snapshot_request,
+    perception_camera_frame,
+    perception_server_health,
+    perception_server_snapshot,
+)
 from .workspace import attach_configured_workspace
-
-
-DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 
 
 def load_json(path: str) -> dict[str, Any]:
@@ -25,6 +28,23 @@ def load_json(path: str) -> dict[str, Any]:
 def run(command: Sequence[str]) -> None:
     print("\n$ {}".format(" ".join(command)), flush=True)
     subprocess.run(list(command), cwd=PROJECT_ROOT, check=True)
+
+
+NON_ACTUATING_FORBIDDEN_FLAGS = frozenset({
+    "--execute", "--yes", "--enable-gripper", "--gripper-open-only",
+    "--gripper-close-only", "--close-gripper-for-push", "--execute-push-clearing",
+})
+
+
+def assert_non_actuating_command(command: Sequence[str]) -> None:
+    forbidden = sorted(NON_ACTUATING_FORBIDDEN_FLAGS.intersection(str(item) for item in command))
+    if forbidden:
+        raise RuntimeError(f"non-actuating safety guard rejected command flags: {forbidden}")
+
+
+def run_non_actuating(command: Sequence[str]) -> None:
+    assert_non_actuating_command(command)
+    run(command)
 
 
 def plan_only_command(command: Sequence[str]) -> list[str]:
@@ -39,11 +59,6 @@ def plan_only_command(command: Sequence[str]) -> list[str]:
             index = output.index(flag)
             del output[index:index + value_count + 1]
     return output
-
-
-def perception_camera_frame(args: Any) -> str:
-    frame = str(getattr(args, "camera_frame", DEFAULT_CAMERA_FRAME) or DEFAULT_CAMERA_FRAME).lstrip("/")
-    return DEFAULT_CAMERA_FRAME if frame == "camera_link" else frame
 
 
 def tf_lookup_command(args: Any, require_tool: bool = True) -> list[str]:
@@ -116,7 +131,7 @@ def capture_empty_observation(args: Any, output_dir: str, held_object_id: str | 
     init_ready_pose(args)
     if args.offline_scene_state:
         return None
-    capture_scene_observation(args, output_dir)
+    capture_scene_observation(args, output_dir, capture_reason="initial_observation", scene_revision=1)
     return attach_configured_workspace(load_json(os.path.join(output_dir, "private_scene_state.json")), args)
 
 
@@ -136,37 +151,50 @@ def capture_empty_current_pose(
         time.sleep(float(args.second_snapshot_stable_wait_s))
     if refresh_tf:
         run(tf_lookup_command(args))
-    capture_scene_observation(args, output_dir)
+    capture_scene_observation(args, output_dir, capture_reason="fresh_observation")
     return attach_configured_workspace(load_json(os.path.join(output_dir, "private_scene_state.json")), args)
 
 
-def perception_server_snapshot(args: Any, output_dir: str) -> dict[str, Any]:
-    base_url = str(args.perception_server_url or "").rstrip("/")
-    if not base_url:
-        raise RuntimeError("no perception server URL configured")
-    query = urlencode({
-        "output_dir": output_dir,
-        "camera_frame": perception_camera_frame(args),
-        "score_thresh": float(args.score_thresh),
-    })
-    with urlopen(f"{base_url}/snapshot?{query}", timeout=float(args.perception_server_timeout_s)) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    if not payload.get("ok"):
-        raise RuntimeError(payload.get("error") or "perception server snapshot failed")
-    return payload
-
-
-def capture_scene_observation(args: Any, output_dir: str) -> None:
+def capture_scene_observation(
+    args: Any,
+    output_dir: str,
+    *,
+    capture_reason: str = "unspecified",
+    scene_revision: int = 1,
+) -> None:
     """Force fresh live TF before every wrist-camera scene acquisition."""
-    run(tf_lookup_command(args))
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    run_non_actuating(tf_lookup_command(args))
+    request = build_perception_snapshot_request(
+        args, output_dir, capture_reason=capture_reason, scene_revision=scene_revision,
+    )
+    _write_json(os.path.join(output_dir, "perception_snapshot_request.json"), request.to_dict())
     try:
-        perception_server_snapshot(args, output_dir)
+        health = perception_server_health(args)
+        _write_json(os.path.join(output_dir, "perception_server_health.json"), health.to_dict())
+        response = perception_server_snapshot(
+            args, output_dir, capture_reason=capture_reason, scene_revision=scene_revision,
+        )
+        _write_json(os.path.join(output_dir, "perception_snapshot_response.json"), response)
+        _write_json(os.path.join(output_dir, "perception_capture.json"), {"perception_source": "perception_server"})
         return
     except Exception as exc:
+        error = exc.to_dict() if isinstance(exc, PerceptionServerError) else {
+            "error_type": type(exc).__name__, "error": str(exc),
+        }
+        _write_json(os.path.join(output_dir, "perception_server_error.json"), error)
         if not args.allow_snapshot_subprocess_fallback:
-            raise RuntimeError(f"perception server failed and fallback is disabled: {exc}") from exc
-    run(tf_lookup_command(args))
-    run(snapshot_command(args, output_dir))
+            detail = exc.concise_message() if isinstance(exc, PerceptionServerError) else str(exc)
+            raise RuntimeError(f"perception server failed and fallback is disabled: {detail}") from exc
+    command = snapshot_command(args, output_dir)
+    _write_json(os.path.join(output_dir, "perception_capture.json"), {
+        "perception_source": "snapshot_subprocess_fallback",
+        "server_error": error,
+        "fallback_command": command,
+    })
+    run_non_actuating(tf_lookup_command(args))
+    run_non_actuating(command)
 
 
 def snapshot_command(args: Any, output_dir: str) -> list[str]:
@@ -176,11 +204,19 @@ def snapshot_command(args: Any, output_dir: str) -> list[str]:
         "--use-tf", "--tf-json", args.tf_json,
         "--base-frame", args.base_frame,
         "--camera-frame", perception_camera_frame(args),
-        "--tf-point-mode", "direct",
+        "--tf-point-mode", args.tf_point_mode,
         "--estimate-tabletop",
         "--detector-weight", args.detector_weight,
         "--score-thresh", str(args.score_thresh),
         "--detector-imgsz", str(args.detector_imgsz),
         "--detector-iou", str(args.detector_iou),
         "--detector-device", args.detector_device,
+        "--color-topic", args.color_topic,
+        "--depth-topic", args.depth_topic,
+        "--camera-info-topic", args.camera_info_topic,
     ]
+
+
+def _write_json(path: str, payload: Any) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)

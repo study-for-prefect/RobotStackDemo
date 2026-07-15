@@ -18,6 +18,7 @@ def object_ref(scene_revision: int, detector_object_id: Any) -> str:
 def update_scene_tracks(
     memory: dict, detections: List[dict], scene_revision: int,
     max_movement_m: float = 0.15, predicted_displacements: Optional[Dict[str, List[float]]] = None,
+    predicted_centers: Optional[Dict[str, List[float]]] = None,
     mark_unseen_invisible: bool = True,
 ) -> Tuple[dict, List[dict]]:
     """Assign previous tracks to current detections with a global one-to-one greedy cost ordering."""
@@ -35,7 +36,9 @@ def update_scene_tracks(
     candidates = []
     for track in previous:
         for index, detection in enumerate(detections):
-            features = _match_features(track, detection, predicted_displacements or {})
+            features = _match_features(
+                track, detection, predicted_displacements or {}, predicted_centers or {},
+            )
             if features["compatible"] and features["center_distance_m"] <= max_movement_m:
                 candidates.append((features["cost"], str(track["track_id"]), index, features))
     matches = []
@@ -106,19 +109,36 @@ def _bind(track: dict, detection: dict, revision: int, features: dict, ambiguous
     return record
 
 
-def _match_features(track: dict, detection: dict, predicted: Dict[str, List[float]]) -> dict:
+def _match_features(
+    track: dict,
+    detection: dict,
+    predicted: Dict[str, List[float]],
+    predicted_centers: Dict[str, List[float]],
+) -> dict:
     shape_ok = track.get("semantic_shape") in (None, "unknown", infer_object_shape(detection))
     color_ok = track.get("color") in (None, "unknown", _color(detection))
     old, current = track.get("center_base_m"), get_center(detection)
-    prediction = predicted.get(str(track.get("track_id")), [0.0, 0.0, 0.0])
-    distance = math.dist([old[i] + prediction[i] for i in range(3)], current[:3]) if old and current else math.inf
+    track_id = str(track.get("track_id"))
+    prediction = predicted.get(track_id, [0.0, 0.0, 0.0])
+    anchored = predicted_centers.get(track_id)
+    expected = anchored if anchored is not None else [old[i] + prediction[i] for i in range(3)] if old else None
+    distance = math.dist(expected[:3], current[:3]) if expected and current else math.inf
     old_size, size = track.get("dimensions_m"), get_size(detection)
     size_delta = sum(abs(float(a) - float(b)) for a, b in zip(old_size, size)) if old_size and size else 0.1
     old_box, box = track.get("bbox"), detection.get("bbox_xyxy_px") or detection.get("bbox")
     bbox_overlap = _bbox_iou(old_box, box)
     cost = distance / 0.15 + size_delta / 0.10 + (1.0 - bbox_overlap) * 0.15
     if track.get("role") in {"base", "structure", "protected"}: cost *= 0.75
-    return {"compatible": bool(shape_ok and color_ok and current is not None), "shape_compatible": shape_ok, "color_compatible": color_ok, "center_distance_m": distance, "size_delta_m": size_delta, "bbox_iou": bbox_overlap, "cost": cost}
+    return {
+        "compatible": bool(shape_ok and color_ok and current is not None),
+        "shape_compatible": shape_ok,
+        "color_compatible": color_ok,
+        "center_distance_m": distance,
+        "size_delta_m": size_delta,
+        "bbox_iou": bbox_overlap,
+        "cost": cost,
+        "prediction_source": "action_pose_anchor" if anchored is not None else "displacement_or_last_seen",
+    }
 
 
 def _new_track_id(tracks: dict, detection: dict) -> str:

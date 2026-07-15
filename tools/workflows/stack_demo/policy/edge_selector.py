@@ -77,6 +77,14 @@ def _edge_request(
         "protected_tracks": list(scene.protected_tracks),
         "recent_failures": [dict(item) for item in scene.recent_action_results[-failure_limit:]] if failure_limit else [],
         "forbidden_action_fingerprints": list(scene.forbidden_action_fingerprints),
+        "selection_priority": [
+            "all_physical_prechecks_passed",
+            "larger_direct_task_progress",
+            "larger_clearance_gain",
+            "lower_protected_structure_risk",
+            "lower_motion_planning_cost",
+            "avoid_failed_fingerprint",
+        ],
         "output_contract": {
             "selected_candidate_id": "one exact supplied candidate_id",
             "backup_candidate_ids": "zero to three distinct supplied ids",

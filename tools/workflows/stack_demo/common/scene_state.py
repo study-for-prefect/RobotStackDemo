@@ -84,7 +84,13 @@ def build_clutter_scene_state(
     forbidden_action_fingerprints: Iterable[str] = (),
 ) -> ClutterSceneState:
     """Build an explicit base_link state without treating detector ids as identity."""
-    frame = str(observation.get("frame_id") or observation.get("geometry_frame") or "base_link")
+    frame = str(
+        observation.get("coordinate_frame")
+        or observation.get("base_frame")
+        or observation.get("geometry_frame")
+        or observation.get("frame_id")
+        or "base_link"
+    )
     if frame != "base_link":
         raise ValueError(f"scene coordinate frame must be base_link, got {frame}")
     revision = int(observation.get("scene_revision", 1))
@@ -228,4 +234,3 @@ def _vector3(value: Any, name: str) -> tuple[float, float, float]:
 def _token(label: str, choices: Sequence[str], fallback: str) -> str:
     lower = label.lower().replace("-", "_")
     return next((choice for choice in choices if choice in lower), fallback)
-
