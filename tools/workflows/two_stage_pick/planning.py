@@ -4,6 +4,8 @@ import json
 import math
 import numpy as np
 
+from tools.robot.tool_geometry import default_tcp_offset_tool_m
+
 from .io import load_json, write_json
 
 def first_planned_step(plan):
@@ -203,7 +205,9 @@ def build_tcp_error_corrected_plan(
                 desired_norm, max_grasp_offset_m
             )
         )
-    current_tcp = current_tcp_position_from_tf_json(tf_json_path, tcp_offset_tool or [0.0, 0.0, 0.15])
+    current_tcp = current_tcp_position_from_tf_json(
+        tf_json_path, tcp_offset_tool or default_tcp_offset_tool_m(),
+    )
     observed_tcp_to_target_xy = [
         current_tcp[0] - second_geometry[0],
         current_tcp[1] - second_geometry[1],

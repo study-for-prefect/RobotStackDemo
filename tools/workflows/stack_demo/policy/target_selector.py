@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 
 from ..clutter.target_options import TargetOption
 from ..common.scene_state import ClutterSceneState
+from .payload_views import compact_task_state, target_option_policy_view
 from .qwen_client import QwenCallResult, QwenSelectionClient
 from .schemas import PolicyOutputError, TARGET_SELECTION_SCHEMA, parse_target_selection
 
@@ -70,14 +71,14 @@ def _target_request(
         "protocol": "qwen_target_selection_v1",
         "scene_revision": scene.scene_revision,
         "task_type": next(iter(options)).task_type,
-        "task_state": dict(task_state),
+        "task_state": compact_task_state(task_state),
         "scene_summary": {
             "visible_tracks": list(scene.visible_tracks),
             "missing_expected_tracks": list(scene.missing_expected_tracks),
             "completed_tracks": list(scene.completed_tracks),
             "protected_tracks": list(scene.protected_tracks),
         },
-        "target_options": [item.to_dict() for item in options],
+        "target_options": [target_option_policy_view(item) for item in options],
         "recent_failures": [dict(item) for item in scene.recent_action_results[-failure_limit:]] if failure_limit else [],
         "forbidden_action_fingerprints": list(scene.forbidden_action_fingerprints),
         "selection_priority": [

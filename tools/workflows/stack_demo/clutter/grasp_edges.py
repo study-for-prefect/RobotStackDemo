@@ -58,6 +58,11 @@ class GraspScanResult:
         }
 
 
+def normalize_gripper_yaw_deg(yaw_deg: float) -> float:
+    """Normalize a parallel-gripper axis to its unique half-turn interval."""
+    return round((float(yaw_deg) + 90.0) % 180.0 - 90.0, 6)
+
+
 def scan_grasp_yaws(
     target: SceneObjectState,
     objects: Sequence[SceneObjectState],
@@ -75,7 +80,7 @@ def scan_grasp_yaws(
     sample_count = int(math.ceil(180.0 / step))
     samples = []
     for index in range(sample_count):
-        yaw = min(index * step, 180.0 - 1e-6)
+        yaw = normalize_gripper_yaw_deg(-90.0 + index * step)
         result = dict(checker(target, objects, yaw))
         result["yaw_deg"] = round(yaw, 6)
         result["safe"] = all(
@@ -225,7 +230,12 @@ def _sample_intervals(samples: Sequence[Mapping[str, Any]], step: float) -> list
             start = index
         next_safe = index + 1 < len(samples) and bool(samples[index + 1]["safe"])
         if start is not None and sample["safe"] and not next_safe:
-            intervals.append((start, index, float(samples[start]["yaw_deg"]), min(180.0, float(sample["yaw_deg"]) + step)))
+            intervals.append((
+                start,
+                index,
+                float(samples[start]["yaw_deg"]),
+                min(90.0, float(sample["yaw_deg"]) + step),
+            ))
             start = None
     return intervals
 

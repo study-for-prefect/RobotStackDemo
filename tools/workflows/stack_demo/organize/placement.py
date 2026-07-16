@@ -14,24 +14,28 @@ def build_color_target_regions(
     config: StackDemoConfig,
     track_colors: Mapping[str, str],
 ) -> dict[str, Mapping[str, Any]]:
-    """Commit one non-overlapping row per observed expected color."""
+    """Build four fixed-width rows separated by code-verified clearing channels."""
     configured = [str(item) for item in config.section("organize")["colors"]]
-    present = [color for color in configured if color in set(track_colors.values())]
-    if not present:
+    if not configured:
         return {}
     bounds = config.organize_layout
-    row_height = (float(bounds["ymax"]) - float(bounds["ymin"])) / len(present)
+    region_width = float(config.section("organize")["target_region_width_y_m"])
+    channel_width = (
+        float(bounds["ymax"]) - float(bounds["ymin"]) - len(configured) * region_width
+    ) / (len(configured) - 1)
     regions = {}
-    for index, color in enumerate(present):
-        ymin = float(bounds["ymin"]) + index * row_height
-        ymax = float(bounds["ymin"]) + (index + 1) * row_height
+    for index, color in enumerate(configured):
+        ymin = float(bounds["ymin"]) + index * (region_width + channel_width)
+        ymax = ymin + region_width
         regions[color] = {
             "region_id": f"organize_{color}",
             "color": color,
             "frame_id": "base_link",
+            "target_region_width_y_m": region_width,
+            "clearance_channel_width_y_m": channel_width,
             "bounds_base_m": {
                 "xmin": float(bounds["xmin"]), "xmax": float(bounds["xmax"]),
-                "ymin": ymin, "ymax": ymax,
+                "ymin": round(ymin, 9), "ymax": round(ymax, 9),
             },
         }
     return regions
@@ -40,13 +44,18 @@ def build_color_target_regions(
 def region_occupancy(
     scene: ClutterSceneState,
     regions: Mapping[str, Mapping[str, Any]],
+    tolerance_m: float,
 ) -> dict[str, tuple[str, ...]]:
     output = {}
     for color, region in regions.items():
         bounds = region["bounds_base_m"]
         output[color] = tuple(sorted(
             obj.track_id for obj in scene.current_objects
-            if obj.color == color and _footprint_inside(obj, bounds, tolerance_m=0.003)
+            if (
+                obj.color == color
+                and _center_inside(obj.center_xyz_m, bounds)
+                and _footprint_inside(obj, bounds, tolerance_m=tolerance_m)
+            )
         ))
     return output
 
@@ -110,6 +119,13 @@ def _footprint_inside(obj: SceneObjectState, bounds: Mapping[str, float], tolera
         and x + half_extent_x <= float(bounds["xmax"]) + tolerance_m
         and float(bounds["ymin"]) - tolerance_m <= y - half_extent_y
         and y + half_extent_y <= float(bounds["ymax"]) + tolerance_m
+    )
+
+
+def _center_inside(center_xyz_m: tuple[float, float, float], bounds: Mapping[str, float]) -> bool:
+    return (
+        float(bounds["xmin"]) <= center_xyz_m[0] <= float(bounds["xmax"])
+        and float(bounds["ymin"]) <= center_xyz_m[1] <= float(bounds["ymax"])
     )
 
 

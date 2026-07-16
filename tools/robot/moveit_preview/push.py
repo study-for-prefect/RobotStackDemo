@@ -1,4 +1,4 @@
-"""MoveIt-backed execution of a validated four-stage push-clearing plan."""
+"""MoveIt-backed execution of a validated staged push-clearing plan."""
 
 import json
 import math
@@ -22,6 +22,7 @@ from .trajectory import (
     gripper_command_accepted,
     gripper_position_for_command,
     joint_state_from_trajectory,
+    joint_start_goal_delta,
     max_joint_delta,
     max_joint_start_goal_delta,
 )
@@ -116,6 +117,7 @@ def _push_stage_goals(push_plan: dict, args: Any, push_quat: List[float]) -> Lis
     tcp_offset_tool = [float(value) for value in args.tcp_offset_tool]
     stages = [
         ("pre_push", targets["pre_push"], True),
+        ("pre_contact", targets["pre_contact"], True),
         ("contact", targets["contact"], True),
         ("push_end", targets["push_end"], True),
         ("retreat", targets["retreat"], True),
@@ -144,7 +146,8 @@ def _set_gripper(node: Any, args: Any, gripper: Any, command: str) -> bool:
     accepted = gripper_command_accepted(args, command, status, current)
     if accepted and not status:
         node.get_logger().warning(
-            "Push gripper close accepted by contact position: position={} target={}.".format(
+            "Push gripper {} accepted by measured position: position={} target={}.".format(
+                command,
                 current,
                 gripper_position_for_command(args, command),
             )
@@ -174,7 +177,7 @@ def _push_orientation_ok(node: Any, args: Any, target_quat_xyzw: List[float]) ->
 
 
 def run_push_plan(node: Any, args: Any, planning_start_state: Any, gripper: Any = None) -> bool:
-    """Preflight all four MoveIt trajectories, then execute them once in order."""
+    """Preflight every MoveIt trajectory, then execute them once in order."""
     push_plan = load_push_plan(args.push_plan_json)
     gripper_closed_for_push = False
     close_at_pre_push = bool(args.execute and getattr(args, "close_gripper_for_push", False))
@@ -231,16 +234,36 @@ def run_push_plan(node: Any, args: Any, planning_start_state: Any, gripper: Any 
                 )
                 return False
             total_delta = max_joint_start_goal_delta(trajectory)
-            if total_delta and total_delta[1] > float(args.max_joint_delta):
+            total_limit = (
+                float(args.max_wrist_3_start_goal_delta)
+                if total_delta and total_delta[0] == "wrist_3_joint"
+                else float(args.max_joint_delta)
+            )
+            wrist_3_delta = joint_start_goal_delta(trajectory, "wrist_3_joint")
+            total_exceeded = bool(total_delta and total_delta[1] > total_limit)
+            wrist_3_exceeded = bool(
+                wrist_3_delta is not None
+                and wrist_3_delta > float(args.max_wrist_3_start_goal_delta)
+            )
+            if total_exceeded or wrist_3_exceeded:
                 if gripper_closed_for_push:
                     _recover_open_gripper(node, args, gripper, "failed_before_motion_total_joint_delta_stage_{}".format(stage_name))
                 node.get_logger().error(
                     "Push clearing preflight refused stage '{}': {} start_goal_delta {:.3f} rad "
                     "exceeds {:.3f}; this is likely an IK branch jump.".format(
                         stage_name,
-                        total_delta[0],
-                        total_delta[1],
-                        float(args.max_joint_delta),
+                        (
+                            "wrist_3_joint" if wrist_3_exceeded
+                            else total_delta[0]
+                        ),
+                        (
+                            float(wrist_3_delta) if wrist_3_exceeded
+                            else total_delta[1]
+                        ),
+                        (
+                            float(args.max_wrist_3_start_goal_delta)
+                            if wrist_3_exceeded else total_limit
+                        ),
                     )
                 )
                 return False

@@ -26,6 +26,7 @@ class EdgeExecutor(Protocol):
     def release(self, edge: PhysicalActionEdge) -> None: ...
     def retreat(self, edge: PhysicalActionEdge) -> None: ...
     def execute_nudge(self, edge: PhysicalActionEdge) -> None: ...
+    def return_to_observation_pose(self, edge: PhysicalActionEdge) -> None: ...
 
 
 class SceneObserver(Protocol):
@@ -69,6 +70,8 @@ def execute_one_edge(
     if edge.action_type == ActionType.NUDGE_BLOCKER:
         executor.execute_nudge(edge)
         stages.append({"stage": "horizontal_push", "status": "executed"})
+        executor.return_to_observation_pose(edge)
+        stages.append({"stage": "return_to_observation_pose", "status": "executed"})
         observed = observer.observe("post_nudge")
         stages.append({"stage": "fresh_observation", "scene_revision": observed.scene_revision})
         verification = verify_nudge_result(edge, before, observed)
@@ -106,6 +109,8 @@ def execute_one_edge(
     stages.append({"stage": "release", "status": "executed"})
     executor.retreat(edge)
     stages.append({"stage": "retreat", "status": "executed"})
+    executor.return_to_observation_pose(edge)
+    stages.append({"stage": "return_to_observation_pose", "status": "executed"})
     after_place = observer.observe("post_place")
     stages.append({"stage": "fresh_post_place_observation", "scene_revision": after_place.scene_revision})
     place = verify_place_result(edge, before, after_place, destination_check)

@@ -110,7 +110,12 @@ def get_center(obj):
     """Return an object's base-frame XYZ center, or None when unavailable."""
     if not isinstance(obj, dict):
         return None
-    for key in ("geometry_center_m", "last_pose_base", "center_base_m"):
+    for key in (
+        "geometry_center_m",
+        "center_3d_base_m",
+        "last_pose_base",
+        "center_base_m",
+    ):
         center = _pose_position(obj.get(key))
         if center is not None:
             return center

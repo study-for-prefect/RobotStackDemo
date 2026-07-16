@@ -62,13 +62,20 @@ def verify_grasp_result(
         and not bool(obj.source.get("tracking_ambiguous"))
         and float(obj.source.get("track_match_confidence", 1.0)) >= 0.5
     ))
-    view_continuity = bool(reliably_rebound_context)
+    visible_non_target_context = tuple(sorted(
+        obj.track_id for obj in after_lift.current_objects
+        if obj.track_id != edge.acted_object_track_id
+    ))
+    view_continuity = bool(visible_non_target_context)
     missing_supported = bool(
         track_missing
         and original_position_clear
         and (
             len(reliably_rebound_context) >= 2
-            or (len(reliably_rebound_context) >= 1 and gripper_holding_hint is True)
+            or (
+                gripper_holding_hint is True
+                and len(visible_non_target_context) >= 1
+            )
         )
     )
     scene_change_supports_grasp = bool(
@@ -91,6 +98,7 @@ def verify_grasp_result(
             "scene_change_supports_grasp": scene_change_supports_grasp,
             "context_tracks_still_visible": list(context_tracks_still_visible),
             "reliably_rebound_context_tracks": list(reliably_rebound_context),
+            "visible_non_target_context_tracks": list(visible_non_target_context),
             "view_continuity_supported": view_continuity,
             "gripper_holding_hint": gripper_holding_hint,
             "gripper_hint_used_as_sole_evidence": False,
@@ -250,6 +258,7 @@ def verify_nudge_result(
     target_before = before.object_by_track(edge.primary_target_track_id)
     target_after = after.object_by_track(edge.primary_target_track_id)
     direction = edge.physical_parameters.get("push_direction_base") or ()
+    self_target_push = edge.primary_target_track_id == edge.acted_object_track_id
     required_visible = all(item is not None for item in (blocker_before, blocker_after, target_before, target_after))
     signed_displacement = None
     clearance_gain = None
@@ -257,7 +266,8 @@ def verify_nudge_result(
         dx = blocker_after.center_xyz_m[0] - blocker_before.center_xyz_m[0]
         dy = blocker_after.center_xyz_m[1] - blocker_before.center_xyz_m[1]
         signed_displacement = dx * float(direction[0]) + dy * float(direction[1])
-        clearance_gain = _xy_distance(target_after, blocker_after) - _xy_distance(target_before, blocker_before)
+        if not self_target_push:
+            clearance_gain = _xy_distance(target_after, blocker_after) - _xy_distance(target_before, blocker_before)
     protected_stable = True
     protected_motion: dict[str, float | None] = {}
     for track_id in before.protected_tracks:
@@ -269,7 +279,10 @@ def verify_nudge_result(
     success = bool(
         required_visible
         and signed_displacement is not None and signed_displacement >= minimum_displacement_m
-        and clearance_gain is not None and clearance_gain >= minimum_clearance_gain_m
+        and (
+            self_target_push
+            or (clearance_gain is not None and clearance_gain >= minimum_clearance_gain_m)
+        )
         and protected_stable
     )
     return ActionVerification(
@@ -278,10 +291,17 @@ def verify_nudge_result(
         scene_revision=after.scene_revision,
         evidence={
             "required_tracks_visible": required_visible,
+            "verification_mode": (
+                "self_target_directional_displacement"
+                if self_target_push else "blocker_clearance_gain"
+            ),
             "signed_push_direction_displacement_m": signed_displacement,
             "minimum_displacement_m": minimum_displacement_m,
             "measured_target_clearance_gain_m": clearance_gain,
-            "minimum_clearance_gain_m": minimum_clearance_gain_m,
+            "clearance_gain_required": not self_target_push,
+            "minimum_clearance_gain_m": (
+                None if self_target_push else minimum_clearance_gain_m
+            ),
             "protected_tracks_stable": protected_stable,
             "protected_track_displacements_m": protected_motion,
         },

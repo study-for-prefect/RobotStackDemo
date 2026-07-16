@@ -12,7 +12,7 @@
     "palm_width_m": 0.112,
     "palm_depth_m": 0.040,
     "palm_height_m": 0.150,
-    "tcp_offset_tool_m": [0.0, 0.0, 0.150]
+    "tcp_offset_tool_m": [0.0, 0.0, 0.160]
   },
   "safety": {
     "object_clearance_m": 0.006,
@@ -46,7 +46,8 @@
     "high_clearance_rotation_acceleration": 0.24,
     "safe_pre_rotate_height_m": 0.120,
     "near_object_velocity": 0.03,
-    "near_object_acceleration": 0.03
+    "near_object_acceleration": 0.03,
+    "max_wrist_3_start_goal_delta_rad": 1.75
   },
   "policy": {
     "model": "qwen3-vl:8b-instruct",
@@ -55,10 +56,12 @@
     "stream": false,
     "num_ctx": 12288,
     "num_predict": 768,
-    "recent_failure_limit": 5
+    "recent_failure_limit": 5,
+    "max_consecutive_reobserve": 3
   },
   "organize": {
     "colors": ["red", "green", "blue", "yellow"],
+    "target_region_width_y_m": 0.035,
     "minimum_spacing_m": 0.015,
     "alignment_tolerance_m": 0.012,
     "observation_region_tolerance_m": 0.003

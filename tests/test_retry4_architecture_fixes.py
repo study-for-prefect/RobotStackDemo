@@ -178,7 +178,7 @@ class Retry4ArchitectureFixTests(unittest.TestCase):
             palm_width_m=0.112,
             palm_depth_m=0.040,
             palm_height_m=0.150,
-            tcp_offset_tool_m=[0.0, 0.0, 0.150],
+            tcp_offset_tool_m=[0.0, 0.0, 0.160],
             safety_margin_m=0.006,
         )
         self.assertEqual(set(result["checked_components"]), {

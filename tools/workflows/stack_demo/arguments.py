@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import os
 
+from tools.robot.tool_geometry import default_tcp_offset_tool_m
+
 from .constants import PROJECT_ROOT
 
 
@@ -31,7 +33,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--execute-push-clearing", action="store_true",
-        help="Additional opt-in required before executing a selected nudge edge.",
+        help="Deprecated compatibility flag; explicit --execute --yes already authorizes a selected nudge edge.",
     )
 
     parser.add_argument("--model", default="", help="Override planner-config policy.model.")
@@ -66,6 +68,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-frame", default="base_link")
     parser.add_argument("--camera-frame", default="camera_color_optical_frame")
     parser.add_argument("--tool-frame", default="tool0")
+    parser.add_argument(
+        "--tcp-offset-tool",
+        nargs=3,
+        type=float,
+        default=default_tcp_offset_tool_m(),
+        metavar=("X", "Y", "Z"),
+        help="Measured tool0->GF225 grasp TCP translation; must match planner config.",
+    )
     parser.add_argument(
         "--tf-point-mode",
         choices=("direct", "optical-to-camera-link"),

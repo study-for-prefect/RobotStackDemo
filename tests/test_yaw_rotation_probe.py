@@ -75,7 +75,7 @@ class YawRotationProbeTests(unittest.TestCase):
     def test_hover_target_reconstructs_same_tool0_position(self):
         tool0_position = [0.42, -0.18, 0.36]
         tool0_quat = vertical_down_quaternion_for_yaw(30.0)
-        tcp_offset_tool = [0.0, 0.0, 0.15]
+        tcp_offset_tool = [0.0, 0.0, 0.16]
         hover_target = hover_target_from_tool0_position(tool0_position, tool0_quat, tcp_offset_tool)
         tcp_offset_base = quaternion_xyzw_to_matrix(tool0_quat).dot(tcp_offset_tool).astype(float).tolist()
         reconstructed_tool0 = [
@@ -92,7 +92,7 @@ class YawRotationProbeTests(unittest.TestCase):
         }
         args = Namespace(
             ros_python="/usr/bin/python3",
-            motion_tcp_offset_tool=[0.0, 0.0, 0.15],
+            motion_tcp_offset_tool=[0.0, 0.0, 0.16],
             velocity=0.12,
             acceleration=0.12,
             pre_rotate_velocity=0.2,
@@ -120,7 +120,7 @@ class YawRotationProbeTests(unittest.TestCase):
         self.assertFalse(any(scientific_number.match(value) for value in command))
         hover_index = command.index("--hover-target-base") + 1
         hover_target = [float(value) for value in command[hover_index:hover_index + 3]]
-        tcp_offset_base = quaternion_xyzw_to_matrix(target["tool0_quat"]).dot([0.0, 0.0, 0.15])
+        tcp_offset_base = quaternion_xyzw_to_matrix(target["tool0_quat"]).dot([0.0, 0.0, 0.16])
         expected_hover = [
             float(target["tool0_position"][i]) + float(tcp_offset_base[i])
             for i in range(3)

@@ -26,6 +26,7 @@ from .orientation import (
     xyz_delta,
 )
 from .trajectory import (
+    joint_start_goal_delta,
     joint_position_map,
     joint_state_from_trajectory,
     max_joint_delta,
@@ -33,11 +34,19 @@ from .trajectory import (
     print_trajectory_summary,
     stretch_trajectory_timing,
     unwrap_continuous_joint_trajectory,
+    weighted_joint_start_goal_cost,
 )
 
 def plan_motion_trajectory(node, args, tool_goal, quat_xyzw, cartesian=None, start_joint_state=None):
     validate_goal(tool_goal, args)
-    command_quat = orientation_command_quaternion(args, quat_xyzw)
+    # A post-grasp translation must not apply the normal command calibration a
+    # second time: quat_xyzw is already the measured tool0 orientation that we
+    # intend to preserve exactly.
+    command_quat = (
+        normalize_quaternion_xyzw(quat_xyzw)
+        if bool(getattr(args, "hover_preserve_current_orientation", False))
+        else orientation_command_quaternion(args, quat_xyzw)
+    )
     pose = make_pose(tool_goal, command_quat)
     node.get_logger().info(
         "Orientation target={} command_after_compensation={}".format(
@@ -131,6 +140,20 @@ def select_best_joint_wrist3_pre_rotate_plan(node, args, step, current_quat, sta
                     "Pre-rotate joint candidate failed: {}".format(label)
                 )
                 continue
+            wrist_delta = joint_start_goal_delta(trajectory, "wrist_3_joint")
+            if (
+                wrist_delta is not None
+                and wrist_delta > float(args.max_wrist_3_start_goal_delta)
+            ):
+                node.get_logger().warning(
+                    "Pre-rotate joint candidate rejected: wrist_3 start_goal_delta "
+                    "{:.3f} rad > {:.3f}; {}".format(
+                        wrist_delta,
+                        float(args.max_wrist_3_start_goal_delta),
+                        label,
+                    )
+                )
+                continue
             delta = max_joint_delta(trajectory)
             if delta is None:
                 delta_text = "none"
@@ -142,9 +165,10 @@ def select_best_joint_wrist3_pre_rotate_plan(node, args, step, current_quat, sta
                 "Pre-rotate joint candidate max_delta={} {}".format(delta_text, label)
             )
             quaternion = downward_quaternion_for_yaw(args.quat_xyzw, yaw)
+            cost = weighted_joint_start_goal_cost(trajectory)
             planned.append(
                 (
-                    delta_sort,
+                    float(cost if cost is not None else delta_sort),
                     {
                         "quat_xyzw": quaternion,
                         "selected_yaw_deg": yaw,
@@ -157,10 +181,10 @@ def select_best_joint_wrist3_pre_rotate_plan(node, args, step, current_quat, sta
     if not planned:
         return None
     planned.sort(key=lambda item: item[0])
-    best_delta, best_candidate, best_trajectory = planned[0]
+    best_cost, best_candidate, best_trajectory = planned[0]
     node.get_logger().info(
-        "Selected pre-rotate joint candidate max_delta={:.3f} {} from {} candidates".format(
-            best_delta,
+        "Selected pre-rotate joint candidate weighted_joint_delta_cost={:.3f} {} from {} candidates".format(
+            best_cost,
             best_candidate["label"],
             total_candidates,
         )
@@ -185,6 +209,22 @@ def select_best_pose_pre_rotate_plan(node, args, step, tool_goal, current_quat, 
                 "Pre-rotate candidate {}/{} failed: {}".format(index, len(candidates), candidate["label"])
             )
             continue
+        wrist_delta = joint_start_goal_delta(trajectory, "wrist_3_joint")
+        if (
+            wrist_delta is not None
+            and wrist_delta > float(args.max_wrist_3_start_goal_delta)
+        ):
+            node.get_logger().warning(
+                "Pre-rotate candidate {}/{} rejected: wrist_3 start_goal_delta "
+                "{:.3f} rad > {:.3f} {}".format(
+                    index,
+                    len(candidates),
+                    wrist_delta,
+                    float(args.max_wrist_3_start_goal_delta),
+                    candidate["label"],
+                )
+            )
+            continue
         delta = max_joint_delta(trajectory)
         if delta is None:
             delta_text = "none"
@@ -200,15 +240,16 @@ def select_best_pose_pre_rotate_plan(node, args, step, tool_goal, current_quat, 
                 candidate["label"],
             )
         )
-        planned.append((delta_sort, candidate, trajectory))
+        cost = weighted_joint_start_goal_cost(trajectory)
+        planned.append((float(cost if cost is not None else delta_sort), candidate, trajectory))
 
     if not planned:
         return None
     planned.sort(key=lambda item: item[0])
-    best_delta, best_candidate, best_trajectory = planned[0]
+    best_cost, best_candidate, best_trajectory = planned[0]
     node.get_logger().info(
-        "Selected pre-rotate candidate max_delta={:.3f} {}".format(
-            best_delta,
+        "Selected pre-rotate candidate weighted_joint_delta_cost={:.3f} {}".format(
+            best_cost,
             best_candidate["label"],
         )
     )
@@ -291,9 +332,24 @@ def plan_and_maybe_execute_motion(
                 )
             )
 
+    wrist_3_start_goal_delta = joint_start_goal_delta(trajectory, "wrist_3_joint")
+    wrist_3_delta_too_large = bool(
+        wrist_3_start_goal_delta is not None
+        and wrist_3_start_goal_delta > float(args.max_wrist_3_start_goal_delta)
+    )
+    if wrist_3_delta_too_large:
+        node.get_logger().warning(
+            "wrist_3 start_goal_delta {:.3f} rad > {:.3f}; rejecting IK/plan branch.".format(
+                wrist_3_start_goal_delta,
+                float(args.max_wrist_3_start_goal_delta),
+            )
+        )
+
     if not args.execute:
+        if wrist_3_delta_too_large:
+            return False
         return joint_state_from_trajectory(trajectory) or True
-    if delta_too_large:
+    if delta_too_large or wrist_3_delta_too_large:
         node.get_logger().error("Execution refused because joint delta exceeds safety threshold.")
         return False
     if not maybe_confirm(
@@ -384,12 +440,18 @@ def run_hover_only(node, args, planning_start_state):
             "Hover-only refused: TCP tool Z offset {:.3f} m is too small. "
             "Use the same --tcp-offset-tool as real grasp execution.".format(tcp_offset_tool[2])
         )
-    hover_quat = normalize_quaternion_xyzw(args.hover_orientation_xyzw)
-    tool_goal = tool0_goal_from_tcp(hover_target, hover_quat, tcp_offset_tool)
-    validate_goal(tool_goal, args)
-
     current_tool = node.current_tool_transform(timeout=args.tf_timeout)
     current_pos, current_quat = transform_position_quat(current_tool)
+    if bool(getattr(args, "hover_preserve_current_orientation", False)):
+        hover_quat = normalize_quaternion_xyzw(current_quat)
+        node.get_logger().info(
+            "Hover-only fixed-posture mode: preserving the measured tool0 quaternion; "
+            "pre-rotation and orientation settling are disabled."
+        )
+    else:
+        hover_quat = normalize_quaternion_xyzw(args.hover_orientation_xyzw)
+    tool_goal = tool0_goal_from_tcp(hover_target, hover_quat, tcp_offset_tool)
+    validate_goal(tool_goal, args)
     orientation_error_rad = quaternion_distance_rad(current_quat, hover_quat)
     orientation_error_deg = math.degrees(orientation_error_rad)
     node.get_logger().info("Hover-only current_tool0_pose={}".format(pose_payload(current_pos, current_quat)))
@@ -450,31 +512,44 @@ def run_hover_only(node, args, planning_start_state):
         node.moveit2.max_velocity = args.pre_rotate_velocity
         node.moveit2.max_acceleration = args.pre_rotate_acceleration
         try:
-            selected_pre_rotate_trajectory = None
+            target_yaw = estimate_downward_family_yaw_deg(hover_quat, args.quat_xyzw)
+            equivalent_step = {
+                "target_yaw_deg": target_yaw,
+                "target_yaw_valid": True,
+                "parallel_gripper_axis_equivalent": True,
+                "yaw_equivalence_period_deg": 180.0,
+            }
             if args.pre_rotate_strategy == "joint-wrist3":
-                target_yaw = estimate_downward_family_yaw_deg(hover_quat, args.quat_xyzw)
                 selected = select_best_joint_wrist3_pre_rotate_plan(
                     node,
                     args,
-                    {
-                        "target_yaw_deg": target_yaw,
-                        "target_yaw_valid": True,
-                        "exact_tool_yaw_required": True,
-                    },
+                    equivalent_step,
                     current_quat,
                     start_joint_state=start_state,
                 )
-                if selected is None:
-                    node.get_logger().error(
-                        "Hover-only stopped because no safe wrist_3 pre-rotate candidate planned."
-                    )
-                    return False
-                selected_candidate, selected_pre_rotate_trajectory = selected
-                node.get_logger().info(
-                    "Hover-only selected explicit-yaw pre-rotate: {}".format(
-                        selected_candidate["label"]
-                    )
+            else:
+                selected = select_best_pose_pre_rotate_plan(
+                    node,
+                    args,
+                    equivalent_step,
+                    safe_position,
+                    current_quat,
+                    start_joint_state=start_state,
                 )
+            if selected is None:
+                node.get_logger().error(
+                    "Hover-only stopped because no safe 180-degree equivalent pre-rotate candidate planned."
+                )
+                return False
+            selected_candidate, selected_pre_rotate_trajectory = selected
+            hover_quat = selected_candidate["quat_xyzw"]
+            target_yaw = float(selected_candidate["selected_yaw_deg"])
+            tool_goal = tool0_goal_from_tcp(hover_target, hover_quat, tcp_offset_tool)
+            node.get_logger().info(
+                "Hover-only selected parallel-gripper equivalent: {}".format(
+                    selected_candidate["label"]
+                )
+            )
             pre_rotate_result = plan_and_maybe_execute_motion(
                 node,
                 args,
@@ -502,7 +577,6 @@ def run_hover_only(node, args, planning_start_state):
             current_pos, current_quat = transform_position_quat(current_tool)
             start_state = node.latest_joint_state
             if args.pre_rotate_strategy == "joint-wrist3":
-                target_yaw = estimate_downward_family_yaw_deg(hover_quat, args.quat_xyzw)
                 actual_yaw = estimate_downward_family_yaw_deg(current_quat, args.quat_xyzw)
                 yaw_error = abs(shortest_yaw_delta_deg(target_yaw, actual_yaw))
                 node.get_logger().info(
@@ -538,7 +612,7 @@ def run_hover_only(node, args, planning_start_state):
         return False
     final_tool = node.current_tool_transform(timeout=args.tf_timeout)
     final_pos, final_quat = transform_position_quat(final_tool)
-    if args.execute:
+    if args.execute and not bool(getattr(args, "hover_preserve_current_orientation", False)):
         final_pos, final_quat, _settled_state = settle_orientation_before_descent(
             node,
             args,

@@ -5,6 +5,8 @@ import math
 
 from pymoveit2.robots import ur
 
+from tools.robot.tool_geometry import default_tcp_offset_tool_m
+
 from .constants import (
     DEFAULT_ORIENTATION_COMMAND_CORRECTION_XYZW,
     DEFAULT_PLAN,
@@ -17,7 +19,7 @@ def parse_args():
     parser.add_argument(
         "--push-plan-json",
         default="",
-        help="Run one four-stage tabletop push from push_execution_plan_v1 JSON.",
+        help="Run one staged tabletop push from push_execution_plan_v1 JSON.",
     )
     parser.add_argument(
         "--close-gripper-for-push",
@@ -68,6 +70,14 @@ def parse_args():
         metavar=("QX", "QY", "QZ", "QW"),
         help="Hover tool0 target orientation in xyzw order.",
     )
+    parser.add_argument(
+        "--hover-preserve-current-orientation",
+        action="store_true",
+        help=(
+            "For hover-only motion, ignore the supplied target quaternion and keep the "
+            "currently measured tool0 orientation throughout the translation."
+        ),
+    )
     parser.add_argument("--step", type=int, default=1, help="Plan one step number. Ignored by --all-approaches.")
     parser.add_argument("--all-approaches", action="store_true", help="Plan all steps that have approach_position_m.")
     parser.add_argument(
@@ -103,7 +113,7 @@ def parse_args():
         "--tcp-offset-tool",
         nargs=3,
         type=float,
-        default=[0.0, 0.0, 0.15],
+        default=default_tcp_offset_tool_m(),
         metavar=("X", "Y", "Z"),
         help="tool0->TCP/gripper-center translation in tool0 coordinates.",
     )
@@ -248,6 +258,12 @@ def parse_args():
     parser.add_argument("--planning-time", type=float, default=5.0)
     parser.add_argument("--max-joint-delta", type=float, default=1.2, help="Warn if any joint changes more than this radian value.")
     parser.add_argument(
+        "--max-wrist-3-start-goal-delta",
+        type=float,
+        default=1.75,
+        help="Reject an IK/plan branch whose wrist_3 start-to-goal travel exceeds this value.",
+    )
+    parser.add_argument(
         "--max-pre-rotate-joint-delta",
         type=float,
         default=math.pi,
@@ -276,6 +292,26 @@ def parse_args():
     parser.add_argument("--gripper-speed", type=int, default=30)
     parser.add_argument("--gripper-open-position", type=int, default=1000)
     parser.add_argument("--gripper-close-position", type=int, default=0)
+    parser.add_argument(
+        "--gripper-result-json",
+        default="",
+        help="Optional machine-readable result for a gripper-only command.",
+    )
+    parser.add_argument(
+        "--gripper-holding-min-position-delta",
+        type=int,
+        default=80,
+        help=(
+            "Minimum measured distance from the fully-closed position that counts as "
+            "object contact after an accepted close command."
+        ),
+    )
+    parser.add_argument(
+        "--gripper-open-position-tolerance",
+        type=int,
+        default=100,
+        help="Accept an open command when measured position is within this many units of the open target.",
+    )
     parser.add_argument("--gripper-wait", type=float, default=2.0)
     parser.add_argument(
         "--open-gripper-at-start",

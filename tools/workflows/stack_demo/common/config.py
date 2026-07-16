@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from tools.robot.tool_geometry import TOOL0_TO_TCP_OFFSET_TOOL_M
+
 
 @dataclass(frozen=True)
 class StackDemoConfig:
@@ -15,6 +17,8 @@ class StackDemoConfig:
     values: Mapping[str, Any]
     workspace: Mapping[str, float]
     organize_layout: Mapping[str, float]
+    default_initial_clutter: Mapping[str, float]
+    robot_exclusion_geometry: tuple[Mapping[str, float], ...]
 
     def section(self, name: str) -> Mapping[str, Any]:
         value = self.values.get(name)
@@ -42,9 +46,24 @@ def load_stack_demo_config(
     organize_layout = _bounds(
         workspace_document.get("organize_layout_bounds"), include_z=False,
     )
+    default_initial_clutter = _bounds(
+        workspace_document.get("default_initial_clutter_bounds"), include_z=False,
+    )
+    robot_exclusions = tuple(
+        _bounds(item, include_z=False)
+        for item in workspace_document.get("robot_exclusion_geometry", ())
+        if isinstance(item, Mapping)
+    )
     _require_sections(planner)
     _validate_planner_values(planner)
-    return StackDemoConfig(planner, workspace, organize_layout)
+    _validate_organize_layout(planner, workspace, organize_layout, default_initial_clutter)
+    return StackDemoConfig(
+        planner,
+        workspace,
+        organize_layout,
+        default_initial_clutter,
+        robot_exclusions,
+    )
 
 
 def _load_object(path: str | Path) -> dict[str, Any]:
@@ -83,6 +102,12 @@ def _validate_planner_values(planner: Mapping[str, Any]) -> None:
     safety = planner["safety"]
     if float(gripper["open_inner_width_m"]) >= float(gripper["open_outer_width_m"]):
         raise ValueError("GF225 inner opening must be smaller than its outer outline")
+    configured_tcp = tuple(float(value) for value in gripper["tcp_offset_tool_m"])
+    if configured_tcp != TOOL0_TO_TCP_OFFSET_TOOL_M:
+        raise ValueError(
+            "planner tool0->TCP offset must match the measured shared tool geometry "
+            f"{TOOL0_TO_TCP_OFFSET_TOOL_M}"
+        )
     if float(grasp["minimum_continuous_safe_yaw_span_deg"]) < 10.0:
         raise ValueError("minimum continuous safe grasp yaw span must be at least 10 degrees")
     if abs(float(safety["release_height_extra_m"]) - 0.010) > 1e-9:
@@ -90,3 +115,30 @@ def _validate_planner_values(planner: Mapping[str, Any]) -> None:
     motion = planner["motion"]
     if float(motion["near_object_velocity"]) >= float(motion["high_clearance_rotation_velocity"]):
         raise ValueError("near-object velocity must remain below high-clearance rotation velocity")
+    if abs(float(motion["max_wrist_3_start_goal_delta_rad"]) - 1.75) > 1e-9:
+        raise ValueError("motion.max_wrist_3_start_goal_delta_rad must remain 1.75")
+    if int(planner["policy"].get("max_consecutive_reobserve", 0)) < 1:
+        raise ValueError("policy.max_consecutive_reobserve must be at least one")
+
+
+def _validate_organize_layout(
+    planner: Mapping[str, Any],
+    workspace: Mapping[str, float],
+    layout: Mapping[str, float],
+    initial_clutter: Mapping[str, float],
+) -> None:
+    for bounds_name, bounds in (("organize layout", layout), ("initial clutter", initial_clutter)):
+        if not (
+            workspace["xmin"] <= bounds["xmin"] < bounds["xmax"] <= workspace["xmax"]
+            and workspace["ymin"] <= bounds["ymin"] < bounds["ymax"] <= workspace["ymax"]
+        ):
+            raise ValueError(f"{bounds_name} bounds must remain inside the configured workspace")
+    colors = tuple(str(value) for value in planner["organize"]["colors"])
+    width = float(planner["organize"]["target_region_width_y_m"])
+    available_y = float(layout["ymax"]) - float(layout["ymin"])
+    if len(colors) < 2 or width <= 0.0 or available_y <= len(colors) * width:
+        raise ValueError("organize layout must fit fixed-width color regions with positive channels")
+    x_overlap = min(layout["xmax"], initial_clutter["xmax"]) > max(layout["xmin"], initial_clutter["xmin"])
+    y_overlap = min(layout["ymax"], initial_clutter["ymax"]) > max(layout["ymin"], initial_clutter["ymin"])
+    if x_overlap and y_overlap:
+        raise ValueError("organize target layout must not overlap the default initial clutter bounds")

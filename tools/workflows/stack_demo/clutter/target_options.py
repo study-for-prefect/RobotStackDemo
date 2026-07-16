@@ -82,7 +82,12 @@ def build_target_options(
         direct = [
             edge for edge in feasible
             if edge.acted_object_track_id == track_id
-            and edge.action_type not in {ActionType.EXTRACT_TO_STAGING, ActionType.REGRASP_FOR_ORIENTATION}
+            and edge.action_type not in {
+                ActionType.EXTRACT_TO_STAGING,
+                ActionType.REGRASP_FOR_ORIENTATION,
+                ActionType.NUDGE_BLOCKER,
+                ActionType.PICK_AWAY_BLOCKER,
+            }
         ]
         clearance_edges = [
             edge for edge in feasible

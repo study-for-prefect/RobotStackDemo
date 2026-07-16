@@ -185,6 +185,36 @@ track 明显抬升/位移，或在视图连续证据及可选夹爪辅助证据�
 颜色区域、槽位、占用和完成均由代码计算。最终 yaw 不要求精确。只有最新观测确认所有预期
 track 在正确颜色区域、无缺失、无非法重叠且杂乱区无未完成对象时才能完成；无边不等于完成。
 
+固定区域都使用 `x=0.250..0.420 m`，Y 范围分别为红 `0.230..0.265`、绿
+`0.275..0.310`、蓝 `0.320..0.355`、黄 `0.365..0.400 m`。每区宽 `0.035 m`，三个
+通道均宽 `0.010 m`，并与默认初始杂乱区分离。完成判定同时检查颜色、中心和 yaw-aware 二维
+占用足迹。颜色矩形不参与推动碰撞拒绝；空区域不保护，实际已完成物体才按尺寸加安全余量成为
+保护体。推入自身颜色区域允许并增加任务收益，其他空颜色区域允许但提高风险分数。
+
+实测 `tool0 -> GF225 grasp TCP` 为 `[0.0, 0.0, 0.16] m`。该值由共享工具几何常量约束，
+planner config、stack CLI 与 MoveIt 参数必须一致；转换方向是从目标 TCP 位置减去旋转到
+`base_link` 的 tool-frame offset，且每个 MoveIt 目标只应用一次。
+
+候选生成对每个未完成 track 独立执行：先扫描 `[-90°, 90°)` 内全部抓取轴角，再扫描
+`+x/-x/+y/-y` 四个推动方向和配置的全部距离/腕角。推动边同时记录 `push_direction` 与其
+相反的 `contact_side`。GF225 无法从接触侧进入时只拒绝该方向；目标扫掠接触普通未完成
+积木时会构建方向一致的 `chain_track_ids`，使用保守位移上界验证联合扫掠，只有碰到实际
+已完成物体、固定障碍、工作空间边界或机器人排除区才硬拒绝。颜色矩形不参与碰撞拒绝。
+
+每个 cycle 写出 `candidate_generation_summary.json` 和 `candidate_rejections.json`，因此原始
+生成、几何拒绝、MoveIt 拒绝、物理边和目标选项数量都可追踪。空候选不会立即结束：同一任务
+最多连续重新观测 3 次，每次重绑 track、重建 task state 并重新生成候选；只有连续空扫描且
+场景几何签名未变化才停止。
+
+连锁推动到达 `retreat` 阶段后，普通连锁物体按保守预测终点参与垂直退离碰撞检查，不继续用
+推动前位置制造虚假碰撞。Qwen 只接收候选 ID、物理参数摘要、代码门结果和风险/进度指标；
+完整姿态与碰撞明细仍保存在本地审计文件中，合法候选较多时也不会挤爆固定上下文。
+
+两指夹爪轴角在几何、动作参数和 MoveIt 前统一规范为 `[-90°, 90°)`（例如 `145° -> -35°`）。
+正常 pick-place 仍在抓取姿态垂直抬升后，于安全高度调整释放姿态。MoveIt 分别规划目标轴角
+的 `base-180°/base/base+180°` 等价表示，按总关节变化、`wrist_3` 变化和 IK 分支代价选择
+最小可行解；所有关键段继续执行 `wrist_3 start_goal <= 1.75 rad` 检查。
+
 ## HousePlanner
 
 角色固定为：
@@ -266,10 +296,11 @@ python3 tools/workflows/stack_demo_pipeline.py \
 
 ```bash
 python3 tools/workflows/stack_demo_pipeline.py \
-  --task-type build_house \
-  --instruction "搭一个房子" \
+  --task-type organize_blocks \
+  --instruction "按颜色整理积木" \
   --moveit-plan-only \
-  --output-dir runtime/build_house_plan_only
+  --tcp-offset-tool 0 0 0.16 \
+  --output-dir runtime/organize_blocks_region_tcp_fix_test
 ```
 
 真实设备链路、严格无运动的集成模式：
@@ -298,8 +329,9 @@ ready pose/轨迹/夹爪/动作后模拟。`assert_non_actuating_command` 在每
 启动参数必须显式匹配 `/health` 所列 topic、base/camera/TF mode 和 detector 配置，测试后只停止
 自己启动的 PID。
 
-实机路径要求 `--execute --yes`；nudge 还需 `--execute-push-clearing`。本次重构没有运行这些
-参数。离线/mock 输入和 `--execute` 的组合会在机器人初始化之前被拒绝。
+实机路径统一要求 `--execute --yes`，这两个显式参数也授权执行已通过全部门禁的 nudge；
+`--execute-push-clearing` 仅作为旧命令兼容参数保留。离线/mock 输入和 `--execute` 的组合会在
+机器人初始化之前被拒绝。
 
 已删除旧 `--legacy-linear-stack`、stack order/base ID/decision JSON、task contract/grounded plan、
 resume、开放式 VLM action 尝试次数，以及分散的抓取/推动几何覆盖参数。当前参数以 `--help`

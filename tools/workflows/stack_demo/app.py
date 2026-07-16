@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.execute and not args.yes:
         raise RuntimeError("real execution requires both --execute and --yes")
     config = load_stack_demo_config(args.planner_config, args.workspace_bounds_json)
+    _apply_tcp_offset_config(args, config)
     _apply_motion_config(args, config)
     task_type = args.task_type if args.task_type != "auto" else route_task_type(args.instruction)
     if task_type not in {"organize_blocks", "build_house"}:
@@ -133,6 +134,11 @@ def _run(
     forbidden: set[str] = set()
     organize_state: OrganizeTaskState | None = None
     house_state: HouseTaskState | None = None
+    consecutive_reobserve = 0
+    previous_empty_signature: tuple[Any, ...] | None = None
+    max_consecutive_reobserve = int(
+        config.section("policy")["max_consecutive_reobserve"]
+    )
 
     for cycle_index in range(1, max(1, args.max_task_steps) + 1):
         cycle_dir = output / f"cycle_{cycle_index:03d}_revision_{scene.scene_revision}"
@@ -165,14 +171,47 @@ def _run(
             cycle = HousePlanner(config, extraction).plan_cycle(scene, house_state, logger, image_paths=images)
         if cycle.selected_edge is None:
             logger.ensure_execution_artifacts(cycle.decision_source)
+            signature = _scene_geometry_signature(scene)
+            consecutive_reobserve = (
+                consecutive_reobserve + 1
+                if signature == previous_empty_signature else 1
+            )
+            previous_empty_signature = signature
+            logger.write("reobserve_attempt.json", {
+                "decision_source": cycle.decision_source,
+                "consecutive_unchanged_empty_scans": consecutive_reobserve,
+                "max_consecutive_reobserve": max_consecutive_reobserve,
+                "will_reobserve": consecutive_reobserve < max_consecutive_reobserve,
+                "candidate_summary_path": "candidate_generation_summary.json",
+                "candidate_rejections_path": "candidate_rejections.json",
+            })
             if integration is not None:
                 edges = _load_json_list(cycle_dir / "physical_action_edges.json")
                 integration.update(
                     physical_edges_generated=bool(edges),
                     qwen_ok=False,
-                    failure_stage="no_selected_physical_edge",
+                    failure_stage=(
+                        "no_selected_physical_edge"
+                        if consecutive_reobserve >= max_consecutive_reobserve else None
+                    ),
                 )
-            return 2
+            if consecutive_reobserve >= max_consecutive_reobserve:
+                return 2
+            scene, raw = _reobserve_without_action(
+                args,
+                config,
+                output,
+                cycle_index,
+                consecutive_reobserve,
+                scene,
+                expected_tracks,
+                action_history,
+                forbidden,
+                track_memory,
+            )
+            continue
+        consecutive_reobserve = 0
+        previous_empty_signature = None
         if not args.execute:
             logger.ensure_execution_artifacts("moveit_plan_only" if args.moveit_plan_only else "dry_run_no_motion")
             if integration is not None:
@@ -228,6 +267,57 @@ def _run(
     return 2
 
 
+def _reobserve_without_action(
+    args: Any,
+    config: StackDemoConfig,
+    output: Path,
+    cycle_index: int,
+    attempt: int,
+    before: ClutterSceneState,
+    expected_tracks: tuple[str, ...],
+    history: list[dict[str, Any]],
+    forbidden: set[str],
+    track_memory: dict[str, Any],
+) -> tuple[ClutterSceneState, dict[str, Any]]:
+    """Capture and rebuild a fresh scene after an empty/invalid planning cycle."""
+    if args.offline_scene_state:
+        raw = load_json(args.offline_scene_state)
+        raw["scene_revision"] = before.scene_revision + 1
+        _bind_observation_tracks(raw, track_memory, trust_recorded_ids=True)
+    else:
+        directory = output / f"observation_cycle_{cycle_index:03d}_reobserve_{attempt}"
+        raw = capture_empty_current_pose(
+            args,
+            str(directory),
+            None,
+            allow_holding=False,
+            refresh_tf=False,
+        )
+        if raw is None:
+            raise RuntimeError("fresh reobserve did not produce a scene")
+        raw["scene_revision"] = before.scene_revision + 1
+        _bind_observation_tracks(raw, track_memory)
+    scene = build_clutter_scene_state(
+        raw,
+        config.workspace,
+        expected_tracks=expected_tracks,
+        recent_action_results=history[-5:],
+        forbidden_action_fingerprints=forbidden,
+    )
+    return scene, raw
+
+
+def _scene_geometry_signature(scene: ClutterSceneState) -> tuple[Any, ...]:
+    return tuple(sorted(
+        (
+            obj.track_id,
+            *(round(float(value), 4) for value in obj.center_xyz_m),
+            *(round(float(value), 4) for value in obj.size_xyz_m),
+        )
+        for obj in scene.current_objects
+    ))
+
+
 def _load_json_list(path: Path) -> list[Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -260,7 +350,10 @@ def _decorate_task_scene(
             current_action_result=latest_result,
         )
         scene = _apply_task_marks(
-            scene, state.completed_tracks, (), tuple(state.color_target_regions.values()),
+            scene,
+            state.completed_tracks,
+            state.completed_tracks,
+            tuple(state.color_target_regions.values()),
         )
         state = build_organize_task_state(
             scene, config, previous=state,
@@ -318,7 +411,7 @@ class _LiveObserver(SceneObserver):
         directory = self._output / f"observation_cycle_{self._cycle_index:03d}_{reason}"
         raw = capture_empty_current_pose(
             self._args, str(directory), None,
-            allow_holding=True, refresh_tf=True,
+            allow_holding=True, refresh_tf=False,
         )
         if raw is None:
             raise RuntimeError(f"fresh observation missing after {reason}")
@@ -423,6 +516,19 @@ def _apply_motion_config(args: Any, config: StackDemoConfig) -> None:
         args.vlm_num_ctx = int(policy["num_ctx"])
     if int(args.vlm_num_predict) <= 0:
         args.vlm_num_predict = int(policy["num_predict"])
+
+
+def _apply_tcp_offset_config(args: Any, config: StackDemoConfig) -> None:
+    configured = [float(value) for value in config.section("gripper")["tcp_offset_tool_m"]]
+    requested = [float(value) for value in args.tcp_offset_tool]
+    if any(abs(left - right) > 1e-9 for left, right in zip(requested, configured)):
+        raise ValueError(
+            f"--tcp-offset-tool {requested} must match planner config {configured}; "
+            "the transform may only have one runtime source"
+        )
+    args.tcp_offset_tool = configured
+    print(f"tool_frame={args.tool_frame}", flush=True)
+    print(f"tcp_offset_tool={args.tcp_offset_tool}", flush=True)
 
 
 def _bind_observation_tracks(

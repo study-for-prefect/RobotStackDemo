@@ -63,7 +63,7 @@ class TwoStageTcpCorrectionTest(unittest.TestCase):
                 report_path,
                 max_correction_m=0.006,
                 max_grasp_offset_m=0.05,
-                tcp_offset_tool=[0.0, 0.0, 0.15],
+                tcp_offset_tool=[0.0, 0.0, 0.16],
             )
 
             with open(corrected_plan, "r", encoding="utf-8") as f:

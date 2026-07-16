@@ -33,7 +33,20 @@ class NewSceneEdgePolicyTests(unittest.TestCase):
     def test_01_main_entry_loads_new_planner(self):
         fixture = Path(__file__).parent / "fixtures" / "new_arch_single_red_scene.json"
         with tempfile.TemporaryDirectory() as output:
-            result = main(["--task-type", "organize_blocks", "--offline-scene-state", str(fixture), "--output-dir", output, "--no-image"])
+            mock = Path(output) / "mock_policy"
+            mock.mkdir()
+            (mock / "edge_selection.json").write_text(json.dumps({
+                "selected_candidate_id": "edge_r1_track_red_01_grasp_1",
+                "backup_candidate_ids": [],
+                "reason_codes": ["direct_task_progress"],
+            }))
+            result = main([
+                "--task-type", "organize_blocks",
+                "--offline-scene-state", str(fixture),
+                "--mock-policy-response-dir", str(mock),
+                "--output-dir", output,
+                "--no-image",
+            ])
             self.assertEqual(result, 0)
             self.assertTrue(list(Path(output).glob("cycle_*/physical_action_edges.json")))
 
@@ -120,7 +133,7 @@ class NewSceneEdgePolicyTests(unittest.TestCase):
         yaw = generated.edges_by_target["t1"][0].physical_parameters["grasp_yaw_deg"]
         self.assertNotIn(yaw, (0.0, 90.0))
 
-    def test_release_gripper_yaw_preserves_code_owned_object_yaw_relation(self):
+    def test_normal_block_preserves_grasp_yaw_through_release(self):
         current = scene([raw_object(1, "t1", [0.5, 0.0, 0.02], yaw_deg=30.0)])
 
         def target(obj, interval):
@@ -137,11 +150,22 @@ class NewSceneEdgePolicyTests(unittest.TestCase):
             current, ["t1"], "organize_blocks", config(), target, lambda obj: None,
         )
         physical = generated.edges_by_target["t1"][0].physical_parameters
-        resulting_object_yaw = (
-            30.0 + physical["release_gripper_yaw_deg"] - physical["grasp_yaw_deg"]
-        ) % 180.0
-        self.assertAlmostEqual(resulting_object_yaw, 10.0)
-        self.assertEqual(physical["expected_place_object_yaw_deg"], 10.0)
+        self.assertEqual(
+            physical["release_gripper_yaw_deg"],
+            physical["grasp_yaw_deg"],
+        )
+        self.assertEqual(physical["requested_place_object_yaw_deg"], 10.0)
+        self.assertEqual(physical["expected_place_object_yaw_deg"], 30.0)
+        self.assertEqual(
+            physical["placement_yaw_policy"],
+            "preserve_grasp_yaw_until_release",
+        )
+        self.assertEqual(physical["orientation_policy"], "downward_yaw_only")
+        self.assertEqual(len(physical["transport_path"]), 2)
+        self.assertEqual(
+            physical["transport_path"][1]["yaw_deg"],
+            physical["grasp_yaw_deg"],
+        )
 
     def test_16_narrow_yaw_interval_is_rejected(self):
         current = scene([raw_object(1, "t1", [0.5, 0.0, 0.02])])
@@ -190,6 +214,54 @@ class NewSceneEdgePolicyTests(unittest.TestCase):
             config().workspace,
         )
         self.assertEqual(state.current_objects[0].color, "yellow")
+
+    def test_rebound_held_object_reuses_only_its_previous_valid_size(self):
+        memory = {}
+        first = raw_object(
+            1, "ignored", [0.30, 0.18, 0.00],
+            label="square yellow", color="yellow", size=[0.024, 0.023, 0.025],
+        )
+        first.pop("track_id")
+        update_scene_tracks(memory, [first], 1)
+        track_id = first["track_id"]
+        lifted = raw_object(
+            9, "ignored", [0.297, 0.190, 0.094],
+            label="square yellow", color="yellow", size=[0.024, 0.023, 0.025],
+        )
+        lifted.pop("track_id")
+        lifted["center_3d_base_m"] = lifted["geometry_center_m"]
+        lifted["geometry_center_m"] = None
+        lifted["dimensions_m"] = None
+        lifted["pointcloud_geometry_valid"] = False
+        update_scene_tracks(
+            memory,
+            [lifted],
+            2,
+            predicted_centers={track_id: [0.30, 0.18, 0.10]},
+        )
+        self.assertEqual(lifted["track_id"], track_id)
+        self.assertEqual(lifted["dimensions_m"], [0.024, 0.023, 0.025])
+        self.assertTrue(lifted["dimensions_temporal_fallback"])
+        self.assertEqual(lifted["dimensions_source"], "previous_valid_same_track")
+        self.assertGreaterEqual(lifted["track_match_confidence"], 0.5)
+        state = build_clutter_scene_state(
+            {"scene_revision": 2, "objects": [lifted]},
+            config().workspace,
+            expected_tracks=[track_id],
+        )
+        self.assertEqual(state.current_objects[0].size_xyz_m, (0.024, 0.023, 0.025))
+        self.assertAlmostEqual(state.current_objects[0].center_xyz_m[2], 0.094)
+
+    def test_new_detection_without_size_still_fails_closed(self):
+        invalid = raw_object(1, "ignored", [0.4, 0.0, 0.02])
+        invalid.pop("track_id")
+        invalid["dimensions_m"] = None
+        update_scene_tracks({}, [invalid], 1)
+        with self.assertRaisesRegex(ValueError, "object size"):
+            build_clutter_scene_state(
+                {"scene_revision": 1, "objects": [invalid]},
+                config().workspace,
+            )
 
 
 def _geometry_result(safe):

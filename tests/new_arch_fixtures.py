@@ -157,6 +157,7 @@ class MockExecutor:
     def release(self, edge): self.calls.append("release")
     def retreat(self, edge): self.calls.append("retreat")
     def execute_nudge(self, edge): self.calls.append("nudge")
+    def return_to_observation_pose(self, edge): self.calls.append("return_observation")
 
 
 class MockObserver:

@@ -1,6 +1,8 @@
 """Top-level MoveIt preview workflow orchestration."""
 
+import json
 import math
+import os
 import sys
 import time
 import threading
@@ -41,12 +43,30 @@ from .steps import (
 )
 from .tf_node import MoveItPreviewNode
 from .trajectory import (
+    gripper_command_accepted,
+    gripper_holding_detected,
     gripper_position_for_command,
     joint_position_map_from_state,
     max_joint_error_to_goal,
     maybe_confirm,
     setup_gripper,
 )
+
+
+def _write_gripper_result(args, command, status, position, accepted, holding_detected):
+    path = str(getattr(args, "gripper_result_json", "") or "")
+    if not path:
+        return
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({
+            "command": str(command),
+            "status": bool(status),
+            "position": None if position is None else int(position),
+            "accepted": bool(accepted),
+            "holding_detected": bool(holding_detected),
+        }, handle, ensure_ascii=False, indent=2)
 
 
 def _install_quiet_external_shutdown_hook():
@@ -161,14 +181,19 @@ def main() -> Optional[int]:
                 status = gripper.wait_until_done(timeout=args.gripper_wait)
                 current = gripper.get_position()
                 node.get_logger().info("Recovery gripper open done: status={}, position={}".format(status, current))
-                return 0
+                accepted = gripper_command_accepted(args, "open", status, current)
+                _write_gripper_result(args, "open", status, current, accepted, False)
+                return 0 if accepted else 2
             if args.gripper_close_only:
                 position = gripper_position_for_command(args, "close")
                 gripper.set_position(position)
                 status = gripper.wait_until_done(timeout=args.gripper_wait)
                 current = gripper.get_position()
                 node.get_logger().info("Rigid paddle gripper close done: status={}, position={}".format(status, current))
-                return 0
+                accepted = gripper_command_accepted(args, "close", status, current)
+                holding = gripper_holding_detected(args, status, current)
+                _write_gripper_result(args, "close", status, current, accepted, holding)
+                return 0 if accepted else 2
             if args.open_gripper_at_start:
                 if gripper is None:
                     node.get_logger().warning("--open-gripper-at-start ignored because --enable-gripper is not active.")

@@ -103,12 +103,14 @@ def open_gripper_command(args: Any) -> list[str]:
     return command
 
 
-def close_gripper_command(args: Any) -> list[str]:
+def close_gripper_command(args: Any, result_json: str = "") -> list[str]:
     command = [
         args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--gripper-close-only", "--enable-gripper",
         "--gripper-port", args.gripper_port, "--execute",
     ]
+    if result_json:
+        command.extend(["--gripper-result-json", result_json])
     if args.yes:
         command.append("--yes")
     return command
@@ -121,6 +123,17 @@ def init_ready_pose(args: Any) -> None:
         raise RuntimeError(f"ready pose JSON not found: {args.ready_pose_json}")
     run(pose_command(args, args.ready_pose_json))
     run(open_gripper_command(args))
+    if args.init_stable_wait_s > 0:
+        time.sleep(float(args.init_stable_wait_s))
+
+
+def return_to_ready_observation(args: Any) -> None:
+    """Return an executing workflow to the same joint pose used for observation."""
+    if not args.execute:
+        return
+    if not args.ready_pose_json or not os.path.isfile(args.ready_pose_json):
+        raise RuntimeError(f"ready pose JSON not found: {args.ready_pose_json}")
+    run(pose_command(args, args.ready_pose_json))
     if args.init_stable_wait_s > 0:
         time.sleep(float(args.init_stable_wait_s))
 

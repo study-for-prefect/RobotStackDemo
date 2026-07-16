@@ -6,6 +6,8 @@ import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from robot_scene_pipeline.geometry_relations import object_xy_aabb
+from robot_scene_pipeline.push_chain_stage_geometry import object_bounds_for_push_stage
+from robot_scene_pipeline.pushed_object_sweep import analyze_push_contact_chain
 from tools.robot.push_primitives import build_push_targets
 
 
@@ -73,7 +75,6 @@ def check_transport_swept_volume(
         "checked_components": sorted({item["profile_name"] for item in envelopes}),
         "sampled_envelope_count": len(envelopes),
     }
-
 
 def transport_tool_swept_obbs(
     path: Sequence[dict],
@@ -160,7 +161,9 @@ def push_tool_swept_obbs(
     height_above_tcp = max(float(finger_length_m), tcp_offset_z) + float(safety_margin_m)
     stages = [
         ("pre_push_pose", targets["pre_push"], targets["pre_push"]),
-        ("approach_to_contact", targets["pre_push"], targets["contact"]),
+        ("descend_to_pre_contact", targets["pre_push"], targets["pre_contact"]),
+        ("pre_contact_pose", targets["pre_contact"], targets["pre_contact"]),
+        ("approach_to_contact", targets["pre_contact"], targets["contact"]),
         ("contact_pose", targets["contact"], targets["contact"]),
         ("horizontal_push", targets["contact"], targets["push_end"]),
         ("retreat", targets["push_end"], targets["retreat"]),
@@ -209,6 +212,7 @@ def check_tool_swept_volume(
     tcp_offset_tool_m: Optional[Sequence[float]] = None,
     push_profile: Optional[Sequence[dict]] = None,
     controlled_contact: Optional[dict] = None,
+    analyze_push_chain_contacts: bool = True,
 ) -> Dict[str, Any]:
     """Hard-reject tool/table/object collisions while reporting object contacts separately."""
     ignored = {str(value) for value in (ignore_object_ids or [])}
@@ -229,19 +233,63 @@ def check_tool_swept_volume(
 
     hard_collisions: List[Dict[str, Any]] = []
     controlled_contacts: List[Dict[str, Any]] = []
-    contact_config = controlled_contact or {}
     scene_objects = [obj for obj in objects or [] if isinstance(obj, dict)]
+    if analyze_push_chain_contacts:
+        chain_analysis = analyze_push_contact_chain(
+            push_plan,
+            scene_objects,
+            ignored,
+            protected,
+            float(safety_margin_m),
+        )
+    else:
+        primary_id = str((push_plan.get("obstacle") or {}).get("id") or "")
+        chain_analysis = {
+            "valid": True,
+            "passed": True,
+            "chain_track_ids": [primary_id] if primary_id else [],
+            "chain_object_count": 1 if primary_id else 0,
+            "secondary_contact_expected": False,
+            "estimated_displacements_m": {},
+            "estimated_displacements_are_upper_bounds": True,
+            "estimation_method": "deferred_until_contact_side_clear",
+            "controlled_contacts": [],
+            "hard_collisions": [],
+        }
+    contact_config = {
+        **dict(controlled_contact or {}),
+        "allowed_horizontal_contact_ids": list(chain_analysis["chain_track_ids"])[1:],
+    }
     for obj in scene_objects:
         if obj.get("visible") is False or str(obj.get("id")) in ignored:
             continue
-        obj_aabb = object_xy_aabb(obj)
-        if not obj_aabb:
-            continue
         for envelope in swept:
+            obj_aabb = object_bounds_for_push_stage(
+                obj,
+                str(envelope.get("stage") or ""),
+                chain_analysis,
+                push_plan,
+            )
+            if not obj_aabb:
+                continue
             overlap = _obb_aabb_overlap(envelope, obj_aabb)
             if overlap is None:
                 continue
-            entity_type = "protected_structure" if str(obj.get("id")) in protected else "movable_object"
+            protection_kind = str(obj.get("protection_kind") or "")
+            if str(obj.get("id")) in protected:
+                entity_type = (
+                    "protected_completed_object"
+                    if protection_kind == "completed_object" or obj.get("is_completed") is True
+                    else "protected_structure"
+                )
+            elif (
+                protection_kind == "fixed_obstacle"
+                or obj.get("is_fixed") is True
+                or obj.get("movable") is False
+            ):
+                entity_type = "fixed_obstacle"
+            else:
+                entity_type = "ordinary_object"
             collision = {
                 "id": obj.get("id"),
                 "label": obj.get("label"),
@@ -250,7 +298,7 @@ def check_tool_swept_volume(
                 "entity_type": entity_type,
                 "collision_source": "gf225_tool",
                 "stage": envelope["stage"],
-                "reason": "tool_swept_volume_collision",
+                "reason": "gripper_swept_volume_collision",
                 "minimum_clearance_m": round(-overlap, 6),
                 "profile_name": envelope.get("profile_name"), "profile_width_m": envelope.get("profile_width_m"),
             }
@@ -269,7 +317,9 @@ def check_tool_swept_volume(
     table_collision = _table_collision(push_plan, swept)
     if table_collision:
         hard_collisions.append(table_collision)
-    recoverable_contacts = _pushed_object_contacts(push_plan, scene_objects, ignored | protected)
+    pushed_object_collisions = list(chain_analysis["hard_collisions"])
+    hard_collisions.extend(pushed_object_collisions)
+    controlled_contacts.extend(chain_analysis["controlled_contacts"])
     feasible = not hard_collisions
     return {
         "schema_version": "gf225_tool_swept_volume_v2",
@@ -278,13 +328,15 @@ def check_tool_swept_volume(
         "contact_status": "hard_collision" if hard_collisions else ("controlled_contact" if controlled_contacts else "clear"),
         "collision_policy": {
             "gf225_tool_contact": "segmented_strict_or_controlled_clearance_contact",
-            "pushed_object_to_movable_object": "recoverable_contact",
+            "pushed_object_to_object": "strict_actual_swept_volume_collision",
         },
         "hard_collisions": hard_collisions,
         "collisions": hard_collisions,
-        "recoverable_contacts": recoverable_contacts,
+        "recoverable_contacts": [],
+        "pushed_object_collisions": pushed_object_collisions,
         "controlled_contacts": controlled_contacts,
-        "requires_reobservation": bool(controlled_contacts or recoverable_contacts),
+        "requires_reobservation": bool(controlled_contacts),
+        "push_chain_analysis": chain_analysis,
         "swept_obbs": swept,
         "gripper_collision_profile": list(push_profile or DEFAULT_PUSH_PROFILE),
     }
@@ -298,13 +350,17 @@ def _controlled_contact_allowed(
     size = obj.get("dimensions_m") or obj.get("size_m") or []
     footprint_limit = 0.5 * min(float(value) for value in size[:2]) if len(size) >= 2 else 0.0
     loose_chain_contact = bool(config.get("allow_loose_chain_contact", False))
+    allowed_horizontal_ids = {
+        str(value) for value in config.get("allowed_horizontal_contact_ids", ())
+    }
     # Loose neighbouring-object contact is legal only during horizontal
     # pushing.  It must never excuse descent, initial contact, or retreat.
     entry_side_clear = envelope.get("stage") == "horizontal_push"
     checks = {
         "enabled": bool(config.get("enabled", True)),
         "loose_unprotected_object": (
-            entity_type == "movable_object"
+            entity_type == "ordinary_object"
+            and str(obj.get("id")) in allowed_horizontal_ids
             and str(obj.get("role") or "") not in {"base", "structure", "support"}
             and str(obj.get("state") or "") not in {"placed", "locked", "protected"}
         ),
@@ -457,42 +513,3 @@ def _table_collision(push_plan: Dict[str, Any], swept: List[Dict[str, Any]]) -> 
         "reason": "tool_table_collision",
         "minimum_clearance_m": round(lowest - table_z, 6),
     }
-
-
-def _pushed_object_contacts(
-    push_plan: Dict[str, Any], objects: List[ObjectDict], excluded_ids: Iterable[str],
-) -> List[Dict[str, Any]]:
-    obstacle = push_plan.get("obstacle") or {}
-    obstacle_aabb = object_xy_aabb(obstacle)
-    direction, distance = push_plan.get("direction_base"), push_plan.get("distance_m")
-    if not obstacle_aabb or not isinstance(direction, (list, tuple)) or len(direction) < 2:
-        return []
-    dx, dy = float(direction[0]) * float(distance), float(direction[1]) * float(distance)
-    swept = dict(obstacle_aabb)
-    swept.update({
-        "xmin": min(obstacle_aabb["xmin"], obstacle_aabb["xmin"] + dx),
-        "xmax": max(obstacle_aabb["xmax"], obstacle_aabb["xmax"] + dx),
-        "ymin": min(obstacle_aabb["ymin"], obstacle_aabb["ymin"] + dy),
-        "ymax": max(obstacle_aabb["ymax"], obstacle_aabb["ymax"] + dy),
-    })
-    contacts = []
-    excluded = {str(value) for value in excluded_ids}
-    for obj in objects:
-        if str(obj.get("id")) in excluded:
-            continue
-        other = object_xy_aabb(obj)
-        if other and _aabb_xy_overlap(swept, other):
-            contacts.append({
-                "type": "pushed_object_contact_with_movable_object",
-                "operated_object_id": obstacle.get("id"),
-                "contacted_object_id": obj.get("id"),
-                "contacted_object_label": obj.get("label"),
-                "classification": "recoverable_contact",
-            })
-    return contacts
-
-
-def _aabb_xy_overlap(first: Dict[str, float], second: Dict[str, float]) -> bool:
-    return min(first["xmax"], second["xmax"]) > max(first["xmin"], second["xmin"]) and (
-        min(first["ymax"], second["ymax"]) > max(first["ymin"], second["ymin"])
-    )

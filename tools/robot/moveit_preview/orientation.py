@@ -179,6 +179,13 @@ def estimate_downward_family_yaw_deg(quaternion_xyzw, base_quaternion_xyzw):
 
 
 def object_yaw_candidate_values(step, args):
+    if step.get("parallel_gripper_axis_equivalent"):
+        base_yaw = normalize_gripper_axis_yaw_deg(step.get("target_yaw_deg"))
+        return unique_values([
+            normalize_yaw_deg(base_yaw - 180.0),
+            normalize_yaw_deg(base_yaw),
+            normalize_yaw_deg(base_yaw + 180.0),
+        ])
     if step.get("exact_tool_yaw_required"):
         return [
             normalize_yaw_deg(
@@ -230,6 +237,28 @@ def orientation_candidates_for_pre_rotate(step, args, current_quaternion_xyzw):
                 "label": source,
             }
         ]
+    if step.get("parallel_gripper_axis_equivalent"):
+        base_yaw = normalize_gripper_axis_yaw_deg(step.get("target_yaw_deg"))
+        candidates = []
+        for raw_yaw in (base_yaw - 180.0, base_yaw, base_yaw + 180.0):
+            quaternion = downward_quaternion_for_yaw(args.quat_xyzw, raw_yaw)
+            selected_yaw = normalize_yaw_deg(raw_yaw)
+            if any(
+                existing["selected_yaw_deg"] == selected_yaw
+                and all(abs(a - b) < 1e-9 for a, b in zip(existing["quat_xyzw"], quaternion))
+                for existing in candidates
+            ):
+                continue
+            candidates.append({
+                "quat_xyzw": quaternion,
+                "selected_yaw_deg": selected_yaw,
+                "source": "parallel_gripper_equivalent_joint_delta_selected",
+                "label": (
+                    "parallel_gripper_equivalent base_yaw={:.2f} raw_yaw={:.2f} "
+                    "selected_yaw={:.2f}"
+                ).format(base_yaw, raw_yaw, selected_yaw),
+            })
+        return candidates
     if step.get("exact_tool_yaw_required"):
         quaternion, selected_yaw, source = object_yaw_orientation(step, args, current_quaternion_xyzw)
         return [
@@ -272,6 +301,11 @@ def orientation_candidates_for_pre_rotate(step, args, current_quaternion_xyzw):
                 }
             )
     return candidates
+
+
+def normalize_gripper_axis_yaw_deg(yaw_deg):
+    """Return the unique representation of a parallel-gripper axis."""
+    return ((float(yaw_deg) + 90.0) % 180.0) - 90.0
 
 
 def validate_goal(goal, args):

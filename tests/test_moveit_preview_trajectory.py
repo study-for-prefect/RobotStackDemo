@@ -95,13 +95,49 @@ class MoveItPreviewTrajectoryTests(unittest.TestCase):
         self.assertEqual(joint_name, "shoulder_pan_joint")
         self.assertAlmostEqual(delta, 1.2)
 
+    def test_wrist_3_start_goal_delta_is_measured_separately(self):
+        traj = _Trajectory(
+            ["shoulder_pan_joint", "wrist_3_joint"],
+            [[0.0, -0.2], [0.4, 1.3]],
+        )
+        self.assertAlmostEqual(
+            trajectory.joint_start_goal_delta(traj, "wrist_3_joint"),
+            1.5,
+        )
+
+    def test_equivalent_plan_cost_prefers_minimum_total_and_wrist_travel(self):
+        short = _Trajectory(
+            ["shoulder_pan_joint", "wrist_3_joint"],
+            [[0.0, 0.0], [0.4, 0.2]],
+        )
+        half_turn = _Trajectory(
+            ["shoulder_pan_joint", "wrist_3_joint"],
+            [[0.0, 0.0], [0.2, 3.0]],
+        )
+        self.assertLess(
+            trajectory.weighted_joint_start_goal_cost(short),
+            trajectory.weighted_joint_start_goal_cost(half_turn),
+        )
+
     def test_gripper_close_accepts_contact_position_when_status_is_zero(self):
         args = Namespace(gripper_open_position=1000, gripper_close_position=0)
 
         self.assertTrue(trajectory.gripper_command_accepted(args, "close", 0, 259))
         self.assertFalse(trajectory.gripper_command_accepted(args, "close", 0, 500))
         self.assertFalse(trajectory.gripper_command_accepted(args, "open", 0, 259))
+        self.assertTrue(trajectory.gripper_command_accepted(args, "open", 0, 930))
+        self.assertFalse(trajectory.gripper_command_accepted(args, "open", 0, 850))
         self.assertTrue(trajectory.gripper_command_accepted(args, "open", 2, 1000))
+
+    def test_gripper_holding_requires_contact_away_from_fully_closed(self):
+        args = Namespace(
+            gripper_open_position=1000,
+            gripper_close_position=0,
+            gripper_holding_min_position_delta=80,
+        )
+        self.assertTrue(trajectory.gripper_holding_detected(args, 1, 259))
+        self.assertFalse(trajectory.gripper_holding_detected(args, 1, 0))
+        self.assertFalse(trajectory.gripper_holding_detected(args, 0, 500))
 
 
 if __name__ == "__main__":

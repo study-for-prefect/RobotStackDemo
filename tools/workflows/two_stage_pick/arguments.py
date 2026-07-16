@@ -2,6 +2,8 @@
 
 import argparse
 
+from tools.robot.tool_geometry import default_tcp_offset_tool_m
+
 DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
 DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
 
@@ -25,7 +27,9 @@ def parse_args():
     parser.add_argument("--detector-device", default="cuda:0")
     parser.add_argument("--approach-height-m", type=float, default=0.05)
     parser.add_argument("--pick-target-lift-m", type=float, default=0.010)
-    parser.add_argument("--tcp-offset-tool", nargs=3, type=float, default=[0.0, 0.0, 0.15])
+    parser.add_argument(
+        "--tcp-offset-tool", nargs=3, type=float, default=default_tcp_offset_tool_m(),
+    )
     parser.add_argument("--grasp-axis", choices=("long", "short"), default="long")
     parser.add_argument("--yaw-offset-deg", type=float, default=0.0)
     parser.add_argument(

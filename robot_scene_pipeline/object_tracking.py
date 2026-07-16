@@ -89,6 +89,18 @@ def _bind(track: dict, detection: dict, revision: int, features: dict, ambiguous
     previous_ref = track.get("current_object_ref")
     current_ref = object_ref(revision, detection.get("id"))
     confidence = 0.45 if ambiguous else max(0.0, min(1.0, 1.0 - float(features.get("cost", 0.0))))
+    measured_size = get_size(detection)
+    previous_size = get_size({"dimensions_m": track.get("dimensions_m")})
+    if measured_size is None and previous_size is not None:
+        # A grasped object can remain detectable near the wrist camera while
+        # its point cloud is clipped by the image boundary.  Preserve only the
+        # already-verified size of the same rebound track; its current center
+        # remains measured from this frame.
+        measured_size = list(previous_size)
+        detection["dimensions_m"] = list(previous_size)
+        detection["dimensions_temporal_fallback"] = True
+        detection["dimensions_source"] = "previous_valid_same_track"
+        detection["dimensions_source_revision"] = track.get("last_seen_revision")
     detection.update({
         "object_ref": current_ref,
         "track_id": track["track_id"],
@@ -99,7 +111,7 @@ def _bind(track: dict, detection: dict, revision: int, features: dict, ambiguous
     track.update({
         "current_object_ref": current_ref, "detector_object_id": detection.get("id"), "label": detection.get("label"),
         "semantic_shape": infer_object_shape(detection), "color": _color(detection), "center_base_m": get_center(detection),
-        "dimensions_m": get_size(detection), "bbox": detection.get("bbox_xyxy_px") or detection.get("bbox"),
+        "dimensions_m": measured_size, "bbox": detection.get("bbox_xyxy_px") or detection.get("bbox"),
         "role": detection.get("role", track.get("role")), "state": detection.get("state", track.get("state")),
         "visible": True, "tracking_ambiguous": ambiguous,
         "last_seen_revision": int(revision),
@@ -123,18 +135,31 @@ def _match_features(
     anchored = predicted_centers.get(track_id)
     expected = anchored if anchored is not None else [old[i] + prediction[i] for i in range(3)] if old else None
     distance = math.dist(expected[:3], current[:3]) if expected and current else math.inf
+    action_anchor_compatible = bool(anchored is None or distance <= 0.06)
     old_size, size = track.get("dimensions_m"), get_size(detection)
-    size_delta = sum(abs(float(a) - float(b)) for a, b in zip(old_size, size)) if old_size and size else 0.1
+    size_measurement_available = bool(size)
+    if old_size and size:
+        size_delta = sum(abs(float(a) - float(b)) for a, b in zip(old_size, size))
+    elif old_size:
+        # Missing current geometry is common near the wrist-camera boundary.
+        # It is uncertainty, not evidence of a 10 cm size mismatch.
+        size_delta = 0.015
+    else:
+        size_delta = 0.0
     old_box, box = track.get("bbox"), detection.get("bbox_xyxy_px") or detection.get("bbox")
     bbox_overlap = _bbox_iou(old_box, box)
     cost = distance / 0.15 + size_delta / 0.10 + (1.0 - bbox_overlap) * 0.15
     if track.get("role") in {"base", "structure", "protected"}: cost *= 0.75
     return {
-        "compatible": bool(shape_ok and color_ok and current is not None),
+        "compatible": bool(
+            shape_ok and color_ok and current is not None and action_anchor_compatible
+        ),
         "shape_compatible": shape_ok,
         "color_compatible": color_ok,
         "center_distance_m": distance,
+        "action_anchor_compatible": action_anchor_compatible,
         "size_delta_m": size_delta,
+        "size_measurement_available": size_measurement_available,
         "bbox_iou": bbox_overlap,
         "cost": cost,
         "prediction_source": "action_pose_anchor" if anchored is not None else "displacement_or_last_seen",

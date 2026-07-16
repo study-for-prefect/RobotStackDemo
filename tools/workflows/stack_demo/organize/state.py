@@ -44,7 +44,11 @@ def build_organize_task_state(
         dict(previous.color_target_regions)
         if previous else build_color_target_regions(scene, config, colors)
     )
-    occupancy = region_occupancy(scene, regions)
+    occupancy = region_occupancy(
+        scene,
+        regions,
+        float(config.section("organize")["observation_region_tolerance_m"]),
+    )
     completed = tuple(sorted(
         track_id for track_id in expected
         if track_id in scene.visible_tracks

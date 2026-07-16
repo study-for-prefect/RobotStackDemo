@@ -3,6 +3,8 @@
 import argparse
 import sys
 
+from tools.robot.tool_geometry import default_tcp_offset_tool_m
+
 from .constants import DEFAULT_OUTPUT_DIR
 
 DEFAULT_CAMERA_FRAME = "camera_color_optical_frame"
@@ -24,7 +26,7 @@ def parse_args():
         "--tcp-offset-tool",
         nargs=3,
         type=float,
-        default=[0.0, 0.0, 0.15],
+        default=default_tcp_offset_tool_m(),
         metavar=("X", "Y", "Z"),
         help="tool0->TCP/gripper-center translation in tool0 coordinates.",
     )

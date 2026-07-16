@@ -15,6 +15,8 @@ PLANNING_ARTIFACTS = (
     "qwen_target_response.json",
     "selected_target.json",
     "physical_action_edges.json",
+    "candidate_generation_summary.json",
+    "candidate_rejections.json",
     "qwen_edge_request.json",
     "qwen_edge_response.json",
     "selected_edge.json",

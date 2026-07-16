@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from typing import Any, Callable, Mapping, Sequence
 
 from ..common.action_edges import ActionType, PhysicalActionEdge, make_edge
 from ..common.config import StackDemoConfig
 from ..common.scene_state import ClutterSceneState, SceneObjectState
+from .candidate_diagnostics import CandidateGenerationAudit
 from .grasp_edges import (
     GraspInterval,
     GraspScanResult,
+    normalize_gripper_yaw_deg,
     scan_grasp_yaws,
 )
+from .nudge_geometry import (
+    blocked_intervals_for as _blocked_intervals_for,
+    direction_name as _direction_name,
+    nudge_region_effects as _nudge_region_effects,
+    object_separation as _separation,
+    opposite_side as _opposite_side,
+    point_separation as _point_separation,
+)
 from .path_safety import build_nudge_parameters, nudge_sweep_checks, placement_path_checks
+from .push_orientation_priority import axis_alignment_error_deg
 
 
 @dataclass(frozen=True)
@@ -33,6 +43,7 @@ class PlacementTarget:
 class EdgeGenerationResult:
     edges_by_target: Mapping[str, tuple[PhysicalActionEdge, ...]]
     grasp_scans: Mapping[str, GraspScanResult]
+    audit: CandidateGenerationAudit
 
 
 @dataclass(frozen=True)
@@ -48,6 +59,8 @@ PlacementProvider = Callable[[SceneObjectState, GraspInterval], PlacementTarget 
 VariantPlacementProvider = Callable[[SceneObjectState, GraspInterval, str | None], PlacementTarget | None]
 StagingProvider = Callable[[SceneObjectState], PlacementTarget | None]
 PlanChecker = Callable[[PhysicalActionEdge], Mapping[str, Any]]
+
+FULL_3D_ORIENTATION_SHAPES = frozenset({"triangle", "concave_rectangle"})
 
 
 def generate_physical_edges(
@@ -71,6 +84,9 @@ def generate_physical_edges(
         for track_id in physical_tracks
         if (obj := scene.object_by_track(track_id)) is not None
     }
+    audit = CandidateGenerationAudit(physical_tracks)
+    for scan in scans.values():
+        audit.record_grasp_scan(scan)
     output: dict[str, tuple[PhysicalActionEdge, ...]] = {}
     for spec in specs:
         target = scene.object_by_track(spec.track_id)
@@ -89,8 +105,29 @@ def generate_physical_edges(
             scene, target, scan, task_type, config, provider, checker,
             candidate_suffix=_candidate_suffix(spec.option_key, spec.track_id),
         )
-        edges = list(direct_edges)
-        if not any(edge.precheck_results.get("passed") for edge in direct_edges):
+        for edge in direct_edges:
+            audit.record_direct_edge(edge)
+        edges = [edge for edge in direct_edges if edge.precheck_results.get("passed")]
+        if task_type == "organize_blocks":
+            if not edges and scan.safe_intervals:
+                staging = staging_provider(target)
+                if staging is not None:
+                    edges.extend(
+                        edge for edge in _staging_edges(
+                            scene, target, scan, task_type, config, staging, checker,
+                            task_role=spec.task_role,
+                            candidate_suffix=_candidate_suffix(spec.option_key, spec.track_id),
+                        )
+                        if edge.precheck_results.get("passed")
+                    )
+            audit.begin_push_object(target.track_id)
+            edges.extend(_nudge_edges(
+                scene, target, target, task_type, config, checker, scan,
+                task_role=spec.task_role,
+                candidate_suffix=_candidate_suffix(spec.option_key, spec.track_id),
+                audit=audit,
+            ))
+        elif not any(edge.precheck_results.get("passed") for edge in direct_edges):
             if scan.safe_intervals:
                 staging = staging_provider(target)
                 if staging is not None:
@@ -107,7 +144,7 @@ def generate_physical_edges(
                 additional_blocker_track_ids=direct_failure_blockers,
             ))
         output[spec.option_key] = tuple(edge for edge in edges if edge.precheck_results.get("passed"))
-    return EdgeGenerationResult(edges_by_target=output, grasp_scans=scans)
+    return EdgeGenerationResult(edges_by_target=output, grasp_scans=scans, audit=audit)
 
 
 def geometry_dry_run_plan_checker(edge: PhysicalActionEdge) -> Mapping[str, Any]:
@@ -308,14 +345,14 @@ def _nudge_edges(
     *,
     task_role: str | None = None,
     candidate_suffix: str = "",
+    audit: CandidateGenerationAudit | None = None,
 ) -> list[PhysicalActionEdge]:
     clearing = config.section("clearing")
     edges = []
+    checked_edges = []
     old_separation = _separation(target, blocker)
     for direction in clearing["push_directions_base"]:
         contact_side = _opposite_side(direction)
-        if contact_side not in blocker.free_sides:
-            continue
         for distance in clearing["push_distances_m"]:
             moved_center = (
                 blocker.center_xyz_m[0] + float(direction[0]) * float(distance),
@@ -325,15 +362,22 @@ def _nudge_edges(
             gain = _point_separation(target.center_xyz_m, moved_center) - old_separation
             if gain < float(clearing["minimum_expected_clearance_gain_m"]):
                 continue
-            if not _object_center_inside_workspace(blocker, moved_center, scene):
-                continue
-            if _inside_target_region(moved_center, scene.target_regions):
-                continue
-            if _sweep_hits_protected(blocker, moved_center, scene):
-                continue
+            region_effects = _nudge_region_effects(blocker, moved_center, scene)
             for wrist_yaw in clearing["safe_wrist_yaws_deg"]:
                 physical = build_nudge_parameters(blocker, direction, distance, wrist_yaw, config)
+                axis_error = axis_alignment_error_deg(float(wrist_yaw))
+                physical["push_axis_alignment_error_deg"] = axis_error
+                physical["axis_aligned_push_orientation"] = axis_error < 1e-6
                 sweep = nudge_sweep_checks(scene, blocker, physical, config)
+                physical = {
+                    **physical,
+                    "chain_track_ids": list(sweep.get("chain_track_ids", [blocker.track_id])),
+                    "chain_object_count": int(sweep.get("chain_object_count", 1)),
+                    "secondary_contact_expected": bool(sweep.get("secondary_contact_expected")),
+                    "estimated_displacements_m": dict(sweep.get("estimated_displacements_m", {})),
+                    "estimated_displacements_are_upper_bounds": True,
+                    "push_chain_estimation_method": sweep.get("push_chain_estimation_method"),
+                }
                 suffix = f"{_direction_name(direction)}_{int(round(float(distance) * 1000))}_{int(wrist_yaw)}"
                 edge = make_edge(
                     candidate_id=f"edge_r{scene.scene_revision}_{target.track_id}{candidate_suffix}_nudge_{blocker.track_id}_{suffix}",
@@ -344,11 +388,28 @@ def _nudge_edges(
                     acted_object_track_id=blocker.track_id,
                     task_role=task_role,
                     physical_parameters=physical,
-                    expected_effects=("increase_target_grasp_clearance", "require_fresh_observation"),
+                    expected_effects=(
+                        (
+                            "clear_or_organize_target"
+                            if target.track_id == blocker.track_id
+                            else "increase_target_grasp_clearance"
+                        ),
+                        "require_fresh_observation",
+                        *(("push_chain_generated",) if physical["secondary_contact_expected"] else ()),
+                        *region_effects["expected_effects"],
+                    ),
                     expected_clearance_gain_m=gain,
-                    expected_released_tracks=(target.track_id,),
-                    task_progress_gain=0.0,
-                    risk_score=0.55 + 0.5 * float(distance),
+                    expected_released_tracks=(
+                        _released_neighbors(scene, blocker)
+                        if target.track_id == blocker.track_id else (target.track_id,)
+                    ),
+                    task_progress_gain=float(region_effects["task_progress_gain"]),
+                    risk_score=(
+                        0.55 + 0.5 * float(distance)
+                        + 0.12 * max(0, int(physical["chain_object_count"]) - 1)
+                        + 0.20 * axis_error / 45.0
+                        + float(region_effects["risk_delta"])
+                    ),
                     protected_tracks=scene.protected_tracks,
                     precheck_results=sweep,
                     decision_metadata={
@@ -360,11 +421,25 @@ def _nudge_edges(
                             "geometry_center_m": list(blocker.center_xyz_m),
                             "dimensions_m": list(blocker.size_xyz_m),
                         },
+                        "destination_color_region": region_effects["destination_color_region"],
+                        "destination_region_id": region_effects["destination_region_id"],
+                        "destination_region_occupants": region_effects["destination_region_occupants"],
+                        "color_region_is_collision_geometry": False,
+                        "chain_track_ids": list(physical["chain_track_ids"]),
+                        "chain_object_count": int(physical["chain_object_count"]),
+                        "secondary_contact_expected": bool(physical["secondary_contact_expected"]),
+                        "estimated_displacements_m": dict(physical["estimated_displacements_m"]),
+                        "push_axis_alignment_error_deg": axis_error,
+                        "orientation_priority": "axis_aligned_0_or_90_preferred_when_equivalent",
                     },
                 )
                 checked = _with_plan_check(edge, checker)
-                if checked.precheck_results.get("passed"):
-                    edges.append(checked)
+                checked_edges.append(checked)
+    for checked in checked_edges:
+        if audit is not None:
+            audit.record_push_edge(checked)
+        if checked.precheck_results.get("passed"):
+            edges.append(checked)
     return edges
 
 
@@ -379,19 +454,60 @@ def _pick_parameters(
     approach_z = z + float(safety["approach_height_m"])
     lift_z = z + float(safety["observation_height_m"])
     place_pose = dict(placement.place_pose)
-    grasp_yaw = float(interval.selected_yaw_deg)
+    grasp_yaw = normalize_gripper_yaw_deg(interval.selected_yaw_deg)
     current_object_yaw = float(target.yaw_deg)
-    expected_object_yaw = float(place_pose.get("yaw_deg", current_object_yaw))
+    requested_object_yaw = float(place_pose.get("yaw_deg", current_object_yaw))
     object_relative_to_gripper_yaw = _axis_delta_deg(current_object_yaw, grasp_yaw)
-    release_gripper_yaw = _normalize_axis_yaw_deg(
-        expected_object_yaw - object_relative_to_gripper_yaw
-    )
+    full_3d_orientation = target.shape in FULL_3D_ORIENTATION_SHAPES
+    if full_3d_orientation:
+        expected_object_yaw = requested_object_yaw
+        release_gripper_yaw = _normalize_axis_yaw_deg(
+            expected_object_yaw - object_relative_to_gripper_yaw
+        )
+        placement_yaw_policy = "special_shape_target_orientation"
+    else:
+        # Organize completion does not require final yaw.  Keep the grasp
+        # orientation fixed through transport, descent, release, and retreat.
+        expected_object_yaw = current_object_yaw
+        release_gripper_yaw = grasp_yaw
+        placement_yaw_policy = "preserve_grasp_yaw_until_release"
+        place_pose["yaw_deg"] = expected_object_yaw
     release_pose = dict(place_pose)
     release_position = list(place_pose["position_m"])
     release_position[2] += float(safety["release_height_extra_m"])
     release_pose["position_m"] = release_position
     release_pose["yaw_deg"] = release_gripper_yaw
+    orientation_policy = (
+        "full_3d_allowed"
+        if full_3d_orientation
+        else "downward_yaw_only"
+    )
+    destination_at_lift = {
+        "frame_id": "base_link",
+        "position_m": list(place_pose["position_m"][:2]) + [lift_z],
+        "yaw_deg": grasp_yaw,
+        "motion_role": "translate_to_destination_preserving_grasp_yaw",
+    }
+    transport_path = [
+        {
+            "frame_id": "base_link",
+            "position_m": [x, y, lift_z],
+            "yaw_deg": grasp_yaw,
+            "motion_role": "source_lift",
+        },
+        destination_at_lift,
+    ]
+    if full_3d_orientation:
+        transport_path.append({
+            "frame_id": "base_link",
+            "position_m": list(place_pose["position_m"][:2]) + [lift_z],
+            "yaw_deg": release_gripper_yaw,
+            "motion_role": "special_shape_orientation_at_destination",
+        })
     return {
+        "orientation_policy": orientation_policy,
+        "placement_yaw_policy": placement_yaw_policy,
+        "acted_object_shape": target.shape,
         "grasp_yaw_deg": grasp_yaw,
         "grasp_pose": {"frame_id": "base_link", "position_m": [x, y, z], "yaw_deg": grasp_yaw},
         "approach_pose": {"frame_id": "base_link", "position_m": [x, y, approach_z], "yaw_deg": grasp_yaw},
@@ -399,17 +515,11 @@ def _pick_parameters(
         "place_pose": place_pose,
         "release_pose": release_pose,
         "grasp_object_relative_yaw_deg": object_relative_to_gripper_yaw,
+        "requested_place_object_yaw_deg": requested_object_yaw,
         "expected_place_object_yaw_deg": expected_object_yaw,
         "release_gripper_yaw_deg": release_gripper_yaw,
         "release_height_extra_m": float(safety["release_height_extra_m"]),
-        "transport_path": [
-            {"frame_id": "base_link", "position_m": [x, y, lift_z], "yaw_deg": grasp_yaw},
-            {
-                "frame_id": "base_link",
-                "position_m": list(place_pose["position_m"][:2]) + [lift_z],
-                "yaw_deg": release_gripper_yaw,
-            },
-        ],
+        "transport_path": transport_path,
         "grasp_checks": dict(interval.selected_check),
         **dict(placement.additional_physical_parameters or {}),
     }
@@ -420,7 +530,7 @@ def _axis_delta_deg(first: float, second: float) -> float:
 
 
 def _normalize_axis_yaw_deg(value: float) -> float:
-    return round((float(value) + 90.0) % 180.0 - 90.0, 6)
+    return normalize_gripper_yaw_deg(value)
 
 
 def _with_plan_check(edge: PhysicalActionEdge, checker: PlanChecker) -> PhysicalActionEdge:
@@ -435,6 +545,10 @@ def _with_plan_check(edge: PhysicalActionEdge, checker: PlanChecker) -> Physical
     )
     merged = {**dict(edge.precheck_results), **result}
     merged["passed"] = bool(edge.precheck_results.get("passed")) and bool(result.get("passed"))
+    rejection_reasons = list(edge.precheck_results.get("rejection_reasons", ()))
+    if bool(edge.precheck_results.get("passed")) and not bool(result.get("passed")):
+        rejection_reasons.append("moveit_plan_failed")
+    merged["rejection_reasons"] = list(dict.fromkeys(rejection_reasons))
     return make_edge(
         candidate_id=edge.candidate_id,
         scene_revision=edge.scene_revision,
@@ -477,79 +591,6 @@ def _released_neighbors(scene: ClutterSceneState, target: SceneObjectState) -> t
 def _grasp_risk(interval: GraspInterval) -> float:
     clearance = float(interval.selected_check.get("fingertip_clearance_m", 0.0))
     return max(0.0, 0.5 - interval.span_deg / 180.0 - clearance)
-
-
-def _separation(first: SceneObjectState, second: SceneObjectState) -> float:
-    return _point_separation(first.center_xyz_m, second.center_xyz_m)
-
-
-def _point_separation(first: Sequence[float], second: Sequence[float]) -> float:
-    return math.hypot(float(first[0]) - float(second[0]), float(first[1]) - float(second[1]))
-
-
-def _object_center_inside_workspace(
-    obj: SceneObjectState,
-    center: Sequence[float],
-    scene: ClutterSceneState,
-) -> bool:
-    bounds = _workspace_from_edge_clearances(obj)
-    x, y = float(center[0]), float(center[1])
-    return bounds["xmin"] <= x - obj.size_xyz_m[0] / 2.0 and x + obj.size_xyz_m[0] / 2.0 <= bounds["xmax"] and bounds["ymin"] <= y - obj.size_xyz_m[1] / 2.0 and y + obj.size_xyz_m[1] / 2.0 <= bounds["ymax"]
-
-
-def _workspace_from_edge_clearances(obj: SceneObjectState) -> dict[str, float]:
-    x, y, _ = obj.center_xyz_m
-    sx, sy, _ = obj.size_xyz_m
-    return {
-        "xmin": x - sx / 2.0 - float(obj.edge_clearances_m["-x"]),
-        "xmax": x + sx / 2.0 + float(obj.edge_clearances_m["+x"]),
-        "ymin": y - sy / 2.0 - float(obj.edge_clearances_m["-y"]),
-        "ymax": y + sy / 2.0 + float(obj.edge_clearances_m["+y"]),
-    }
-
-
-def _inside_target_region(center: Sequence[float], regions: Sequence[Mapping[str, Any]]) -> bool:
-    for region in regions:
-        bounds = region.get("bounds_base_m") or region.get("bounds")
-        if isinstance(bounds, Mapping) and float(bounds["xmin"]) <= center[0] <= float(bounds["xmax"]) and float(bounds["ymin"]) <= center[1] <= float(bounds["ymax"]):
-            return True
-    return False
-
-
-def _sweep_hits_protected(
-    blocker: SceneObjectState,
-    moved_center: Sequence[float],
-    scene: ClutterSceneState,
-) -> bool:
-    xmin = min(blocker.center_xyz_m[0], moved_center[0]) - blocker.size_xyz_m[0] / 2.0
-    xmax = max(blocker.center_xyz_m[0], moved_center[0]) + blocker.size_xyz_m[0] / 2.0
-    ymin = min(blocker.center_xyz_m[1], moved_center[1]) - blocker.size_xyz_m[1] / 2.0
-    ymax = max(blocker.center_xyz_m[1], moved_center[1]) + blocker.size_xyz_m[1] / 2.0
-    for track_id in scene.protected_tracks:
-        obj = scene.object_by_track(track_id)
-        if obj is None:
-            continue
-        ox, oy, _ = obj.center_xyz_m
-        if xmin <= ox + obj.size_xyz_m[0] / 2.0 and xmax >= ox - obj.size_xyz_m[0] / 2.0 and ymin <= oy + obj.size_xyz_m[1] / 2.0 and ymax >= oy - obj.size_xyz_m[1] / 2.0:
-            return True
-    return False
-
-
-def _direction_name(direction: Sequence[float]) -> str:
-    if abs(float(direction[0])) >= abs(float(direction[1])):
-        return "px" if float(direction[0]) > 0 else "nx"
-    return "py" if float(direction[1]) > 0 else "ny"
-
-
-def _opposite_side(direction: Sequence[float]) -> str:
-    """Return the block contact side opposite a code-owned push direction."""
-    if abs(float(direction[0])) >= abs(float(direction[1])):
-        return "-x" if float(direction[0]) > 0 else "+x"
-    return "-y" if float(direction[1]) > 0 else "+y"
-
-
-def _blocked_intervals_for(scan: GraspScanResult, blocker_id: str) -> list[float]:
-    return [float(sample["yaw_deg"]) for sample in scan.samples if blocker_id in sample.get("blocking_track_ids", [])]
 
 
 def _candidate_suffix(option_key: str, track_id: str) -> str:

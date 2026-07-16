@@ -3,6 +3,8 @@
 import argparse
 import sys
 
+from tools.robot.tool_geometry import default_tcp_offset_tool_m
+
 from .constants import DEFAULT_OUTPUT_DIR
 
 DEFAULT_TF_JSON = "/tmp/scene_tf_base_color_optical.json"
@@ -32,7 +34,9 @@ def parse_args():
     collect.add_argument("--detector-config", default="config/yolo_detector.json")
     collect.add_argument("--conda-env", default="yolo")
     collect.add_argument("--ros-python", default=sys.executable)
-    collect.add_argument("--tcp-offset-tool", nargs=3, type=float, default=[0.0, 0.0, 0.15])
+    collect.add_argument(
+        "--tcp-offset-tool", nargs=3, type=float, default=default_tcp_offset_tool_m(),
+    )
     collect.add_argument(
         "--pre-rotate-wrist-yaw-sign",
         choices=("positive", "negative"),

@@ -6,8 +6,14 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from ..clutter.target_options import TargetOption
+from ..clutter.push_orientation_priority import prefer_axis_aligned_pushes
 from ..common.action_edges import PhysicalActionEdge
 from ..common.scene_state import ClutterSceneState
+from .payload_views import (
+    compact_task_state,
+    physical_edge_policy_view,
+    target_option_policy_view,
+)
 from .qwen_client import QwenCallResult, QwenSelectionClient
 from .schemas import EDGE_SELECTION_SCHEMA, PolicyOutputError, parse_edge_selection
 
@@ -38,6 +44,7 @@ class QwenEdgeSelector:
         artifact_dir: str | None = None,
     ) -> EdgeSelectionOutcome:
         eligible = [edge for edge in edges if edge.candidate_id in target.feasible_first_step_edge_ids]
+        eligible = list(prefer_axis_aligned_pushes(eligible))
         if not eligible:
             return EdgeSelectionOutcome(None, (), "reobserve", (), {}, {"skipped_reason": "no_edges_for_selected_target"})
         if len(eligible) == 1:
@@ -71,9 +78,9 @@ def _edge_request(
     return {
         "protocol": "qwen_edge_selection_v1",
         "scene_revision": scene.scene_revision,
-        "task_state": dict(task_state),
-        "selected_target_option": target.to_dict(),
-        "physical_edges": [edge.to_dict() for edge in edges],
+        "task_state": compact_task_state(task_state),
+        "selected_target_option": target_option_policy_view(target),
+        "physical_edges": [physical_edge_policy_view(edge, scene) for edge in edges],
         "protected_tracks": list(scene.protected_tracks),
         "recent_failures": [dict(item) for item in scene.recent_action_results[-failure_limit:]] if failure_limit else [],
         "forbidden_action_fingerprints": list(scene.forbidden_action_fingerprints),
@@ -81,6 +88,8 @@ def _edge_request(
             "all_physical_prechecks_passed",
             "larger_direct_task_progress",
             "larger_clearance_gain",
+            "axis_aligned_0_or_90_push_before_diagonal_when_equivalent",
+            "larger_prepush_clearance",
             "lower_protected_structure_risk",
             "lower_motion_planning_cost",
             "avoid_failed_fingerprint",

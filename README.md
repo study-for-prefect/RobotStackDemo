@@ -119,6 +119,20 @@ detector ID 的图。不会追加旧 assistant 回答、旧图片或对话历史
 `OrganizeTaskState` 只包含整理语义：预期/可见/缺失/完成/未解决 track、颜色区域、安全槽、
 占用、当前结果和最近失败。代码计算颜色区域、槽位、占用和完成状态；最终 yaw 不要求精确。
 
+颜色区域统一位于 `base_link` 的 `x=0.250..0.420 m`，避开默认初始杂乱区；Y 坐标为：
+
+| 颜色 | Y 范围（m） |
+| --- | --- |
+| 红 | `0.230..0.265` |
+| 绿 | `0.275..0.310` |
+| 蓝 | `0.320..0.355` |
+| 黄 | `0.365..0.400` |
+
+每区 Y 宽 `0.035 m`，相邻区域之间保留 `0.010 m` 清障通道。完成要求颜色匹配、中心在对应
+区域内，并且考虑物体 yaw 后的二维实际足迹基本位于区域内；中心刚越过边界不算完成。
+颜色矩形不是碰撞体，也不会仅因推动终点进入某色区域而拒绝。推动仍检查所有普通物体、
+已完成物体的带余量实际保护体、GF225 和被推动物的完整扫掠；推入自身颜色区域计为整理收益。
+
 只有最新观测确认全部 expected track 位于正确颜色区域、没有缺失、没有非法重叠、杂乱区没有
 未完成对象时，`task_complete` 才为 true。当前没有可行边不等于完成。
 
@@ -161,6 +175,8 @@ face、目标 yaw、底边接触、质心投影、支撑余量和屋顶相对位
 
 - 工作区唯一来源：`config/workspace_bounds.json`，`base_link` 下 `x=0.235..0.65 m`、
   `y=-0.10..0.40 m`。
+- 实测 `tool0 -> GF225 grasp TCP` 平移唯一值为 `[0.0, 0.0, 0.16] m`。planner 配置、CLI 和
+  MoveIt 调用必须一致；位姿换算只在 MoveIt 目标转换时应用一次，不改物体或抓取高度。
 - GF225、抓取、推动、速度、10 mm 释放间隙和房屋参数：
   `config/stack_demo_planner.json`。
 - RTX 3090 自动功耗上限为 250 W；systemd unit 和脚本均不设置 300 W。
@@ -221,10 +237,11 @@ python3 tools/workflows/stack_demo_pipeline.py \
 
 ```bash
 python3 tools/workflows/stack_demo_pipeline.py \
-  --task-type build_house \
-  --instruction "搭一个房子" \
+  --task-type organize_blocks \
+  --instruction "按颜色整理积木" \
   --moveit-plan-only \
-  --output-dir runtime/build_house_plan_only
+  --tcp-offset-tool 0 0 0.16 \
+  --output-dir runtime/organize_blocks_region_tcp_fix_test
 ```
 
 使用真实相机、最新 TF、真实 Ollama 和已有 MoveIt 做一次中央强制无运动集成检查：
@@ -271,6 +288,7 @@ python3 -m robot_scene_pipeline.perception_server \
 python3 tools/workflows/stack_demo_pipeline.py \
   --task-type organize_blocks \
   --instruction "按颜色整理积木" \
+  --tcp-offset-tool 0 0 0.16 \
   --execute --yes --execute-push-clearing \
   --output-dir runtime/organize_blocks_20260715_manual
 ```

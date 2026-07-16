@@ -113,6 +113,46 @@ def max_joint_start_goal_delta(trajectory):
     return max_name, max_delta
 
 
+def joint_start_goal_delta(trajectory, joint_name):
+    """Return one joint's unwrapped start-to-goal travel in radians."""
+    parsed = trajectory_points(trajectory)
+    if parsed is None:
+        return None
+    joint_names, points = parsed
+    if len(points) < 2 or joint_name not in joint_names:
+        return None
+    index = joint_names.index(joint_name)
+    return abs(float(points[-1].positions[index]) - float(points[0].positions[index]))
+
+
+def weighted_joint_start_goal_cost(
+    trajectory,
+    wrist_3_weight=1.5,
+    ik_branch_switch_penalty=10.0,
+):
+    """Score a feasible IK branch by total travel, wrist travel, then branch jumps."""
+    parsed = trajectory_points(trajectory)
+    if parsed is None:
+        return None
+    joint_names, points = parsed
+    if len(points) < 2:
+        return 0.0
+    deltas = {
+        name: abs(float(goal) - float(start))
+        for name, start, goal in zip(
+            joint_names,
+            points[0].positions,
+            points[-1].positions,
+        )
+    }
+    wrist_delta = deltas.get("wrist_3_joint", 0.0)
+    branch_penalty = (
+        float(ik_branch_switch_penalty)
+        if any(value > math.pi + 1e-9 for value in deltas.values()) else 0.0
+    )
+    return sum(deltas.values()) + float(wrist_3_weight) * wrist_delta + branch_penalty
+
+
 def setup_gripper(args):
     if not args.enable_gripper:
         return None
@@ -153,15 +193,38 @@ def gripper_position_for_command(args, name):
 def gripper_command_accepted(args: object, command: str, status: object, current_position: object) -> bool:
     if status:
         return True
-    if command != "close" or current_position is None:
+    if current_position is None:
         return False
     close_position = int(args.gripper_close_position)
     open_position = int(args.gripper_open_position)
     span = max(1, abs(open_position - close_position))
-    tolerance = getattr(args, "gripper_close_contact_tolerance", None)
-    if tolerance is None:
-        tolerance = 0.35 * span
-    return abs(int(current_position) - close_position) <= float(tolerance)
+    if command == "close":
+        tolerance = getattr(args, "gripper_close_contact_tolerance", None)
+        if tolerance is None:
+            tolerance = 0.35 * span
+        target = close_position
+    elif command == "open":
+        tolerance = getattr(args, "gripper_open_position_tolerance", None)
+        if tolerance is None:
+            tolerance = 0.10 * span
+        target = open_position
+    else:
+        return False
+    return abs(int(current_position) - target) <= float(tolerance)
+
+
+def gripper_holding_detected(args: object, status: object, current_position: object) -> bool:
+    """Distinguish object contact from a successful fully-empty close."""
+    if not gripper_command_accepted(args, "close", status, current_position):
+        return False
+    if current_position is None:
+        return False
+    close_position = int(args.gripper_close_position)
+    open_position = int(args.gripper_open_position)
+    span = max(1, abs(open_position - close_position))
+    minimum = int(getattr(args, "gripper_holding_min_position_delta", 80))
+    minimum = max(1, min(span, minimum))
+    return abs(int(current_position) - close_position) >= minimum
 
 
 def maybe_confirm(args, prompt):
