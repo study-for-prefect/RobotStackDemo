@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from robot_scene_pipeline.perception_contract import PerceptionServerError
+from tools.workflows.stack_demo.app import _merge_expected_tracks
 from tools.workflows.stack_demo.clutter.edge_generation import generate_physical_edges
 from tools.workflows.stack_demo.clutter.extraction_planner import ClutterExtractionPlanner
 from tools.workflows.stack_demo.clutter.target_options import build_target_options
@@ -13,9 +15,15 @@ from tools.workflows.stack_demo.common.action_edges import ActionType
 from tools.workflows.stack_demo.common.action_execution import execute_one_edge
 from tools.workflows.stack_demo.common.action_validation import FinalSafetyGate
 from tools.workflows.stack_demo.common.moveit_adapter import MoveItEdgeAdapter
+from tools.workflows.stack_demo.common.track_lifecycle import mark_track_after_place
+from tools.workflows.stack_demo.commands import (
+    _perception_snapshot_with_retry,
+    return_to_ready_observation,
+)
 from tools.workflows.stack_demo.common.cycle_logging import CycleLogger
 from tools.workflows.stack_demo.organize.completion import evaluate_organize_completion
 from tools.workflows.stack_demo.organize.placement import build_color_target_regions, build_safe_slots
+from tools.workflows.stack_demo.organize.planner import OrganizePlanner
 from tools.workflows.stack_demo.organize.state import build_organize_task_state
 from tools.workflows.stack_demo.policy.edge_selector import QwenEdgeSelector
 from tools.workflows.stack_demo.policy.target_selector import QwenTargetSelector
@@ -92,6 +100,27 @@ class NewExecutionOrganizeTests(unittest.TestCase):
             result.post_grasp_verification.evidence["visible_non_target_context_tracks"],
         )
 
+    def test_contact_hold_survives_fully_occluded_post_grasp_camera_view(self):
+        before = scene([raw_object(1, "target", [0.50, 0.0, 0.02])])
+        occluded = scene([], revision=2, expected=["target"])
+        placed = scene([
+            raw_object(7, "target", [0.28, 0.18, 0.02]),
+        ], revision=3, expected=["target"])
+        result = execute_one_edge(
+            edge(target="target", acted="target"),
+            before,
+            MockExecutor(),
+            MockObserver([occluded, placed]),
+            lambda selected, state: (True, {"inside": True}),
+        )
+        self.assertTrue(result.success)
+        self.assertTrue(
+            result.post_grasp_verification.evidence["camera_view_fully_occluded"],
+        )
+        self.assertTrue(
+            result.post_grasp_verification.evidence["gripper_hint_used_as_sole_evidence"],
+        )
+
     def test_21_verified_grasp_allows_place(self):
         before = scene([raw_object(1, "t1", [0.5, 0.0, 0.02])])
         after_lift = scene([
@@ -118,7 +147,7 @@ class NewExecutionOrganizeTests(unittest.TestCase):
     def test_23_organize_color_region_completion(self):
         initial = scene([raw_object(1, "t1", [0.5, 0.0, 0.02], color="red")])
         previous = build_organize_task_state(initial, config())
-        placed = scene([raw_object(7, "t1", [0.28, 0.2475, 0.02], color="red")], revision=2, expected=["t1"])
+        placed = scene([raw_object(7, "t1", [0.41, 0.27, 0.02], color="red")], revision=2, expected=["t1"])
         state = build_organize_task_state(placed, config(), previous=previous)
         self.assertTrue(evaluate_organize_completion(placed, state)["task_complete"])
 
@@ -130,6 +159,24 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         self.assertEqual(state.expected_tracks, ("t1",))
         self.assertEqual(state.missing_expected_tracks, ("t1",))
 
+    def test_stable_late_visible_track_is_added_to_expected_tracks(self):
+        raw = {"objects": [{"track_id": "late_red"}]}
+        memory = {"tracks": {"late_red": {"history": [{}, {}]}}}
+        self.assertEqual(
+            _merge_expected_tracks(("initial",), raw, memory),
+            ("initial", "late_red"),
+        )
+
+    def test_task_state_unions_new_scene_expected_tracks(self):
+        initial = scene([raw_object(1, "t1", [0.5, 0.0, 0.02])], expected=["t1"])
+        previous = build_organize_task_state(initial, config())
+        expanded = scene([
+            raw_object(1, "t1", [0.5, 0.0, 0.02]),
+            raw_object(2, "t2", [0.45, 0.08, 0.02], color="blue"),
+        ], revision=2, expected=["t1", "t2"])
+        state = build_organize_task_state(expanded, config(), previous=previous)
+        self.assertEqual(state.expected_tracks, ("t1", "t2"))
+
     def test_open_gripper_slots_avoid_existing_object(self):
         current = scene([
             raw_object(1, "red", [0.5, 0.0, 0.02], color="red"),
@@ -138,6 +185,130 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         regions = build_color_target_regions(current, config(), {"red": "red", "blue": "blue"})
         slots = build_safe_slots(current, config(), regions)
         self.assertNotIn(0.265, [round(item["position_m"][0], 3) for item in slots["red"]])
+
+    def test_color_slots_keep_yaw_independent_footprint_away_from_region_edges(self):
+        current = scene([raw_object(
+            1, "blue", [0.50, 0.0, 0.02], color="blue",
+            size=[0.0237, 0.0229, 0.0254],
+        )])
+        regions = build_color_target_regions(current, config(), {"blue": "blue"})
+        slots = build_safe_slots(current, config(), regions)["blue"]
+        bounds = regions["blue"]["bounds_base_m"]
+        radius = 0.5 * (0.0237 ** 2 + 0.0229 ** 2) ** 0.5
+        edge_allowance = config().section("organize")["observation_region_tolerance_m"] / 3.0
+        self.assertGreater(len(slots), 1)
+        self.assertTrue(all(
+            bounds["xmin"] - edge_allowance <= slot["position_m"][0] - radius
+            and slot["position_m"][0] + radius <= bounds["xmax"] + edge_allowance
+            and bounds["ymin"] - edge_allowance <= slot["position_m"][1] - radius
+            and slot["position_m"][1] + radius <= bounds["ymax"] + edge_allowance
+            for slot in slots
+        ))
+
+    def test_organize_direct_placement_keeps_all_clear_slots_and_contacts_table(self):
+        current = scene([raw_object(
+            1, "red", [0.50, 0.0, 0.03], color="red", size=[0.023, 0.023, 0.06],
+        )])
+        state = build_organize_task_state(current, config())
+        targets = OrganizePlanner(config(), None)._placement(
+            current, state, current.current_objects[0],
+        )
+        self.assertGreater(len(targets), 1)
+        self.assertTrue(all(
+            target.additional_physical_parameters.get("placement_slot_id")
+            for target in targets
+        ))
+        self.assertTrue(all(
+            abs(target.place_pose["position_m"][2] - 0.03) < 1e-9
+            for target in targets
+        ))
+
+    def test_organize_placement_adds_yaw_only_clearance_alternatives(self):
+        current = scene([raw_object(
+            1, "red", [0.50, 0.0, 0.03], color="red", size=[0.03, 0.03, 0.06],
+        )])
+        state = build_organize_task_state(current, config())
+        generated = generate_physical_edges(
+            current, ["red"], "organize_blocks", config(),
+            lambda obj, interval: OrganizePlanner(config(), None)._placement(
+                current, state, obj, interval,
+            ),
+            lambda obj: None,
+        )
+        ordinary = [
+            item for item in generated.edges_by_target["red"]
+            if item.action_type == ActionType.PICK_PLACE
+            and item.physical_parameters["placement_yaw_policy"]
+            == "safe_height_yaw_only_for_clearance"
+        ]
+        self.assertTrue(ordinary)
+        self.assertTrue(any(
+            item.physical_parameters["transport_path"][-1]["motion_role"]
+            == "ordinary_yaw_only_at_safe_height"
+            for item in ordinary
+        ))
+        self.assertTrue(all(
+            item.physical_parameters["orientation_policy"] == "downward_yaw_only"
+            for item in ordinary
+        ))
+
+    def test_unverified_released_object_keeps_destination_track_anchor(self):
+        memory = {"tracks": {"t1": {
+            "track_id": "t1", "center_base_m": [0.5, 0.0, 0.02], "history": [],
+        }}}
+        mark_track_after_place(memory, edge(), 3, success=False)
+        self.assertEqual(memory["tracks"]["t1"]["manipulation_state"], "placed_unverified")
+        self.assertEqual(memory["tracks"]["t1"]["center_base_m"], [0.28, 0.18, 0.02])
+
+    def test_released_staging_location_is_reserved_even_if_not_visible(self):
+        current = scene([raw_object(1, "red", [0.50, 0.0, 0.02], color="red")])
+        current = replace(current, recent_action_results=({
+            "acted_object_track_id": "blue",
+            "target_region_id": "organize_staging",
+            "release_executed": True,
+            "planned_place_position_m": [0.59, -0.04, 0.02],
+            "acted_object_size_m": [0.03, 0.03, 0.04],
+            "success": False,
+        },))
+        state = build_organize_task_state(current, config())
+        target = OrganizePlanner(config(), None)._staging(
+            current, state, current.current_objects[0],
+        )
+        self.assertIsNotNone(target)
+        self.assertNotEqual(target.place_pose["position_m"][:2], [0.59, -0.04])
+
+    def test_transient_rgb_depth_skew_retries_inside_same_observation(self):
+        args = SimpleNamespace()
+        transient = PerceptionServerError(
+            "skew", status=503, error_code="rgb_depth_not_synchronized",
+        )
+        with patch(
+            "tools.workflows.stack_demo.commands.perception_server_snapshot",
+            side_effect=[transient, {"ok": True}],
+        ) as snapshot, patch("tools.workflows.stack_demo.commands.time.sleep"):
+            response, attempts = _perception_snapshot_with_retry(
+                args, "/tmp/unused", capture_reason="post_grasp", scene_revision=2,
+            )
+        self.assertEqual(response, {"ok": True})
+        self.assertEqual(snapshot.call_count, 2)
+        self.assertEqual([item["ok"] for item in attempts], [False, True])
+
+    def test_post_action_ready_return_enables_bounded_wrist_staging(self):
+        args = SimpleNamespace(
+            execute=True,
+            ready_pose_json="config/rectangle_ready_pose.json",
+            velocity=0.15,
+            acceleration=0.15,
+            base_frame="base_link",
+            tool_frame="tool0",
+            tf_timeout=8.0,
+            yes=True,
+            init_stable_wait_s=0.0,
+            ros_python="/usr/bin/python3",
+        )
+        with patch("tools.workflows.stack_demo.commands.run") as run:
+            return_to_ready_observation(args)
+        self.assertIn("--ready-stage-wrist-3", run.call_args.args[0])
 
     def test_35_clearance_cannot_move_protected_structure(self):
         current = scene([
@@ -367,9 +538,33 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         strategy_index = release_command.index("--pre-rotate-strategy")
         quaternion_index = release_command.index("--hover-orientation-xyzw")
         self.assertEqual(release_command[strategy_index + 1], "joint-wrist3")
+        sign_index = release_command.index("--pre-rotate-wrist-yaw-sign")
+        self.assertEqual(release_command[sign_index + 1], "negative")
+        self.assertIn("--hover-disable-orientation-settle", release_command)
         quaternion = [float(value) for value in release_command[quaternion_index + 1:quaternion_index + 5]]
         self.assertAlmostEqual(quaternion[2], 0.0)
         self.assertAlmostEqual(quaternion[3], 0.0)
+
+    def test_ordinary_release_contacts_surface_but_special_shape_keeps_gap(self):
+        ordinary_scene = scene([raw_object(1, "ordinary", [0.5, 0.0, 0.02])])
+        ordinary = generate_physical_edges(
+            ordinary_scene, ["ordinary"], "organize_blocks", config(), placement,
+            lambda obj: None,
+        ).edges_by_target["ordinary"][0]
+        self.assertEqual(ordinary.physical_parameters["release_height_extra_m"], 0.0)
+        self.assertEqual(
+            ordinary.physical_parameters["release_pose"]["position_m"][2],
+            ordinary.physical_parameters["place_pose"]["position_m"][2],
+        )
+
+        special_scene = scene([raw_object(
+            2, "triangle", [0.5, 0.0, 0.02], label="triangle red",
+        )])
+        special = generate_physical_edges(
+            special_scene, ["triangle"], "organize_blocks", config(), placement,
+            lambda obj: None,
+        ).edges_by_target["triangle"][0]
+        self.assertAlmostEqual(special.physical_parameters["release_height_extra_m"], 0.01)
 
     def test_transport_skips_duplicate_fixed_yaw_destination_pose(self):
         selected = edge()
@@ -397,6 +592,29 @@ class NewExecutionOrganizeTests(unittest.TestCase):
             MoveItEdgeAdapter(args, config(), directory).transport(selected)
         self.assertEqual(run_pose.call_count, 1)
         self.assertTrue(run_pose.call_args.kwargs["preserve_current_orientation"])
+
+    def test_ordinary_safe_height_yaw_waypoint_does_not_lock_old_yaw(self):
+        selected = edge()
+        physical = {
+            **selected.physical_parameters,
+            "orientation_policy": "downward_yaw_only",
+            "transport_path": [
+                {"position_m": [0.5, 0.0, 0.12], "yaw_deg": 35.0},
+                {"position_m": [0.28, 0.18, 0.12], "yaw_deg": 35.0},
+                {"position_m": [0.28, 0.18, 0.12], "yaw_deg": 0.0},
+            ],
+        }
+        selected = replace(selected, physical_parameters=physical)
+        args = SimpleNamespace(
+            ros_python="/usr/bin/python3", tool_frame="tool0", tf_timeout=8.0,
+        )
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            MoveItEdgeAdapter, "_run_explicit_pose",
+        ) as run_pose:
+            MoveItEdgeAdapter(args, config(), directory).transport(selected)
+        self.assertEqual(run_pose.call_count, 2)
+        self.assertTrue(run_pose.call_args_list[0].kwargs["preserve_current_orientation"])
+        self.assertFalse(run_pose.call_args_list[1].kwargs["preserve_current_orientation"])
 
     def test_normal_post_grasp_place_locks_current_3d_orientation(self):
         selected = edge()
@@ -467,6 +685,7 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         command = execute.call_args.args[0]
         self.assertNotIn("--hover-preserve-current-orientation", command)
         self.assertIn("--pre-rotate-before-translation", command)
+        self.assertNotIn("--hover-disable-orientation-settle", command)
         strategy_index = command.index("--pre-rotate-strategy")
         self.assertEqual(command[strategy_index + 1], "pose")
 

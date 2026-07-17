@@ -22,6 +22,7 @@ from .execution import (
     select_best_pose_pre_rotate_plan,
     select_best_pre_rotate_plan,
     settle_orientation_before_descent,
+    stage_wrist_3_before_ready,
 )
 from .orientation import (
     add_base_offset,
@@ -229,6 +230,18 @@ def main() -> Optional[int]:
             else:
                 if ready_error is not None:
                     node.get_logger().info("Ready pose max_joint_error={:.4f} rad; planning ready motion.".format(ready_error))
+                if args.ready_stage_wrist_3:
+                    staged_state = stage_wrist_3_before_ready(
+                        node,
+                        args,
+                        planning_start_state,
+                        ready_joint_pose["joint_names"],
+                        ready_joint_pose["joint_positions"],
+                    )
+                    if not staged_state:
+                        node.get_logger().error("Safe wrist_3 staging before ready pose failed.")
+                        return 2
+                    planning_start_state = staged_state
                 ready_result = plan_and_maybe_execute_joint_motion(
                     node,
                     args,

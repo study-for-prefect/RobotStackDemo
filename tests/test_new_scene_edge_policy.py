@@ -9,26 +9,109 @@ from robot_scene_pipeline.object_tracking import update_scene_tracks
 from robot_scene_pipeline.ollama_policy_client import call_policy
 from tools.workflows.stack_demo.app import main
 from tools.workflows.stack_demo.clutter.edge_generation import _opposite_side, generate_physical_edges
+from tools.workflows.stack_demo.clutter.extraction_planner import _final_gate_candidates
 from tools.workflows.stack_demo.clutter.grasp_edges import scan_grasp_yaws
 from tools.workflows.stack_demo.clutter.target_options import build_target_options
 from tools.workflows.stack_demo.policy.qwen_client import StatelessQwenClient
+from tools.workflows.stack_demo.policy.edge_selector import EdgeSelectionOutcome
 from tools.workflows.stack_demo.policy.schemas import (
     PolicyOutputError,
     parse_edge_selection,
     parse_target_selection,
 )
 from tools.workflows.stack_demo.policy.target_selector import QwenTargetSelector
+from tools.workflows.stack_demo.common.action_edges import ActionType
 from tools.workflows.stack_demo.common.scene_state import build_clutter_scene_state
 
 from tests.new_arch_fixtures import MockQwenClient, config, edge, placement, raw_object, scene
 
 
 class NewSceneEdgePolicyTests(unittest.TestCase):
+    def test_final_gate_tries_policy_backup_then_equivalent_staging_points(self):
+        selected = edge(
+            candidate_id="staging_selected",
+            action_type=ActionType.EXTRACT_TO_STAGING,
+            task_role="roof",
+        )
+        equivalent = edge(
+            candidate_id="staging_equivalent",
+            action_type=ActionType.EXTRACT_TO_STAGING,
+            task_role="roof",
+        )
+        different_role = edge(
+            candidate_id="staging_other_role",
+            action_type=ActionType.EXTRACT_TO_STAGING,
+            task_role="triangle_top",
+        )
+        policy_backup = edge(
+            candidate_id="policy_backup",
+            action_type=ActionType.NUDGE_BLOCKER,
+            task_role="roof",
+        )
+        outcome = EdgeSelectionOutcome(
+            selected,
+            (policy_backup.candidate_id,),
+            "qwen_edge_selection",
+            ("ranked",),
+            {},
+            {},
+        )
+        ordered = _final_gate_candidates(
+            outcome,
+            (selected, equivalent, different_role, policy_backup),
+        )
+        self.assertEqual(
+            [item.candidate_id for item in ordered],
+            ["staging_selected", "policy_backup", "staging_equivalent"],
+        )
+
     def test_code_owned_push_direction_has_opposite_contact_side(self):
         self.assertEqual(_opposite_side([1.0, 0.0, 0.0]), "-x")
         self.assertEqual(_opposite_side([-1.0, 0.0, 0.0]), "+x")
         self.assertEqual(_opposite_side([0.0, 1.0, 0.0]), "-y")
         self.assertEqual(_opposite_side([0.0, -1.0, 0.0]), "+y")
+
+    def test_direct_grasp_uses_physical_fingertip_length_near_adjacent_block(self):
+        state = scene([
+            raw_object(
+                1, "track_red_01", [0.3593, 0.1527, -0.0012],
+                size=[0.0227, 0.0209, 0.0258], yaw_deg=13.47,
+            ),
+            raw_object(
+                2, "track_blue_02", [0.3857, 0.1544, -0.0014],
+                label="square blue", size=[0.0239, 0.0226, 0.0248], yaw_deg=3.26,
+            ),
+        ])
+        target = next(obj for obj in state.current_objects if obj.track_id == "track_red_01")
+
+        scan = scan_grasp_yaws(target, state.current_objects, config())
+
+        self.assertTrue(scan.graspable)
+        safe_yaws = [float(item["yaw_deg"]) for item in scan.samples if item["safe"]]
+        self.assertIn(5.0, safe_yaws)
+        self.assertIn(10.0, safe_yaws)
+        selected = scan.safe_intervals[0].selected_check
+        self.assertLessEqual(selected["fingertip_axial_overhang_m"], 0.001)
+
+    def test_old_manipulated_track_remains_eligible_for_destination_rebinding(self):
+        memory = {"tracks": {"track_red_01": {
+            "track_id": "track_red_01",
+            "label": "square red",
+            "color": "red",
+            "semantic_shape": "square",
+            "center_base_m": [0.28, 0.2475, 0.02],
+            "dimensions_m": [0.025, 0.023, 0.024],
+            "last_seen_revision": 1,
+            "manipulation_state": "placed_unverified",
+            "history": [],
+        }}}
+        detection = raw_object(
+            8, "temporary", [0.282, 0.248, 0.02], color="red",
+            size=[0.025, 0.023, 0.024],
+        )
+        detection.pop("track_id", None)
+        update_scene_tracks(memory, [detection], 8)
+        self.assertEqual(detection["track_id"], "track_red_01")
 
     def test_01_main_entry_loads_new_planner(self):
         fixture = Path(__file__).parent / "fixtures" / "new_arch_single_red_scene.json"
@@ -206,6 +289,26 @@ class NewSceneEdgePolicyTests(unittest.TestCase):
         self.assertEqual(second[0]["track_id"], red_track)
         self.assertEqual(second[0]["object_ref"], "scene_2:obj_99")
 
+    def test_duplicate_metric_detections_do_not_create_competing_tracks(self):
+        memory = {}
+        detections = [
+            raw_object(1, "ignored", [0.260, 0.168, 0.02], label="square yellow"),
+            raw_object(2, "ignored", [0.261, 0.168, 0.02], label="square yellow"),
+        ]
+        for item in detections:
+            item.pop("track_id")
+        update_scene_tracks(memory, detections, 1)
+        self.assertEqual(len(detections), 1)
+        self.assertEqual(len(memory["tracks"]), 1)
+        original_track = detections[0]["track_id"]
+
+        next_frame = [
+            raw_object(9, "ignored", [0.260, 0.169, 0.02], label="square yellow"),
+        ]
+        next_frame[0].pop("track_id")
+        update_scene_tracks(memory, next_frame, 2)
+        self.assertEqual(next_frame[0]["track_id"], original_track)
+
     def test_scene_state_uses_measured_color_for_shape_only_detector_label(self):
         obj = raw_object(1, "t1", [0.5, 0.0, 0.02], label="semi square")
         obj["visual_color"] = "yellow"
@@ -252,16 +355,19 @@ class NewSceneEdgePolicyTests(unittest.TestCase):
         self.assertEqual(state.current_objects[0].size_xyz_m, (0.024, 0.023, 0.025))
         self.assertAlmostEqual(state.current_objects[0].center_xyz_m[2], 0.094)
 
-    def test_new_detection_without_size_still_fails_closed(self):
+    def test_new_detection_without_size_is_ignored_without_losing_valid_scene(self):
         invalid = raw_object(1, "ignored", [0.4, 0.0, 0.02])
         invalid.pop("track_id")
         invalid["dimensions_m"] = None
         update_scene_tracks({}, [invalid], 1)
-        with self.assertRaisesRegex(ValueError, "object size"):
-            build_clutter_scene_state(
-                {"scene_revision": 1, "objects": [invalid]},
-                config().workspace,
-            )
+        valid = raw_object(2, "valid", [0.5, 0.0, 0.02])
+        observation = {"scene_revision": 1, "objects": [valid, invalid]}
+        state = build_clutter_scene_state(observation, config().workspace)
+        self.assertEqual([obj.track_id for obj in state.current_objects], ["valid"])
+        self.assertEqual(
+            observation["ignored_objects_without_metric_geometry"][0]["track_id"],
+            invalid["track_id"],
+        )
 
 
 def _geometry_result(safe):

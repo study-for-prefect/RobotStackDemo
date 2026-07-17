@@ -55,9 +55,10 @@ class TargetSpec:
     task_role: str | None = None
 
 
-PlacementProvider = Callable[[SceneObjectState, GraspInterval], PlacementTarget | None]
-VariantPlacementProvider = Callable[[SceneObjectState, GraspInterval, str | None], PlacementTarget | None]
-StagingProvider = Callable[[SceneObjectState], PlacementTarget | None]
+PlacementTargets = PlacementTarget | Sequence[PlacementTarget] | None
+PlacementProvider = Callable[[SceneObjectState, GraspInterval], PlacementTargets]
+VariantPlacementProvider = Callable[[SceneObjectState, GraspInterval, str | None], PlacementTargets]
+StagingProvider = Callable[[SceneObjectState], PlacementTargets]
 PlanChecker = Callable[[PhysicalActionEdge], Mapping[str, Any]]
 
 FULL_3D_ORIENTATION_SHAPES = frozenset({"triangle", "concave_rectangle"})
@@ -111,7 +112,7 @@ def generate_physical_edges(
         if task_type == "organize_blocks":
             if not edges and scan.safe_intervals:
                 staging = staging_provider(target)
-                if staging is not None:
+                if _placement_targets(staging):
                     edges.extend(
                         edge for edge in _staging_edges(
                             scene, target, scan, task_type, config, staging, checker,
@@ -130,7 +131,7 @@ def generate_physical_edges(
         elif not any(edge.precheck_results.get("passed") for edge in direct_edges):
             if scan.safe_intervals:
                 staging = staging_provider(target)
-                if staging is not None:
+                if _placement_targets(staging):
                     edges.extend(_staging_edges(
                         scene, target, scan, task_type, config, staging, checker,
                         task_role=spec.task_role,
@@ -172,39 +173,55 @@ def _direct_edges(
     edges = []
     limit = int(config.section("grasp")["maximum_edges_per_target"])
     for index, interval in enumerate(scan.safe_intervals[:limit], start=1):
-        placement = placement_provider(target, interval)
-        if placement is None:
-            continue
-        physical = _pick_parameters(target, interval, placement, config)
-        placement_checks = placement_path_checks(scene, target, placement.place_pose, physical, config)
-        prechecks = {
-            "finger_safe": True, "palm_safe": True,
-            "descent_safe": True, "lift_safe": True,
-            **dict(placement.precheck_results or {}),
-            **placement_checks,
-        }
-        prechecks["passed"] = all(value for value in prechecks.values() if isinstance(value, bool))
-        prechecks["geometry_checks_passed"] = prechecks["passed"]
-        edge = make_edge(
-            candidate_id=f"edge_r{scene.scene_revision}_{target.track_id}{candidate_suffix}_grasp_{index}",
-            scene_revision=scene.scene_revision,
-            action_type=placement.action_type,
-            task_type=task_type,
-            primary_target_track_id=target.track_id,
-            acted_object_track_id=target.track_id,
-            task_role=placement.task_role,
-            target_region_id=placement.target_region_id,
-            physical_parameters=physical,
-            expected_effects=placement.expected_effects,
-            expected_released_tracks=_released_neighbors(scene, target),
-            task_progress_gain=placement.task_progress_gain,
-            risk_score=_grasp_risk(interval),
-            protected_tracks=scene.protected_tracks,
-            precheck_results=prechecks,
-            decision_metadata={"grasp_interval": interval.to_dict(), "object_ref": target.object_ref},
-        )
-        edges.append(_with_plan_check(edge, checker))
+        placements = _placement_targets(placement_provider(target, interval))
+        for placement_index, placement in enumerate(placements, start=1):
+            physical = _pick_parameters(target, interval, placement, config)
+            placement_checks = placement_path_checks(scene, target, physical["place_pose"], physical, config)
+            prechecks = {
+                "finger_safe": True, "palm_safe": True,
+                "descent_safe": True, "lift_safe": True,
+                **dict(placement.precheck_results or {}),
+                **placement_checks,
+            }
+            prechecks["passed"] = all(value for value in prechecks.values() if isinstance(value, bool))
+            prechecks["geometry_checks_passed"] = prechecks["passed"]
+            placement_suffix = f"_place_{placement_index}" if len(placements) > 1 else ""
+            edge = make_edge(
+                candidate_id=(
+                    f"edge_r{scene.scene_revision}_{target.track_id}{candidate_suffix}"
+                    f"_grasp_{index}{placement_suffix}"
+                ),
+                scene_revision=scene.scene_revision,
+                action_type=placement.action_type,
+                task_type=task_type,
+                primary_target_track_id=target.track_id,
+                acted_object_track_id=target.track_id,
+                task_role=placement.task_role,
+                target_region_id=placement.target_region_id,
+                physical_parameters=physical,
+                expected_effects=placement.expected_effects,
+                expected_released_tracks=_released_neighbors(scene, target),
+                task_progress_gain=placement.task_progress_gain,
+                risk_score=_grasp_risk(interval),
+                protected_tracks=scene.protected_tracks,
+                precheck_results=prechecks,
+                decision_metadata={
+                    "grasp_interval": interval.to_dict(),
+                    "object_ref": target.object_ref,
+                    "placement_option_index": placement_index,
+                    "placement_option_count": len(placements),
+                },
+            )
+            edges.append(_with_plan_check(edge, checker))
     return edges
+
+
+def _placement_targets(value: PlacementTargets) -> tuple[PlacementTarget, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, PlacementTarget):
+        return (value,)
+    return tuple(item for item in value if isinstance(item, PlacementTarget))
 
 
 def _clearance_edges(
@@ -232,11 +249,11 @@ def _clearance_edges(
             continue
         blocker_scan = scans.get(blocker_id) or scan_grasp_yaws(blocker, scene.current_objects, config)
         if blocker_scan.graspable:
-            staging = staging_provider(blocker)
-            if staging is not None:
+            staging_targets = _placement_targets(staging_provider(blocker))
+            for staging_index, staging in enumerate(staging_targets, start=1):
                 interval = blocker_scan.safe_intervals[0]
                 physical = _pick_parameters(blocker, interval, staging, config)
-                placement_checks = placement_path_checks(scene, blocker, staging.place_pose, physical, config)
+                placement_checks = placement_path_checks(scene, blocker, physical["place_pose"], physical, config)
                 prechecks = {
                     "finger_safe": True, "palm_safe": True,
                     "descent_safe": True, "lift_safe": True,
@@ -246,7 +263,10 @@ def _clearance_edges(
                 prechecks["passed"] = all(value for value in prechecks.values() if isinstance(value, bool))
                 prechecks["geometry_checks_passed"] = prechecks["passed"]
                 edge = make_edge(
-                    candidate_id=f"edge_r{scene.scene_revision}_{target.track_id}{candidate_suffix}_pick_blocker_{blocker.track_id}",
+                    candidate_id=(
+                        f"edge_r{scene.scene_revision}_{target.track_id}{candidate_suffix}"
+                        f"_pick_blocker_{blocker.track_id}_staging_{staging_index}"
+                    ),
                     scene_revision=scene.scene_revision,
                     action_type=ActionType.PICK_AWAY_BLOCKER,
                     task_type=task_type,
@@ -270,6 +290,8 @@ def _clearance_edges(
                             "geometry_center_m": list(blocker.center_xyz_m),
                             "dimensions_m": list(blocker.size_xyz_m),
                         },
+                        "staging_option_index": staging_index,
+                        "staging_option_count": len(staging_targets),
                     },
                 )
                 checked = _with_plan_check(edge, checker)
@@ -288,49 +310,58 @@ def _staging_edges(
     scan: GraspScanResult,
     task_type: str,
     config: StackDemoConfig,
-    staging: PlacementTarget,
+    staging: PlacementTargets,
     checker: PlanChecker,
     *,
     task_role: str | None,
     candidate_suffix: str,
 ) -> list[PhysicalActionEdge]:
     edges: list[PhysicalActionEdge] = []
-    if staging.action_type not in {ActionType.EXTRACT_TO_STAGING, ActionType.REGRASP_FOR_ORIENTATION}:
-        return edges
-    for index, interval in enumerate(scan.safe_intervals[:1], start=1):
-        physical = _pick_parameters(target, interval, staging, config)
-        checks = {
-            "finger_safe": True,
-            "palm_safe": True,
-            "descent_safe": True,
-            "lift_safe": True,
-            **dict(staging.precheck_results or {}),
-            **placement_path_checks(scene, target, staging.place_pose, physical, config),
-        }
-        checks["passed"] = all(value for value in checks.values() if isinstance(value, bool))
-        checks["geometry_checks_passed"] = checks["passed"]
-        edge = make_edge(
-            candidate_id=f"edge_r{scene.scene_revision}_{target.track_id}{candidate_suffix}_staging_{index}",
-            scene_revision=scene.scene_revision,
-            action_type=staging.action_type,
-            task_type=task_type,
-            primary_target_track_id=target.track_id,
-            acted_object_track_id=target.track_id,
-            task_role=task_role,
-            target_region_id=staging.target_region_id,
-            physical_parameters=physical,
-            expected_effects=staging.expected_effects,
-            task_progress_gain=staging.task_progress_gain,
-            risk_score=0.4 + _grasp_risk(interval),
-            protected_tracks=scene.protected_tracks,
-            precheck_results=checks,
-            decision_metadata={
-                "grasp_interval": interval.to_dict(),
-                "object_ref": target.object_ref,
-                "staging_position_tolerance_m": 0.025,
-            },
-        )
-        edges.append(_with_plan_check(edge, checker))
+    staging_targets = _placement_targets(staging)
+    for staging_index, target_staging in enumerate(staging_targets, start=1):
+        if target_staging.action_type not in {
+            ActionType.EXTRACT_TO_STAGING, ActionType.REGRASP_FOR_ORIENTATION,
+        }:
+            continue
+        for grasp_index, interval in enumerate(scan.safe_intervals[:1], start=1):
+            physical = _pick_parameters(target, interval, target_staging, config)
+            checks = {
+                "finger_safe": True,
+                "palm_safe": True,
+                "descent_safe": True,
+                "lift_safe": True,
+                **dict(target_staging.precheck_results or {}),
+                **placement_path_checks(scene, target, physical["place_pose"], physical, config),
+            }
+            checks["passed"] = all(value for value in checks.values() if isinstance(value, bool))
+            checks["geometry_checks_passed"] = checks["passed"]
+            edge = make_edge(
+                candidate_id=(
+                    f"edge_r{scene.scene_revision}_{target.track_id}{candidate_suffix}"
+                    f"_staging_{staging_index}_grasp_{grasp_index}"
+                ),
+                scene_revision=scene.scene_revision,
+                action_type=target_staging.action_type,
+                task_type=task_type,
+                primary_target_track_id=target.track_id,
+                acted_object_track_id=target.track_id,
+                task_role=task_role,
+                target_region_id=target_staging.target_region_id,
+                physical_parameters=physical,
+                expected_effects=target_staging.expected_effects,
+                task_progress_gain=target_staging.task_progress_gain,
+                risk_score=0.4 + _grasp_risk(interval),
+                protected_tracks=scene.protected_tracks,
+                precheck_results=checks,
+                decision_metadata={
+                    "grasp_interval": interval.to_dict(),
+                    "object_ref": target.object_ref,
+                    "staging_position_tolerance_m": 0.025,
+                    "staging_option_index": staging_index,
+                    "staging_option_count": len(staging_targets),
+                },
+            )
+            edges.append(_with_plan_check(edge, checker))
     return edges
 
 
@@ -454,11 +485,19 @@ def _pick_parameters(
     approach_z = z + float(safety["approach_height_m"])
     lift_z = z + float(safety["observation_height_m"])
     place_pose = dict(placement.place_pose)
-    grasp_yaw = normalize_gripper_yaw_deg(interval.selected_yaw_deg)
+    additional = dict(placement.additional_physical_parameters or {})
+    required_grasp_yaw = additional.get("required_grasp_yaw_deg")
+    grasp_yaw = normalize_gripper_yaw_deg(
+        interval.selected_yaw_deg if required_grasp_yaw is None else float(required_grasp_yaw)
+    )
     current_object_yaw = float(target.yaw_deg)
     requested_object_yaw = float(place_pose.get("yaw_deg", current_object_yaw))
     object_relative_to_gripper_yaw = _axis_delta_deg(current_object_yaw, grasp_yaw)
     full_3d_orientation = target.shape in FULL_3D_ORIENTATION_SHAPES
+    release_height_extra_m = float(safety[
+        "special_shape_release_height_extra_m"
+        if full_3d_orientation else "ordinary_release_height_extra_m"
+    ])
     if full_3d_orientation:
         expected_object_yaw = requested_object_yaw
         release_gripper_yaw = _normalize_axis_yaw_deg(
@@ -466,15 +505,25 @@ def _pick_parameters(
         )
         placement_yaw_policy = "special_shape_target_orientation"
     else:
-        # Organize completion does not require final yaw.  Keep the grasp
-        # orientation fixed through transport, descent, release, and retreat.
-        expected_object_yaw = current_object_yaw
-        release_gripper_yaw = grasp_yaw
-        placement_yaw_policy = "preserve_grasp_yaw_until_release"
+        requested_release_yaw = (placement.additional_physical_parameters or {}).get(
+            "ordinary_release_gripper_yaw_deg"
+        )
+        release_gripper_yaw = (
+            grasp_yaw if requested_release_yaw is None
+            else _normalize_axis_yaw_deg(float(requested_release_yaw))
+        )
+        expected_object_yaw = _normalize_axis_yaw_deg(
+            release_gripper_yaw + object_relative_to_gripper_yaw
+        )
+        placement_yaw_policy = (
+            "preserve_grasp_yaw_until_release"
+            if abs(_axis_delta_deg(release_gripper_yaw, grasp_yaw)) <= 1e-6
+            else "safe_height_yaw_only_for_clearance"
+        )
         place_pose["yaw_deg"] = expected_object_yaw
     release_pose = dict(place_pose)
     release_position = list(place_pose["position_m"])
-    release_position[2] += float(safety["release_height_extra_m"])
+    release_position[2] += release_height_extra_m
     release_pose["position_m"] = release_position
     release_pose["yaw_deg"] = release_gripper_yaw
     orientation_policy = (
@@ -504,6 +553,13 @@ def _pick_parameters(
             "yaw_deg": release_gripper_yaw,
             "motion_role": "special_shape_orientation_at_destination",
         })
+    elif abs(_axis_delta_deg(release_gripper_yaw, grasp_yaw)) > 1e-6:
+        transport_path.append({
+            "frame_id": "base_link",
+            "position_m": list(place_pose["position_m"][:2]) + [lift_z],
+            "yaw_deg": release_gripper_yaw,
+            "motion_role": "ordinary_yaw_only_at_safe_height",
+        })
     return {
         "orientation_policy": orientation_policy,
         "placement_yaw_policy": placement_yaw_policy,
@@ -518,10 +574,10 @@ def _pick_parameters(
         "requested_place_object_yaw_deg": requested_object_yaw,
         "expected_place_object_yaw_deg": expected_object_yaw,
         "release_gripper_yaw_deg": release_gripper_yaw,
-        "release_height_extra_m": float(safety["release_height_extra_m"]),
+        "release_height_extra_m": release_height_extra_m,
         "transport_path": transport_path,
-        "grasp_checks": dict(interval.selected_check),
-        **dict(placement.additional_physical_parameters or {}),
+        "grasp_checks": dict(additional.get("required_grasp_checks") or interval.selected_check),
+        **additional,
     }
 
 

@@ -22,13 +22,23 @@ def update_scene_tracks(
     mark_unseen_invisible: bool = True,
 ) -> Tuple[dict, List[dict]]:
     """Assign previous tracks to current detections with a global one-to-one greedy cost ordering."""
+    # The detector can occasionally emit the same physical block twice with
+    # identical metric geometry.  Suppress those duplicates before assignment;
+    # otherwise a second persistent track is created and may steal the identity
+    # from the original track when only one detection remains in the next frame.
+    detections[:] = _deduplicate_detections(detections)
     tracks = memory.setdefault("tracks", {})
     # A wrist-camera observation can legitimately miss a grasped object for one
     # or two revisions.  Keep recently seen tracks eligible for explicit
     # rebinding instead of replacing their identity with a detector id.
     previous = [
         track for track in tracks.values()
-        if int(scene_revision) - int(track.get("last_seen_revision", scene_revision)) <= 3
+        if (
+            int(scene_revision) - int(track.get("last_seen_revision", scene_revision)) <= 3
+            or track.get("manipulation_state") in {
+                "held_by_gripper", "placed", "placed_unverified", "unresolved",
+            }
+        )
     ]
     if mark_unseen_invisible:
         for track in tracks.values():
@@ -57,6 +67,28 @@ def update_scene_tracks(
         assignments.append(_bind(tracks[track_id], detection, scene_revision, {"new_track": True}, False))
     memory.setdefault("track_history", []).append({"scene_revision": int(scene_revision), "assignments": assignments})
     return memory, assignments
+
+
+def _deduplicate_detections(detections: List[dict]) -> List[dict]:
+    """Keep one metric detection per same-color/shape 8 mm spatial cluster."""
+    unique: List[dict] = []
+    for detection in detections:
+        center = get_center(detection)
+        duplicate = False
+        for accepted in unique:
+            accepted_center = get_center(accepted)
+            if (
+                center is not None
+                and accepted_center is not None
+                and _color(detection) == _color(accepted)
+                and infer_object_shape(detection) == infer_object_shape(accepted)
+                and math.dist(center[:3], accepted_center[:3]) <= 0.008
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            unique.append(detection)
+    return unique
 
 
 def _minimum_cost_one_to_one(candidates: List[tuple]) -> List[tuple]:

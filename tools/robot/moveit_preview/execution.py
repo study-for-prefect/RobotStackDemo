@@ -28,6 +28,7 @@ from .orientation import (
 from .trajectory import (
     joint_start_goal_delta,
     joint_position_map,
+    joint_position_map_from_state,
     joint_state_from_trajectory,
     max_joint_delta,
     maybe_confirm,
@@ -36,6 +37,7 @@ from .trajectory import (
     unwrap_continuous_joint_trajectory,
     weighted_joint_start_goal_cost,
 )
+
 
 def plan_motion_trajectory(node, args, tool_goal, quat_xyzw, cartesian=None, start_joint_state=None):
     validate_goal(tool_goal, args)
@@ -612,7 +614,11 @@ def run_hover_only(node, args, planning_start_state):
         return False
     final_tool = node.current_tool_transform(timeout=args.tf_timeout)
     final_pos, final_quat = transform_position_quat(final_tool)
-    if args.execute and not bool(getattr(args, "hover_preserve_current_orientation", False)):
+    if (
+        args.execute
+        and not bool(getattr(args, "hover_preserve_current_orientation", False))
+        and not bool(getattr(args, "hover_disable_orientation_settle", False))
+    ):
         final_pos, final_quat, _settled_state = settle_orientation_before_descent(
             node,
             args,
@@ -633,6 +639,17 @@ def plan_and_maybe_execute_joint_motion(
     joint_positions,
     start_joint_state=None,
 ):
+    start_map = joint_position_map_from_state(start_joint_state or node.latest_joint_state)
+    wrist_delta = _joint_start_goal_delta(
+        start_map, joint_names, joint_positions, "wrist_3_joint",
+    )
+    if wrist_delta is not None and wrist_delta > args.max_wrist_3_start_goal_delta:
+        node.get_logger().error(
+            "Joint motion {} rejected: wrist_3 start_goal_delta {:.3f} rad > {:.3f}.".format(
+                motion_name, wrist_delta, args.max_wrist_3_start_goal_delta,
+            )
+        )
+        return False
     trajectory = plan_joint_trajectory(
         node,
         args,
@@ -677,3 +694,57 @@ def plan_and_maybe_execute_joint_motion(
     if not ok:
         return False
     return joint_state_from_trajectory(trajectory) or True
+
+
+def stage_wrist_3_before_ready(
+    node,
+    args,
+    start_joint_state,
+    ready_joint_names,
+    ready_joint_positions,
+):
+    """Split a large empty-gripper wrist return into bounded safe-height stages."""
+    current_state = start_joint_state
+    ready = dict(zip(ready_joint_names, ready_joint_positions))
+    max_step = min(
+        0.9 * float(args.max_joint_delta),
+        0.9 * float(args.max_wrist_3_start_goal_delta),
+    )
+    if max_step <= 0.0:
+        return False
+    stage_index = 0
+    while True:
+        current = joint_position_map_from_state(current_state)
+        if "wrist_3_joint" not in current or "wrist_3_joint" not in ready:
+            return current_state
+        delta = float(ready["wrist_3_joint"]) - float(current["wrist_3_joint"])
+        if abs(delta) <= float(args.max_wrist_3_start_goal_delta):
+            return current_state
+        stage_index += 1
+        stage_names = list(ready_joint_names)
+        stage_positions = [float(current[name]) for name in stage_names]
+        wrist_index = stage_names.index("wrist_3_joint")
+        stage_positions[wrist_index] += math.copysign(max_step, delta)
+        result = plan_and_maybe_execute_joint_motion(
+            node,
+            args,
+            "ready_wrist_3_stage_{}".format(stage_index),
+            stage_names,
+            stage_positions,
+            start_joint_state=current_state,
+        )
+        if not result or not hasattr(result, "name"):
+            return False
+        current_state = result
+
+
+def _joint_start_goal_delta(
+    start_map,
+    joint_names,
+    joint_positions,
+    target_joint_name,
+):
+    if target_joint_name not in start_map or target_joint_name not in joint_names:
+        return None
+    index = list(joint_names).index(target_joint_name)
+    return abs(float(joint_positions[index]) - float(start_map[target_joint_name]))

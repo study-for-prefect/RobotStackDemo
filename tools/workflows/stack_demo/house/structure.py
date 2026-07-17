@@ -53,7 +53,8 @@ def object_at_pose(obj: SceneObjectState, pose: Mapping[str, Any]) -> SceneObjec
 def _lower_checks(obj: SceneObjectState, role: str, config: StackDemoConfig) -> dict[str, Any]:
     house = config.section("house")
     origin_x, origin_y, origin_z = (float(value) for value in house["origin_center_base_m"])
-    expected_x = origin_x + (-0.5 if role.startswith("left_") else 0.5) * float(house["left_right_spacing_m"])
+    center_spacing = float(obj.size_xyz_m[0]) + float(house["support_inner_gap_m"])
+    expected_x = origin_x + (-0.5 if role.startswith("left_") else 0.5) * center_spacing
     offset = math.hypot(obj.center_xyz_m[0] - expected_x, obj.center_xyz_m[1] - origin_y)
     return {
         "center_offset_valid": offset <= float(house["center_tolerance_m"]),
@@ -102,6 +103,9 @@ def _roof_checks(
     if spacing <= 1e-9:
         return {"both_upper_supports_visible": True, "support_spacing_valid": False}
     span_yaw = math.degrees(math.atan2(span[1], span[0]))
+    left_along_half, _ = _projected_half_extents(left, span_yaw)
+    right_along_half, _ = _projected_half_extents(right, span_yaw)
+    support_inner_gap = spacing - left_along_half - right_along_half
     midpoint = (
         0.5 * (left.center_xyz_m[0] + right.center_xyz_m[0]),
         0.5 * (left.center_xyz_m[1] + right.center_xyz_m[1]),
@@ -124,7 +128,9 @@ def _roof_checks(
             and orientation.satisfies_roof_orientation
         ),
         "long_axis_matches_support_span": yaw_error <= float(house["orientation_tolerance_deg"]),
-        "support_spacing_valid": abs(spacing - float(house["left_right_spacing_m"])) <= 2.0 * float(house["center_tolerance_m"]),
+        "support_spacing_valid": abs(
+            support_inner_gap - float(house["support_inner_gap_m"])
+        ) <= 2.0 * float(house["center_tolerance_m"]),
         "support_height_difference_valid": height_difference <= float(house["support_height_tolerance_m"]),
         "roof_center_offset_valid": center_offset <= float(house["center_tolerance_m"]),
         "covers_left_support": left_margin >= minimum_margin,
@@ -132,6 +138,7 @@ def _roof_checks(
         "roof_width_covers_supports": across_half >= across_required,
         "vertical_contact_valid": abs(vertical_gap) <= float(house["support_height_tolerance_m"]),
         "support_spacing_m": spacing,
+        "support_inner_gap_m": support_inner_gap,
         "support_height_difference_m": height_difference,
         "roof_center_offset_m": center_offset,
         "left_support_margin_m": left_margin,

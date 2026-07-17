@@ -23,7 +23,7 @@ class HouseTaskState:
     support_relations: tuple[Mapping[str, Any], ...]
     center_offsets: Mapping[str, float]
     layer_heights: Mapping[str, float]
-    left_right_spacing: float
+    support_inner_gap: float
     protected_structure_tracks: tuple[str, ...]
     orientation_states: Mapping[str, Mapping[str, Any]]
     current_repair_state: Mapping[str, Any] | None
@@ -80,7 +80,7 @@ def build_house_task_state(
         support_relations=_support_relations(scene, bindings),
         center_offsets=_center_offsets(scene, bindings),
         layer_heights=_layer_heights(scene, bindings),
-        left_right_spacing=float(config.section("house")["left_right_spacing_m"]),
+        support_inner_gap=float(config.section("house")["support_inner_gap_m"]),
         protected_structure_tracks=protected,
         orientation_states=orientation_states,
         current_repair_state=_repair_state(completion, bindings),

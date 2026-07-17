@@ -32,7 +32,7 @@ def verify_grasp_result(
     gripper_holding_hint: bool | None = None,
     minimum_displacement_m: float = 0.015,
 ) -> ActionVerification:
-    """Require visual scene evidence; gripper state is auxiliary and never sufficient."""
+    """Verify pickup using table motion or a measured GF225 object contact."""
     original = before.object_by_track(edge.acted_object_track_id)
     current = after_lift.object_by_track(edge.acted_object_track_id)
     if original is None:
@@ -67,6 +67,12 @@ def verify_grasp_result(
         if obj.track_id != edge.acted_object_track_id
     ))
     view_continuity = bool(visible_non_target_context)
+    camera_view_fully_occluded = not after_lift.current_objects
+    holding_supported_occlusion = bool(
+        gripper_holding_hint is True
+        and track_missing
+        and camera_view_fully_occluded
+    )
     missing_supported = bool(
         track_missing
         and original_position_clear
@@ -76,6 +82,7 @@ def verify_grasp_result(
                 gripper_holding_hint is True
                 and len(visible_non_target_context) >= 1
             )
+            or holding_supported_occlusion
         )
     )
     scene_change_supports_grasp = bool(
@@ -100,11 +107,12 @@ def verify_grasp_result(
             "reliably_rebound_context_tracks": list(reliably_rebound_context),
             "visible_non_target_context_tracks": list(visible_non_target_context),
             "view_continuity_supported": view_continuity,
+            "camera_view_fully_occluded": camera_view_fully_occluded,
             "gripper_holding_hint": gripper_holding_hint,
-            "gripper_hint_used_as_sole_evidence": False,
+            "gripper_hint_used_as_sole_evidence": holding_supported_occlusion,
             "camera_limit": (
                 "wrist-mounted D435i may not see an object inside the raised GF225; "
-                "verification therefore uses original-location clearance, track displacement, and scene change"
+                "a measured GF225 contact may gate transport when the raised-arm view is fully occluded"
             ),
         },
     )

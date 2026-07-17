@@ -8,7 +8,7 @@ from ..common.action_edges import PhysicalActionEdge
 from ..common.config import StackDemoConfig
 from ..common.cycle_logging import CycleLogger
 from ..common.scene_state import ClutterSceneState
-from .placement import house_placement_target, staging_orientation_target
+from .placement import house_placement_target, staging_orientation_targets
 from .roles import legal_incomplete_roles, role_precondition_satisfied
 from .state import HouseTaskState
 
@@ -34,14 +34,14 @@ class HousePlanner:
             task_state=state.to_dict(),
             target_track_ids=(),
             placement_provider=lambda obj, interval: None,
-            staging_provider=lambda obj: staging_orientation_target(
-                obj, "blocker", self._config,
+            staging_provider=lambda obj: staging_orientation_targets(
+                scene, obj, "blocker", self._config,
             ),
             task_precondition=lambda edge, current: self._precondition(state, edge, current),
             logger=logger,
             target_specs=target_specs,
             variant_placement_provider=lambda obj, interval, role: house_placement_target(
-                scene, state, obj, str(role), self._config,
+                scene, state, obj, str(role), self._config, interval=interval,
             ),
             image_paths=image_paths,
         )

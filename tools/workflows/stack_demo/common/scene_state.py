@@ -96,7 +96,19 @@ def build_clutter_scene_state(
     revision = int(observation.get("scene_revision", 1))
     completed = frozenset(str(value) for value in completed_tracks)
     protected = frozenset(str(value) for value in protected_tracks)
-    raw_objects = [item for item in observation.get("objects", []) if isinstance(item, dict)]
+    detected_objects = [item for item in observation.get("objects", []) if isinstance(item, dict)]
+    raw_objects = [item for item in detected_objects if _has_metric_geometry(item)]
+    ignored_objects = [item for item in detected_objects if not _has_metric_geometry(item)]
+    if ignored_objects and isinstance(observation, dict):
+        observation["ignored_objects_without_metric_geometry"] = [
+            {
+                "detector_id": item.get("id", item.get("detector_id")),
+                "track_id": item.get("track_id"),
+                "label": item.get("label") or item.get("class_name"),
+                "reason": "missing_or_invalid_base_link_center_or_size",
+            }
+            for item in ignored_objects
+        ]
     detector_ids = [str(item.get("id", item.get("detector_id", ""))) for item in raw_objects]
     if len(detector_ids) != len(set(detector_ids)):
         raise ValueError("detector ids must be unique inside one scene_revision")
@@ -146,7 +158,12 @@ def _base_object(
     label = str(raw.get("label") or raw.get("class_name") or "unknown").strip()
     color = str(infer_object_color(dict(raw)) or "unknown")
     shape = str(infer_object_shape(dict(raw)))
-    yaw = raw.get("yaw_deg")
+    # Perception publishes the measured tabletop edge axis as table_yaw_deg.
+    # Do not silently replace it with zero: square blocks can have no unique
+    # long axis while their physical edges are still valid modulo 90 degrees.
+    yaw = raw.get("table_yaw_deg")
+    if yaw is None:
+        yaw = raw.get("yaw_deg")
     if yaw is None and raw.get("yaw_rad") is not None:
         yaw = math.degrees(float(raw["yaw_rad"]))
     return SceneObjectState(
@@ -159,7 +176,10 @@ def _base_object(
         center_xyz_m=center,
         size_xyz_m=size,
         yaw_deg=float(yaw or 0.0),
-        orientation_confidence=float(raw.get("orientation_confidence", 0.0)),
+        orientation_confidence=float(raw.get(
+            "orientation_confidence",
+            1.0 if raw.get("table_yaw_valid") else 0.5 if yaw is not None else 0.0,
+        )),
         already_completed=track_id in completed,
         protected=track_id in protected,
         currently_visible=True,
@@ -229,6 +249,15 @@ def _vector3(value: Any, name: str) -> tuple[float, float, float]:
     if not all(math.isfinite(item) for item in output):
         raise ValueError(f"object {name} must be finite")
     return output
+
+
+def _has_metric_geometry(raw: Mapping[str, Any]) -> bool:
+    try:
+        center = _vector3(raw.get("geometry_center_m") or raw.get("center_3d_base_m"), "center")
+        size = _vector3(raw.get("dimensions_m") or raw.get("size_xyz_m"), "size")
+    except (TypeError, ValueError):
+        return False
+    return all(value > 0.0 for value in size) and all(math.isfinite(value) for value in center)
 
 
 def _token(label: str, choices: Sequence[str], fallback: str) -> str:

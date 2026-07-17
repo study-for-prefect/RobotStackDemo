@@ -78,6 +78,11 @@ def parse_args():
             "currently measured tool0 orientation throughout the translation."
         ),
     )
+    parser.add_argument(
+        "--hover-disable-orientation-settle",
+        action="store_true",
+        help="Do not run a separate in-place full-pose correction after hover motion.",
+    )
     parser.add_argument("--step", type=int, default=1, help="Plan one step number. Ignored by --all-approaches.")
     parser.add_argument("--all-approaches", action="store_true", help="Plan all steps that have approach_position_m.")
     parser.add_argument(
@@ -279,6 +284,11 @@ def parse_args():
         type=float,
         default=0.03,
         help="Skip ready-pose planning when every joint is already within this many radians.",
+    )
+    parser.add_argument(
+        "--ready-stage-wrist-3",
+        action="store_true",
+        help="At a known safe retreat pose, split a large wrist_3 return before the ready motion.",
     )
     parser.add_argument("--enable-gripper", action="store_true", help="Enable DH PGC gripper actions in --path-mode full.")
     parser.add_argument("--gripper-port", default="/dev/ttyUSB0")

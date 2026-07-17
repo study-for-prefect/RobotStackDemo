@@ -57,6 +57,7 @@ def load_stack_demo_config(
     _require_sections(planner)
     _validate_planner_values(planner)
     _validate_organize_layout(planner, workspace, organize_layout, default_initial_clutter)
+    _validate_house_staging(planner, workspace)
     return StackDemoConfig(
         planner,
         workspace,
@@ -110,8 +111,10 @@ def _validate_planner_values(planner: Mapping[str, Any]) -> None:
         )
     if float(grasp["minimum_continuous_safe_yaw_span_deg"]) < 10.0:
         raise ValueError("minimum continuous safe grasp yaw span must be at least 10 degrees")
-    if abs(float(safety["release_height_extra_m"]) - 0.010) > 1e-9:
-        raise ValueError("verified organize release safety gap must remain 10 mm")
+    if abs(float(safety["ordinary_release_height_extra_m"])) > 1e-9:
+        raise ValueError("ordinary placement must release at the table-contact center height")
+    if abs(float(safety["special_shape_release_height_extra_m"]) - 0.010) > 1e-9:
+        raise ValueError("special-shape placement safety gap must remain 10 mm")
     motion = planner["motion"]
     if float(motion["near_object_velocity"]) >= float(motion["high_clearance_rotation_velocity"]):
         raise ValueError("near-object velocity must remain below high-clearance rotation velocity")
@@ -119,6 +122,8 @@ def _validate_planner_values(planner: Mapping[str, Any]) -> None:
         raise ValueError("motion.max_wrist_3_start_goal_delta_rad must remain 1.75")
     if int(planner["policy"].get("max_consecutive_reobserve", 0)) < 1:
         raise ValueError("policy.max_consecutive_reobserve must be at least one")
+    if abs(float(planner["house"]["support_inner_gap_m"]) - 0.015) > 1e-9:
+        raise ValueError("house.support_inner_gap_m must remain 0.015")
 
 
 def _validate_organize_layout(
@@ -134,11 +139,63 @@ def _validate_organize_layout(
         ):
             raise ValueError(f"{bounds_name} bounds must remain inside the configured workspace")
     colors = tuple(str(value) for value in planner["organize"]["colors"])
-    width = float(planner["organize"]["target_region_width_y_m"])
+    size = float(planner["organize"]["target_region_size_m"])
+    available_x = float(layout["xmax"]) - float(layout["xmin"])
     available_y = float(layout["ymax"]) - float(layout["ymin"])
-    if len(colors) < 2 or width <= 0.0 or available_y <= len(colors) * width:
-        raise ValueError("organize layout must fit fixed-width color regions with positive channels")
-    x_overlap = min(layout["xmax"], initial_clutter["xmax"]) > max(layout["xmin"], initial_clutter["xmin"])
-    y_overlap = min(layout["ymax"], initial_clutter["ymax"]) > max(layout["ymin"], initial_clutter["ymin"])
-    if x_overlap and y_overlap:
-        raise ValueError("organize target layout must not overlap the default initial clutter bounds")
+    quadrants = planner["organize"].get("quadrant_by_color")
+    required = {
+        "image_top_left", "image_bottom_left",
+        "image_top_right", "image_bottom_right",
+    }
+    if (
+        len(colors) != 4 or size <= 0.0
+        or available_x <= 2.0 * size or available_y <= 2.0 * size
+        or not isinstance(quadrants, Mapping)
+        or {str(quadrants.get(color)) for color in colors} != required
+    ):
+        raise ValueError(
+            "organize layout must fit four square image quadrants with positive x/y channels"
+        )
+    # The calibrated 640x480 view cannot contain two 80 mm image columns only
+    # on the far side of the default clutter bounds.  Physical slot generation
+    # checks current objects, so a target anchor overlapping live clutter is
+    # simply unavailable rather than treating the whole square as forbidden.
+
+
+def _validate_house_staging(
+    planner: Mapping[str, Any],
+    workspace: Mapping[str, float],
+) -> None:
+    """Require several calibrated, camera-visible fallback staging centers."""
+    house = planner["house"]
+    camera_bounds = _bounds(
+        house.get("orientation_staging_camera_bounds_base_m"), include_z=False,
+    )
+    if not (
+        workspace["xmin"] <= camera_bounds["xmin"] < camera_bounds["xmax"] <= workspace["xmax"]
+        and workspace["ymin"] <= camera_bounds["ymin"] < camera_bounds["ymax"] <= workspace["ymax"]
+    ):
+        raise ValueError("house orientation staging camera bounds must remain in workspace")
+    candidates = house.get("orientation_staging_candidates_base_m")
+    if not isinstance(candidates, list) or len(candidates) < 4:
+        raise ValueError(
+            "house.orientation_staging_candidates_base_m must contain at least four points"
+        )
+    inset = float(planner["safety"]["workspace_inset_m"])
+    seen: set[tuple[float, float]] = set()
+    for value in candidates:
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            raise ValueError("each house orientation staging point must contain x and y")
+        point = (float(value[0]), float(value[1]))
+        if point in seen:
+            raise ValueError("house orientation staging points must be unique")
+        seen.add(point)
+        if not (
+            workspace["xmin"] + inset <= point[0] <= workspace["xmax"] - inset
+            and workspace["ymin"] + inset <= point[1] <= workspace["ymax"] - inset
+            and camera_bounds["xmin"] <= point[0] <= camera_bounds["xmax"]
+            and camera_bounds["ymin"] <= point[1] <= camera_bounds["ymax"]
+        ):
+            raise ValueError(
+                "house orientation staging point must remain in the inset workspace and camera view"
+            )

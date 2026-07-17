@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
 from ..common.action_edges import ActionType, PhysicalActionEdge
@@ -150,7 +150,38 @@ class ClutterExtractionPlanner:
             logger.ensure_planning_artifacts(edge_result.decision_source)
             return PlanningCycleResult(target_result.selected, None, target_result, edge_result, None, edge_result.decision_source, True)
 
-        gate = self._final_safety_gate.validate(edge_result.selected, scene, task_precondition)
+        selected_by_policy = edge_result.selected
+        gate_attempts = []
+        gate = None
+        for rank, candidate in enumerate(
+            _final_gate_candidates(edge_result, selected_edges), start=1,
+        ):
+            candidate_gate = self._final_safety_gate.validate(
+                candidate, scene, task_precondition,
+            )
+            gate_attempts.append({"attempt_rank": rank, **candidate_gate.to_dict()})
+            gate = candidate_gate
+            if not candidate_gate.passed:
+                continue
+            if candidate.candidate_id != selected_by_policy.candidate_id:
+                qwen_backup = candidate.candidate_id in edge_result.backup_candidate_ids
+                edge_result = replace(
+                    edge_result,
+                    selected=candidate,
+                    decision_source=(
+                        "qwen_backup_after_final_gate_failure"
+                        if qwen_backup else "code_equivalent_staging_fallback"
+                    ),
+                    reason_codes=tuple((*edge_result.reason_codes, (
+                        "qwen_declared_backup_passed_final_gate"
+                        if qwen_backup else "equivalent_staging_point_passed_final_gate"
+                    ))),
+                )
+                logger.write("selected_edge.json", _edge_log(edge_result))
+            break
+        if gate is None:
+            raise RuntimeError("selected edge produced no final safety gate attempt")
+        logger.write("final_safety_gate_attempts.json", gate_attempts)
         logger.write("final_safety_gate.json", gate.to_dict())
         logger.ensure_planning_artifacts("not_applicable")
         if not gate.passed:
@@ -229,6 +260,53 @@ class ClutterExtractionPlanner:
 
 def _is_direct_grasp(edge: PhysicalActionEdge) -> bool:
     return edge.action_type in {ActionType.PICK_PLACE, ActionType.EXTRACT_THEN_PLACE}
+
+
+def _final_gate_candidates(
+    edge_result: EdgeSelectionOutcome,
+    selected_edges: Sequence[PhysicalActionEdge],
+) -> tuple[PhysicalActionEdge, ...]:
+    """Try policy backups, then code-equivalent staging points, without mutation."""
+    selected = edge_result.selected
+    if selected is None:
+        return ()
+    by_id = {edge.candidate_id: edge for edge in selected_edges}
+    ordered = [selected]
+    ordered.extend(
+        by_id[candidate_id]
+        for candidate_id in edge_result.backup_candidate_ids
+        if candidate_id in by_id and candidate_id != selected.candidate_id
+    )
+    if selected.action_type in {
+        ActionType.EXTRACT_TO_STAGING,
+        ActionType.REGRASP_FOR_ORIENTATION,
+    }:
+        ordered.extend(
+            edge for edge in selected_edges
+            if _equivalent_staging_effect(selected, edge)
+        )
+    unique = []
+    seen = set()
+    for edge in ordered:
+        if edge.candidate_id in seen:
+            continue
+        seen.add(edge.candidate_id)
+        unique.append(edge)
+    return tuple(unique)
+
+
+def _equivalent_staging_effect(
+    selected: PhysicalActionEdge,
+    candidate: PhysicalActionEdge,
+) -> bool:
+    return bool(
+        candidate.action_type == selected.action_type
+        and candidate.primary_target_track_id == selected.primary_target_track_id
+        and candidate.acted_object_track_id == selected.acted_object_track_id
+        and candidate.task_role == selected.task_role
+        and candidate.target_region_id == selected.target_region_id
+        and candidate.expected_effects == selected.expected_effects
+    )
 
 
 def _target_log(result: TargetSelectionOutcome) -> dict[str, Any]:

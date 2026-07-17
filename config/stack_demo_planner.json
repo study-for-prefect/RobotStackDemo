@@ -19,7 +19,8 @@
     "workspace_inset_m": 0.010,
     "grasp_center_tolerance_m": 0.006,
     "minimum_contact_length_m": 0.008,
-    "release_height_extra_m": 0.010,
+    "ordinary_release_height_extra_m": 0.000,
+    "special_shape_release_height_extra_m": 0.010,
     "approach_height_m": 0.050,
     "observation_height_m": 0.100,
     "minimum_progress_translation_m": 0.015
@@ -61,7 +62,13 @@
   },
   "organize": {
     "colors": ["red", "green", "blue", "yellow"],
-    "target_region_width_y_m": 0.035,
+    "target_region_size_m": 0.080,
+    "quadrant_by_color": {
+      "red": "image_top_left",
+      "green": "image_bottom_left",
+      "blue": "image_top_right",
+      "yellow": "image_bottom_right"
+    },
     "minimum_spacing_m": 0.015,
     "alignment_tolerance_m": 0.012,
     "observation_region_tolerance_m": 0.003
@@ -71,7 +78,21 @@
     "roof_classes": ["concave_rectangle", "rectangle"],
     "triangle_classes": ["triangle"],
     "origin_center_base_m": [0.360, 0.180, 0.020],
-    "left_right_spacing_m": 0.100,
+    "orientation_staging_camera_bounds_base_m": {
+      "xmin": 0.245,
+      "xmax": 0.450,
+      "ymin": 0.030,
+      "ymax": 0.330
+    },
+    "orientation_staging_candidates_base_m": [
+      [0.400, 0.080],
+      [0.400, 0.280],
+      [0.300, 0.080],
+      [0.300, 0.280],
+      [0.400, 0.180],
+      [0.300, 0.180]
+    ],
+    "support_inner_gap_m": 0.015,
     "support_height_tolerance_m": 0.008,
     "center_tolerance_m": 0.010,
     "minimum_support_margin_m": 0.006,

@@ -26,14 +26,22 @@ from tests.new_arch_fixtures import config, placement, raw_object, scene
 
 
 class ColorRegionTests(unittest.TestCase):
-    def test_color_regions_have_fixed_width_and_clearing_channels(self):
+    def test_color_regions_are_four_square_quadrants_with_clearing_channels(self):
         current = scene([raw_object(1, "green", [0.35, 0.12, 0.02], color="green")])
         regions = build_color_target_regions(current, config(), {"green": "green"})
-        ordered = [regions[color]["bounds_base_m"] for color in ("red", "green", "blue", "yellow")]
-        for bounds in ordered:
-            self.assertAlmostEqual(bounds["ymax"] - bounds["ymin"], 0.035)
-        for first, second in zip(ordered, ordered[1:]):
-            self.assertAlmostEqual(second["ymin"] - first["ymax"], 0.010)
+        self.assertEqual(
+            {color: region["image_quadrant"] for color, region in regions.items()},
+            {
+                "red": "image_top_left", "green": "image_bottom_left",
+                "blue": "image_top_right", "yellow": "image_bottom_right",
+            },
+        )
+        for region in regions.values():
+            bounds = region["bounds_base_m"]
+            self.assertAlmostEqual(bounds["xmax"] - bounds["xmin"], 0.080)
+            self.assertAlmostEqual(bounds["ymax"] - bounds["ymin"], 0.080)
+            self.assertAlmostEqual(region["clearance_channel_width_x_m"], 0.040)
+            self.assertAlmostEqual(region["clearance_channel_width_y_m"], 0.050)
 
     def test_default_clutter_is_not_completed_by_old_large_region(self):
         current = scene([
@@ -52,7 +60,7 @@ class ColorRegionTests(unittest.TestCase):
 
     def test_completed_organize_tracks_become_actual_protected_objects(self):
         current = scene([
-            raw_object(1, "red", [0.30, 0.2475, 0.02], color="red", size=[0.02, 0.02, 0.04]),
+            raw_object(1, "red", [0.41, 0.27, 0.02], color="red", size=[0.02, 0.02, 0.04]),
         ])
         state = build_organize_task_state(current, config())
         marked = _apply_task_marks(current, state.completed_tracks, state.completed_tracks, ())

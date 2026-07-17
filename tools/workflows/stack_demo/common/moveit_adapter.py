@@ -100,7 +100,14 @@ class MoveItEdgeAdapter:
                 float(pose.get("yaw_deg", self._yaw(edge))),
                 execute=True,
                 orientation_policy=self._orientation_policy(edge),
-                preserve_current_orientation=preserve_post_grasp_posture,
+                # Ordinary translations lock the measured roll/pitch/yaw.
+                # A distinct safe-height yaw waypoint deliberately invokes the
+                # wrist-only pre-rotate; roll and pitch remain downward-fixed.
+                preserve_current_orientation=(
+                    preserve_post_grasp_posture
+                    and isinstance(previous, Mapping)
+                    and self._same_axis_yaw(previous, pose)
+                ),
             )
             previous = pose
 
@@ -207,10 +214,20 @@ class MoveItEdgeAdapter:
             command.extend([
                 "--pre-rotate-before-translation",
                 "--pre-rotate-strategy", "pose" if full_3d else "joint-wrist3",
+                # On this UR3/GF225 installation, increasing wrist_3 produces
+                # decreasing base-frame tool yaw.  Auto cannot distinguish the
+                # two equally cheap joint plans before execution and has chosen
+                # the wrong sign in real runs (requested -25 deg, reached +30).
+                "--pre-rotate-wrist-yaw-sign", "negative",
                 "--pre-rotate-velocity", str(motion["high_clearance_rotation_velocity"]),
                 "--pre-rotate-acceleration", str(motion["high_clearance_rotation_acceleration"]),
                 "--safe-pre-rotate-height", str(motion["safe_pre_rotate_height_m"]),
             ])
+            if not full_3d:
+                # The safe-height wrist yaw stage already establishes the
+                # ordinary block orientation.  A second full-pose correction
+                # has produced remote IK branches for sub-degree residuals.
+                command.append("--hover-disable-orientation-settle")
         if execute:
             command.extend(["--execute", "--yes"])
         if execute:
@@ -292,3 +309,9 @@ class MoveItEdgeAdapter:
         second_yaw = float(second.get("yaw_deg", 0.0))
         same_axis_yaw = abs(((first_yaw - second_yaw + 90.0) % 180.0) - 90.0) <= 1e-6
         return bool(same_position and same_axis_yaw)
+
+    @staticmethod
+    def _same_axis_yaw(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
+        first_yaw = float(first.get("yaw_deg", 0.0))
+        second_yaw = float(second.get("yaw_deg", 0.0))
+        return abs(((first_yaw - second_yaw + 90.0) % 180.0) - 90.0) <= 1e-6

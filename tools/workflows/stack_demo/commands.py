@@ -20,6 +20,16 @@ from .perception_client import (
 from .workspace import attach_configured_workspace
 
 
+TRANSIENT_PERCEPTION_ERROR_CODES = frozenset({
+    "rgb_depth_not_synchronized",
+    "camera_not_ready",
+    "connection_timeout",
+    "connection_failed",
+})
+PERCEPTION_SNAPSHOT_ATTEMPTS = 3
+NON_ACTUATING_PLAN_TIMEOUT_S = 45.0
+
+
 def load_json(path: str) -> dict[str, Any]:
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
@@ -44,7 +54,11 @@ def assert_non_actuating_command(command: Sequence[str]) -> None:
 
 def run_non_actuating(command: Sequence[str]) -> None:
     assert_non_actuating_command(command)
-    run(command)
+    print("\n$ {}".format(" ".join(command)), flush=True)
+    subprocess.run(
+        list(command), cwd=PROJECT_ROOT, check=True,
+        timeout=NON_ACTUATING_PLAN_TIMEOUT_S,
+    )
 
 
 def plan_only_command(command: Sequence[str]) -> list[str]:
@@ -80,13 +94,15 @@ def moveit_frame_args(args: Any) -> list[str]:
     return ["--base-link", args.base_frame, "--end-effector", args.tool_frame]
 
 
-def pose_command(args: Any, pose_json: str) -> list[str]:
+def pose_command(args: Any, pose_json: str, *, stage_wrist_3: bool = False) -> list[str]:
     command = [
         args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--ready-only", "--ready-joint-pose-json", pose_json,
         "--velocity", str(args.velocity), "--acceleration", str(args.acceleration),
         *moveit_frame_args(args), "--tf-timeout", str(args.tf_timeout), "--execute",
     ]
+    if stage_wrist_3:
+        command.append("--ready-stage-wrist-3")
     if args.yes:
         command.append("--yes")
     return command
@@ -133,7 +149,7 @@ def return_to_ready_observation(args: Any) -> None:
         return
     if not args.ready_pose_json or not os.path.isfile(args.ready_pose_json):
         raise RuntimeError(f"ready pose JSON not found: {args.ready_pose_json}")
-    run(pose_command(args, args.ready_pose_json))
+    run(pose_command(args, args.ready_pose_json, stage_wrist_3=True))
     if args.init_stable_wait_s > 0:
         time.sleep(float(args.init_stable_wait_s))
 
@@ -186,9 +202,12 @@ def capture_scene_observation(
     try:
         health = perception_server_health(args)
         _write_json(os.path.join(output_dir, "perception_server_health.json"), health.to_dict())
-        response = perception_server_snapshot(
-            args, output_dir, capture_reason=capture_reason, scene_revision=scene_revision,
+        response, attempts = _perception_snapshot_with_retry(
+            args, output_dir,
+            capture_reason=capture_reason,
+            scene_revision=scene_revision,
         )
+        _write_json(os.path.join(output_dir, "perception_snapshot_attempts.json"), attempts)
         _write_json(os.path.join(output_dir, "perception_snapshot_response.json"), response)
         _write_json(os.path.join(output_dir, "perception_capture.json"), {"perception_source": "perception_server"})
         return
@@ -208,6 +227,39 @@ def capture_scene_observation(
     })
     run_non_actuating(tf_lookup_command(args))
     run_non_actuating(command)
+
+
+def _perception_snapshot_with_retry(
+    args: Any,
+    output_dir: str,
+    *,
+    capture_reason: str,
+    scene_revision: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Retry transient camera synchronization failures inside one observation."""
+    attempts: list[dict[str, Any]] = []
+    for attempt in range(1, PERCEPTION_SNAPSHOT_ATTEMPTS + 1):
+        try:
+            response = perception_server_snapshot(
+                args,
+                output_dir,
+                capture_reason=capture_reason,
+                scene_revision=scene_revision,
+            )
+            attempts.append({"attempt": attempt, "ok": True})
+            return response, attempts
+        except PerceptionServerError as exc:
+            retryable = exc.error_code in TRANSIENT_PERCEPTION_ERROR_CODES
+            attempts.append({
+                "attempt": attempt,
+                "ok": False,
+                "retryable": retryable,
+                **exc.to_dict(),
+            })
+            if not retryable or attempt >= PERCEPTION_SNAPSHOT_ATTEMPTS:
+                raise
+            time.sleep(0.25)
+    raise RuntimeError("perception snapshot retry loop ended unexpectedly")
 
 
 def snapshot_command(args: Any, output_dir: str) -> list[str]:

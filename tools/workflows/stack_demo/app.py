@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Mapping
@@ -135,7 +136,6 @@ def _run(
     organize_state: OrganizeTaskState | None = None
     house_state: HouseTaskState | None = None
     consecutive_reobserve = 0
-    previous_empty_signature: tuple[Any, ...] | None = None
     max_consecutive_reobserve = int(
         config.section("policy")["max_consecutive_reobserve"]
     )
@@ -171,12 +171,11 @@ def _run(
             cycle = HousePlanner(config, extraction).plan_cycle(scene, house_state, logger, image_paths=images)
         if cycle.selected_edge is None:
             logger.ensure_execution_artifacts(cycle.decision_source)
-            signature = _scene_geometry_signature(scene)
-            consecutive_reobserve = (
-                consecutive_reobserve + 1
-                if signature == previous_empty_signature else 1
-            )
-            previous_empty_signature = signature
+            # Every empty cycle below is followed by a fresh observation and
+            # full candidate regeneration in this same task.  Detector jitter
+            # changes geometry by millimetres, so revision/pose equality must
+            # not reset the bounded consecutive-empty retry counter.
+            consecutive_reobserve += 1
             logger.write("reobserve_attempt.json", {
                 "decision_source": cycle.decision_source,
                 "consecutive_unchanged_empty_scans": consecutive_reobserve,
@@ -197,7 +196,7 @@ def _run(
                 )
             if consecutive_reobserve >= max_consecutive_reobserve:
                 return 2
-            scene, raw = _reobserve_without_action(
+            scene, raw, expected_tracks = _reobserve_without_action(
                 args,
                 config,
                 output,
@@ -211,7 +210,6 @@ def _run(
             )
             continue
         consecutive_reobserve = 0
-        previous_empty_signature = None
         if not args.execute:
             logger.ensure_execution_artifacts("moveit_plan_only" if args.moveit_plan_only else "dry_run_no_motion")
             if integration is not None:
@@ -249,6 +247,7 @@ def _run(
         )
         entry = {
             "candidate_id": cycle.selected_edge.candidate_id,
+            "action_type": cycle.selected_edge.action_type.value,
             "primary_target_track_id": cycle.selected_edge.primary_target_track_id,
             "acted_object_track_id": cycle.selected_edge.acted_object_track_id,
             "task_role": cycle.selected_edge.task_role,
@@ -257,6 +256,18 @@ def _run(
             "success": result.success,
             "status": result.status,
             "scene_revision": result.final_scene.scene_revision,
+            "planned_place_position_m": list(
+                (cycle.selected_edge.physical_parameters.get("place_pose") or {}).get(
+                    "position_m", ()
+                )
+            ),
+            "acted_object_size_m": list(
+                scene.object_by_track(cycle.selected_edge.acted_object_track_id).size_xyz_m
+            ) if scene.object_by_track(cycle.selected_edge.acted_object_track_id) else [],
+            "release_executed": any(
+                stage.get("stage") == "release" and stage.get("status") == "executed"
+                for stage in result.stages
+            ),
         }
         action_history.append(entry)
         _log_execution(logger, result, action_history)
@@ -264,6 +275,7 @@ def _run(
             forbidden.add(cycle.selected_edge.failure_fingerprint)
         scene = result.final_scene
         raw = observer.latest_raw
+        expected_tracks = observer.expected_tracks
     return 2
 
 
@@ -278,7 +290,7 @@ def _reobserve_without_action(
     history: list[dict[str, Any]],
     forbidden: set[str],
     track_memory: dict[str, Any],
-) -> tuple[ClutterSceneState, dict[str, Any]]:
+) -> tuple[ClutterSceneState, dict[str, Any], tuple[str, ...]]:
     """Capture and rebuild a fresh scene after an empty/invalid planning cycle."""
     if args.offline_scene_state:
         raw = load_json(args.offline_scene_state)
@@ -297,14 +309,15 @@ def _reobserve_without_action(
             raise RuntimeError("fresh reobserve did not produce a scene")
         raw["scene_revision"] = before.scene_revision + 1
         _bind_observation_tracks(raw, track_memory)
+    merged_expected = _merge_expected_tracks(expected_tracks, raw, track_memory)
     scene = build_clutter_scene_state(
         raw,
         config.workspace,
-        expected_tracks=expected_tracks,
+        expected_tracks=merged_expected,
         recent_action_results=history[-5:],
         forbidden_action_fingerprints=forbidden,
     )
-    return scene, raw
+    return scene, raw, merged_expected
 
 
 def _scene_geometry_signature(scene: ClutterSceneState) -> tuple[Any, ...]:
@@ -424,6 +437,9 @@ class _LiveObserver(SceneObserver):
                 self._selected_edge, reason, self._track_memory,
             ),
         )
+        self._expected = _merge_expected_tracks(
+            self._expected, raw, self._track_memory,
+        )
         self.latest_raw = raw
         return build_clutter_scene_state(
             raw, self._config.workspace,
@@ -431,6 +447,10 @@ class _LiveObserver(SceneObserver):
             recent_action_results=self._history[-5:],
             forbidden_action_fingerprints=self._forbidden,
         )
+
+    @property
+    def expected_tracks(self) -> tuple[str, ...]:
+        return self._expected
 
     def mark_held(self, edge, verification) -> None:
         evidence = verification.evidence
@@ -557,7 +577,101 @@ def _bind_observation_tracks(
         predicted_displacements=dict(predicted_displacements or {}),
         predicted_centers=dict(predicted_centers or {}),
     )
+    raw["objects"] = objects
     raw["track_rebinding_results"] = {
         "source": "explicit_one_to_one_rebinding",
         "assignments": assignments,
     }
+
+
+def _merge_expected_tracks(
+    expected_tracks: tuple[str, ...],
+    raw: Mapping[str, Any],
+    memory: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Add stable new tracks and replace stale IDs rebound to the same object."""
+    merged = set(expected_tracks)
+    tracks = memory.get("tracks", {}) if isinstance(memory, Mapping) else {}
+    stable_visible: dict[str, Mapping[str, Any]] = {}
+    for item in raw.get("objects", ()):
+        if not isinstance(item, Mapping):
+            continue
+        track_id = str(item.get("track_id") or "")
+        track = tracks.get(track_id, {}) if isinstance(tracks, Mapping) else {}
+        history = track.get("history", ()) if isinstance(track, Mapping) else ()
+        if track_id and len(history) >= 2:
+            merged.add(track_id)
+            stable_visible[track_id] = track
+
+    # A full-scene observation after a wrist-camera occlusion can create a new
+    # track ID for an existing block. Rotation may also change the detector's
+    # shape label, so use color, metric size, and a tight position gate for the
+    # identity handoff. Ambiguous matches remain unresolved.
+    visible_ids = {
+        str(item.get("track_id"))
+        for item in raw.get("objects", ())
+        if isinstance(item, Mapping) and item.get("track_id")
+    }
+    replacement_candidates: list[tuple[float, str, str]] = []
+    for stale_id in sorted(merged - visible_ids):
+        stale = tracks.get(stale_id, {}) if isinstance(tracks, Mapping) else {}
+        stale_center = stale.get("center_base_m") if isinstance(stale, Mapping) else None
+        stale_size = stale.get("dimensions_m") if isinstance(stale, Mapping) else None
+        stale_color = str(stale.get("color") or "unknown") if isinstance(stale, Mapping) else "unknown"
+        if not _finite_xyz(stale_center):
+            continue
+        matches: list[tuple[float, str]] = []
+        for current_id, current in stable_visible.items():
+            if current_id == stale_id:
+                continue
+            current_color = str(current.get("color") or "unknown")
+            if stale_color == "unknown" or current_color != stale_color:
+                continue
+            current_center = current.get("center_base_m")
+            if not _finite_xyz(current_center):
+                continue
+            distance = math.dist(
+                [float(value) for value in stale_center[:3]],
+                [float(value) for value in current_center[:3]],
+            )
+            if distance > 0.012:
+                continue
+            current_size = current.get("dimensions_m")
+            if _finite_xyz(stale_size) and _finite_xyz(current_size):
+                size_delta = sum(
+                    abs(float(stale_size[index]) - float(current_size[index]))
+                    for index in range(3)
+                )
+                if size_delta > 0.020:
+                    continue
+            matches.append((distance, current_id))
+        if len(matches) == 1:
+            replacement_candidates.append((matches[0][0], stale_id, matches[0][1]))
+
+    used_current: set[str] = set()
+    replacements: dict[str, str] = {}
+    for _distance, stale_id, current_id in sorted(replacement_candidates):
+        if current_id in used_current:
+            continue
+        merged.discard(stale_id)
+        merged.add(current_id)
+        used_current.add(current_id)
+        replacements[stale_id] = current_id
+    if replacements and isinstance(memory, dict):
+        memory.setdefault("track_aliases", {}).update(replacements)
+        for stale_id, current_id in replacements.items():
+            stale = memory.get("tracks", {}).get(stale_id)
+            if isinstance(stale, dict):
+                stale["superseded_by_track_id"] = current_id
+    if replacements and isinstance(raw, dict):
+        raw["expected_track_replacements"] = dict(sorted(replacements.items()))
+    return tuple(sorted(merged))
+
+
+def _finite_xyz(value: Any) -> bool:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return False
+    try:
+        return all(math.isfinite(float(value[index])) for index in range(3))
+    except (TypeError, ValueError):
+        return False

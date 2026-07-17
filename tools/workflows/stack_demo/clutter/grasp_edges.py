@@ -146,16 +146,30 @@ def _default_geometry_check(
     safety = config.section("safety")
     target_raw = _geometry_object(target)
     raw_objects = [_geometry_object(obj) for obj in objects]
+    closing_extent, contact_length = _target_contact_geometry(target, yaw_deg)
+    # ``evaluate_grasp_yaw`` models the fingertip footprint as the target's
+    # projected half-length plus an axial overhang.  That overhang is bounded
+    # by the real 25 mm GF225 fingertip, rather than being a fixed 20 mm added
+    # beyond every target.  The old fixed addition made the modeled fingertip
+    # roughly 60 mm long around a 20--25 mm block and rejected otherwise safe
+    # top-down grasps next to another block.
+    physical_fingertip_overhang = max(
+        0.0,
+        0.5 * (float(gripper["fingertip_width_m"]) - contact_length),
+    )
+    axial_overhang = min(
+        float(config.section("grasp")["approach_envelope_length_m"]),
+        physical_fingertip_overhang,
+    )
     fingers = evaluate_grasp_yaw(
         target_raw,
         raw_objects,
         yaw_deg,
         gripper_outer_width_m=float(gripper["open_outer_width_m"]),
         gripper_inner_width_m=float(gripper["open_inner_width_m"]),
-        approach_length_m=float(config.section("grasp")["approach_envelope_length_m"]),
+        approach_length_m=axial_overhang,
         side_clearance_m=float(safety["object_clearance_m"]),
     )
-    closing_extent, contact_length = _target_contact_geometry(target, yaw_deg)
     center_offset = float(target.source.get("grasp_center_offset_m", 0.0))
     palm_blockers = _palm_blockers(target, objects, yaw_deg, config)
     finger_blockers = tuple(
@@ -176,6 +190,7 @@ def _default_geometry_check(
         "closing_extent_m": round(closing_extent, 6),
         "grasp_center_offset_m": round(center_offset, 6),
         "effective_contact_length_m": round(contact_length, 6),
+        "fingertip_axial_overhang_m": round(axial_overhang, 6),
         "fingertip_clearance_m": float(fingers.get("clearance_m", 0.0)),
         "palm_clearance_m": 0.0 if palm_blockers else float(safety["object_clearance_m"]),
         "vertical_lift_clearance_m": 0.0 if blockers else float(safety["observation_height_m"]),

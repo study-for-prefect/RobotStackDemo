@@ -49,11 +49,14 @@ def mark_track_after_place(
     place_pose = edge.physical_parameters.get("place_pose") or {}
     position = place_pose.get("position_m") if isinstance(place_pose, Mapping) else None
     track.update({
-        "manipulation_state": "placed" if success else "unresolved",
+        "manipulation_state": "placed" if success else "placed_unverified",
         "placed_scene_revision": int(scene_revision),
         "held_state_confidence": 0.0,
     })
-    if success and isinstance(position, (list, tuple)) and len(position) >= 3:
+    # This callback runs only after the release stage.  A camera miss must not
+    # discard the physical destination anchor, otherwise the next observation
+    # creates a new ID for the object that was just released.
+    if isinstance(position, (list, tuple)) and len(position) >= 3:
         track["center_base_m"] = [float(value) for value in position[:3]]
     track.setdefault("history", []).append({
         "scene_revision": int(scene_revision),
