@@ -49,8 +49,8 @@ def house_placement_target(
                 scene, obj, role, config, interval=interval,
             ) or None
         return None
-    aligned = _edge_aligned_grasp(scene, obj, interval, config)
-    if aligned is None:
+    aligned_grasps = _edge_aligned_grasps(scene, obj, interval, config)
+    if not aligned_grasps:
         staging_targets = staging_orientation_targets(
             scene, obj, role, config, interval=interval,
         )
@@ -73,20 +73,25 @@ def house_placement_target(
         )
     if state.current_repair_state and role in state.current_repair_state.get("repair_required_roles", []):
         action_type = ActionType.REPAIR_STRUCTURE
-    return PlacementTarget(
-        action_type=action_type,
-        target_region_id=None,
-        task_role=role,
-        place_pose=pose,
-        task_progress_gain=1.0,
-        expected_effects=(f"complete_house_role:{role}", "protect_completed_structure"),
-        precheck_results=checks,
-        additional_physical_parameters={
-            "required_grasp_yaw_deg": aligned["yaw_deg"],
-            "required_grasp_checks": aligned["checks"],
-            "edge_aligned_final_grasp_required": True,
-            "edge_alignment_error_deg": aligned["edge_alignment_error_deg"],
-        },
+    return tuple(
+        PlacementTarget(
+            action_type=action_type,
+            target_region_id=None,
+            task_role=role,
+            place_pose=pose,
+            task_progress_gain=1.0,
+            expected_effects=(f"complete_house_role:{role}", "protect_completed_structure"),
+            precheck_results=checks,
+            additional_physical_parameters={
+                "required_grasp_yaw_deg": aligned["yaw_deg"],
+                "required_grasp_checks": aligned["checks"],
+                "edge_aligned_final_grasp_required": True,
+                "edge_alignment_error_deg": aligned["edge_alignment_error_deg"],
+                "edge_aligned_grasp_option_index": option_index,
+                "edge_aligned_grasp_option_count": len(aligned_grasps),
+            },
+        )
+        for option_index, aligned in enumerate(aligned_grasps, start=1)
     )
 
 
@@ -143,6 +148,12 @@ def staging_orientation_targets(
         interval.selected_yaw_deg if interval is not None else obj.yaw_deg
     )
     safe_poses = _safe_staging_poses(scene, obj, release_yaw, config)
+    roof_blocker_staging = (
+        role == "blocker"
+        and obj.shape in set(config.section("house")["roof_classes"])
+    )
+    if roof_blocker_staging:
+        safe_poses = _far_house_staging_poses(safe_poses, config)
     targets = []
     for candidate_index, (staging_pose, staging_checks, clearance) in enumerate(
         safe_poses, start=1,
@@ -157,11 +168,18 @@ def staging_orientation_targets(
         if role not in {"roof", "triangle_top"}:
             targets.append(PlacementTarget(
                 action_type=ActionType.EXTRACT_TO_STAGING,
-                target_region_id="house_blocker_staging",
+                target_region_id=(
+                    "house_roof_far_staging"
+                    if roof_blocker_staging else "house_blocker_staging"
+                ),
                 task_role=role,
                 place_pose=staging_pose,
                 task_progress_gain=0.0,
-                expected_effects=("remove_blocker_to_staging", "require_fresh_observation"),
+                expected_effects=(
+                    "remove_blocker_to_far_staging"
+                    if roof_blocker_staging else "remove_blocker_to_staging",
+                    "require_fresh_observation",
+                ),
                 precheck_results=staging_checks,
                 additional_physical_parameters=common_parameters,
             ))
@@ -188,6 +206,24 @@ def staging_orientation_targets(
     return tuple(targets)
 
 
+def _far_house_staging_poses(
+    safe_poses: tuple[tuple[dict[str, Any], dict[str, Any], float], ...],
+    config: StackDemoConfig,
+) -> tuple[tuple[dict[str, Any], dict[str, Any], float], ...]:
+    """Keep roof-clearing staging away from the unfinished house footprint."""
+    house = config.section("house")
+    origin_x, origin_y = (float(value) for value in house["origin_center_base_m"][:2])
+    minimum_distance = float(house["roof_blocker_staging_min_house_distance_m"])
+
+    def distance(item: tuple[dict[str, Any], dict[str, Any], float]) -> float:
+        position = item[0]["position_m"]
+        return math.hypot(float(position[0]) - origin_x, float(position[1]) - origin_y)
+
+    far = tuple(item for item in safe_poses if distance(item) >= minimum_distance)
+    eligible = far or tuple(sorted(safe_poses, key=lambda item: -distance(item))[:1])
+    return tuple(sorted(eligible, key=lambda item: -distance(item)))
+
+
 def _safe_staging_poses(
     scene: ClutterSceneState | None,
     obj: SceneObjectState,
@@ -198,7 +234,10 @@ def _safe_staging_poses(
     safety = config.section("safety")
     candidates = house["orientation_staging_candidates_base_m"]
     obstacles = tuple(
-        item for item in (scene.current_objects if scene is not None else ())
+        item for item in (
+            (*scene.current_objects, *scene.collision_obstacles)
+            if scene is not None else ()
+        )
         if item.track_id != obj.track_id
     )
     table_z = (
@@ -408,7 +447,7 @@ def _role_pose(
     z = origin_z
     if role.endswith("_upper"):
         lower_role = role.replace("upper", "lower")
-        lower = scene.object_by_track(state.role_bindings.get(lower_role, ""))
+        lower = _scene_object(scene, state.role_bindings.get(lower_role, ""))
         if lower is None:
             raise ValueError(f"missing verified lower support for {role}")
         x, origin_y = lower.center_xyz_m[:2]
@@ -418,7 +457,7 @@ def _role_pose(
             "right_support_lower" if role.startswith("left_")
             else "left_support_lower"
         )
-        opposite = scene.object_by_track(state.role_bindings.get(opposite_role, ""))
+        opposite = _scene_object(scene, state.role_bindings.get(opposite_role, ""))
         if opposite is not None:
             center_spacing = (
                 0.5 * (float(obj.size_xyz_m[0]) + float(opposite.size_xyz_m[0]))
@@ -429,30 +468,45 @@ def _role_pose(
             )
             origin_y = opposite.center_xyz_m[1]
     elif role == "roof":
-        supports = [scene.object_by_track(state.role_bindings.get(name, "")) for name in ("left_support_upper", "right_support_upper")]
+        supports = [
+            _scene_object(scene, state.role_bindings.get(name, ""))
+            for name in ("left_support_upper", "right_support_upper")
+        ]
         if any(item is None for item in supports):
             raise ValueError("roof requires both verified upper supports")
         x = 0.5 * (supports[0].center_xyz_m[0] + supports[1].center_xyz_m[0])
         origin_y = 0.5 * (supports[0].center_xyz_m[1] + supports[1].center_xyz_m[1])
         z = max(item.center_xyz_m[2] + 0.5 * item.size_xyz_m[2] for item in supports) + 0.5 * obj.size_xyz_m[2]
     elif role == "triangle_top":
-        roof = scene.object_by_track(state.role_bindings.get("roof", ""))
+        roof = _scene_object(scene, state.role_bindings.get("roof", ""))
         if roof is None:
             raise ValueError("triangle_top requires a verified roof")
         x, origin_y = roof.center_xyz_m[:2]
         z = roof.center_xyz_m[2] + 0.5 * (roof.size_xyz_m[2] + obj.size_xyz_m[2])
+    z += float(house.get("final_place_z_offset_m", 0.0))
     return {"frame_id": "base_link", "position_m": [x, origin_y, z], "yaw_deg": 0.0}
 
 
-def _edge_aligned_grasp(
+def _scene_object(
+    scene: ClutterSceneState,
+    track_id: str,
+) -> SceneObjectState | None:
+    """Resolve a verified role from the live frame or remembered collision state."""
+    return scene.object_by_track(track_id) or next(
+        (obj for obj in scene.collision_obstacles if obj.track_id == track_id),
+        None,
+    )
+
+
+def _edge_aligned_grasps(
     scene: ClutterSceneState,
     obj: SceneObjectState,
     interval: GraspInterval | None,
     config: StackDemoConfig,
-) -> dict[str, Any] | None:
-    """Select a collision-free grasp parallel to one measured object edge."""
+) -> tuple[dict[str, Any], ...]:
+    """Return both collision-free edge grasps for destination evaluation."""
     if interval is None:
-        return None
+        return ()
     edge_axis = float(obj.yaw_deg)
     candidates = (
         normalize_gripper_yaw_deg(edge_axis),
@@ -471,16 +525,16 @@ def _edge_aligned_grasp(
             continue
         delta = abs((yaw - float(interval.selected_yaw_deg) + 90.0) % 180.0 - 90.0)
         feasible.append((delta, yaw, checks))
-    if not feasible:
-        return None
-    delta, yaw, checks = min(feasible, key=lambda item: (item[0], abs(item[1])))
-    edge_error = min(
-        abs((yaw - axis + 90.0) % 180.0 - 90.0)
-        for axis in candidates
-    )
-    return {
-        "yaw_deg": yaw,
-        "checks": checks,
-        "edge_alignment_error_deg": edge_error,
-        "selected_interval_delta_deg": delta,
-    }
+    output = []
+    for delta, yaw, checks in sorted(feasible, key=lambda item: (item[0], abs(item[1]))):
+        edge_error = min(
+            abs((yaw - axis + 90.0) % 180.0 - 90.0)
+            for axis in candidates
+        )
+        output.append({
+            "yaw_deg": yaw,
+            "checks": checks,
+            "edge_alignment_error_deg": edge_error,
+            "selected_interval_delta_deg": delta,
+        })
+    return tuple(output)

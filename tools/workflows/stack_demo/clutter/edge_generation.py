@@ -80,8 +80,9 @@ def generate_physical_edges(
     checker = plan_checker or geometry_dry_run_plan_checker
     specs = tuple(target_specs or (TargetSpec(track_id, track_id) for track_id in target_track_ids))
     physical_tracks = tuple(dict.fromkeys(spec.track_id for spec in specs))
+    collision_scene = (*scene.current_objects, *scene.collision_obstacles)
     scans = {
-        track_id: scan_grasp_yaws(obj, scene.current_objects, config)
+        track_id: scan_grasp_yaws(obj, collision_scene, config)
         for track_id in physical_tracks
         if (obj := scene.object_by_track(track_id)) is not None
     }
@@ -129,7 +130,16 @@ def generate_physical_edges(
                 audit=audit,
             ))
         elif not any(edge.precheck_results.get("passed") for edge in direct_edges):
-            if scan.safe_intervals:
+            direct_failure_blockers = _direct_failure_blockers(direct_edges)
+            # When the requested final placement has a concrete live-scene
+            # blocker, moving the target itself to staging cannot improve that
+            # failure.  Offering both choices let the policy shuttle the same
+            # target between staging points indefinitely while the blocker
+            # remained at the house pose.  In that case expose only blocker
+            # clearing actions.  Staging remains the fallback for failures
+            # without an identified physical blocker (for example an
+            # edge-alignment regrasp or a bare planning failure).
+            if scan.safe_intervals and not direct_failure_blockers:
                 staging = staging_provider(target)
                 if _placement_targets(staging):
                     edges.extend(_staging_edges(
@@ -137,12 +147,12 @@ def generate_physical_edges(
                         task_role=spec.task_role,
                         candidate_suffix=_candidate_suffix(spec.option_key, spec.track_id),
                     ))
-            direct_failure_blockers = _direct_failure_blockers(direct_edges)
             edges.extend(_clearance_edges(
                 scene, target, scan, scans, task_type, config, staging_provider, checker,
                 task_role=spec.task_role,
                 candidate_suffix=_candidate_suffix(spec.option_key, spec.track_id),
                 additional_blocker_track_ids=direct_failure_blockers,
+                failed_direct_edges=direct_edges,
             ))
         output[spec.option_key] = tuple(edge for edge in edges if edge.precheck_results.get("passed"))
     return EdgeGenerationResult(edges_by_target=output, grasp_scans=scans, audit=audit)
@@ -212,7 +222,21 @@ def _direct_edges(
                     "placement_option_count": len(placements),
                 },
             )
-            edges.append(_with_plan_check(edge, checker))
+            checked = _with_plan_check(edge, checker)
+            edges.append(checked)
+            if (
+                task_type == "build_house"
+                and placement.action_type in {
+                    ActionType.PLACE_HOUSE_ROLE, ActionType.REPAIR_STRUCTURE,
+                }
+                and bool(checked.precheck_results.get("passed"))
+            ):
+                # Edge-aligned house placements are ordered by required grasp
+                # change.  Once one direct final placement passes geometry and
+                # MoveIt, further 90-degree-equivalent grasps add planning cost
+                # but no task value.  A rejected first orientation still falls
+                # through to the orthogonal alternative.
+                return edges
     return edges
 
 
@@ -237,6 +261,7 @@ def _clearance_edges(
     task_role: str | None = None,
     candidate_suffix: str = "",
     additional_blocker_track_ids: Sequence[str] = (),
+    failed_direct_edges: Sequence[PhysicalActionEdge] = (),
 ) -> list[PhysicalActionEdge]:
     edges: list[PhysicalActionEdge] = []
     blocker_ids = tuple(dict.fromkeys((*scan.blocker_track_ids, *additional_blocker_track_ids)))
@@ -247,10 +272,24 @@ def _clearance_edges(
             or bool(blocker.source.get("tracking_ambiguous"))
         ):
             continue
-        blocker_scan = scans.get(blocker_id) or scan_grasp_yaws(blocker, scene.current_objects, config)
+        blocker_scan = scans.get(blocker_id) or scan_grasp_yaws(
+            blocker, (*scene.current_objects, *scene.collision_obstacles), config,
+        )
         if blocker_scan.graspable:
             staging_targets = _placement_targets(staging_provider(blocker))
             for staging_index, staging in enumerate(staging_targets, start=1):
+                predicted_clearance_gain = _staging_clearance_gain(
+                    target,
+                    blocker,
+                    staging.place_pose,
+                    obstruction_position=_blocker_obstruction_position(
+                        blocker_id, failed_direct_edges,
+                    ),
+                )
+                if predicted_clearance_gain < float(
+                    config.section("clearing")["minimum_expected_clearance_gain_m"]
+                ):
+                    continue
                 interval = blocker_scan.safe_intervals[0]
                 physical = _pick_parameters(blocker, interval, staging, config)
                 placement_checks = placement_path_checks(scene, blocker, physical["place_pose"], physical, config)
@@ -276,7 +315,7 @@ def _clearance_edges(
                     target_region_id=staging.target_region_id,
                     physical_parameters=physical,
                     expected_effects=("remove_direct_grasp_blocker",) + staging.expected_effects,
-                    expected_clearance_gain_m=_separation(target, blocker),
+                    expected_clearance_gain_m=predicted_clearance_gain,
                     expected_released_tracks=(target.track_id,),
                     task_progress_gain=staging.task_progress_gain,
                     risk_score=0.35 + _grasp_risk(interval),
@@ -292,15 +331,21 @@ def _clearance_edges(
                         },
                         "staging_option_index": staging_index,
                         "staging_option_count": len(staging_targets),
+                        "predicted_staging_clearance_gain_m": predicted_clearance_gain,
                     },
                 )
                 checked = _with_plan_check(edge, checker)
                 if checked.precheck_results.get("passed"):
                     edges.append(checked)
-        edges.extend(_nudge_edges(
-            scene, target, blocker, task_type, config, checker, scan,
-            task_role=task_role, candidate_suffix=candidate_suffix,
-        ))
+        roof_blocker = bool(
+            task_type == "build_house"
+            and blocker.shape in set(config.section("house")["roof_classes"])
+        )
+        if not roof_blocker:
+            edges.extend(_nudge_edges(
+                scene, target, blocker, task_type, config, checker, scan,
+                task_role=task_role, candidate_suffix=candidate_suffix,
+            ))
     return edges
 
 
@@ -647,6 +692,39 @@ def _released_neighbors(scene: ClutterSceneState, target: SceneObjectState) -> t
 def _grasp_risk(interval: GraspInterval) -> float:
     clearance = float(interval.selected_check.get("fingertip_clearance_m", 0.0))
     return max(0.0, 0.5 - interval.span_deg / 180.0 - clearance)
+
+
+def _staging_clearance_gain(
+    target: SceneObjectState,
+    blocker: SceneObjectState,
+    place_pose: Mapping[str, Any],
+    *,
+    obstruction_position: Sequence[float] | None = None,
+) -> float:
+    position = place_pose.get("position_m")
+    if not isinstance(position, (list, tuple)) or len(position) < 2:
+        return float("-inf")
+    reference = obstruction_position or target.center_xyz_m
+    return _point_separation(reference, position) - _point_separation(
+        reference, blocker.center_xyz_m,
+    )
+
+
+def _blocker_obstruction_position(
+    blocker_track_id: str,
+    failed_direct_edges: Sequence[PhysicalActionEdge],
+) -> Sequence[float] | None:
+    """Return the final pose at which a blocker prevents task progress."""
+    for edge in failed_direct_edges:
+        if blocker_track_id not in edge.precheck_results.get(
+            "place_blocking_track_ids", (),
+        ):
+            continue
+        pose = edge.physical_parameters.get("place_pose", {})
+        position = pose.get("position_m") if isinstance(pose, Mapping) else None
+        if isinstance(position, (list, tuple)) and len(position) >= 2:
+            return position
+    return None
 
 
 def _candidate_suffix(option_key: str, track_id: str) -> str:

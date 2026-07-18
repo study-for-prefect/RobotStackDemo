@@ -114,7 +114,7 @@ class MoveItPreviewNode(Node):
         self.tf_listener = TransformListener(
             self.tf_buffer,
             self,
-            spin_thread=True,
+            spin_thread=False,
         )  # noqa F841
         self.base_frame = str(args.base_link).lstrip("/")
         self.tool_frame = str(args.end_effector).lstrip("/")
@@ -159,12 +159,13 @@ class MoveItPreviewNode(Node):
         last_error = "not attempted"
         known_frames = []
         while rclpy.ok() and time.time() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.05)
             try:
                 if self.tf_buffer.can_transform(
                     requested_base,
                     requested_tool,
                     Time(),
-                    timeout=Duration(seconds=0.2),
+                    timeout=Duration(seconds=0.0),
                 ):
                     return requested_base, requested_tool
                 last_error = "can_transform returned False"
@@ -178,7 +179,7 @@ class MoveItPreviewNode(Node):
                             base_frame,
                             tool_frame,
                             Time(),
-                            timeout=Duration(seconds=0.05),
+                            timeout=Duration(seconds=0.0),
                         ):
                             self.get_logger().warning(
                                 "Resolved configured TF frames {} -> {} to connected frames {} -> {}.".format(
@@ -210,12 +211,13 @@ class MoveItPreviewNode(Node):
         last_error = "not attempted"
 
         while rclpy.ok() and time.time() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.05)
             try:
                 ok = self.tf_buffer.can_transform(
                     target_frame,
                     source_frame,
                     Time(),
-                    timeout=Duration(seconds=0.2),
+                    timeout=Duration(seconds=0.0),
                 )
 
                 if ok:
@@ -223,7 +225,7 @@ class MoveItPreviewNode(Node):
                         target_frame,
                         source_frame,
                         Time(),
-                        timeout=Duration(seconds=0.2),
+                        timeout=Duration(seconds=0.0),
                     )
 
                 last_error = "can_transform returned False"

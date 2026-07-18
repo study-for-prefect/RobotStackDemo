@@ -2,6 +2,7 @@
   "weights": "models/yolo/weights/best.pt",
   "data_yaml": "models/yolo/data.yaml",
   "conf": 0.5,
+  "candidate_conf": 0.15,
   "iou": 0.45,
   "imgsz": 960,
   "device": "cuda:0",

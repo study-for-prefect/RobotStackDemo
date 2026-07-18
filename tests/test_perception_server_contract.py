@@ -158,6 +158,7 @@ def _client_args():
         detector_weight="models/yolo/weights/best.pt",
         detector_imgsz=960,
         detector_iou=0.45,
+        candidate_score_thresh=0.15,
         detector_device="cuda:0",
         color_topic="/camera/camera/color/image_raw",
         depth_topic="/camera/camera/aligned_depth_to_color/image_raw",

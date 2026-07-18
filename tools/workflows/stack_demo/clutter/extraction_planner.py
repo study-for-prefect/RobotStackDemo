@@ -100,7 +100,7 @@ class ClutterExtractionPlanner:
             )
 
         failed_direct_ids: set[str] = set()
-        if task_type == "organize_blocks":
+        if task_type in {"organize_blocks", "build_house"}:
             direct_result = self._first_moveit_feasible_direct_grasp(
                 scene,
                 task_precondition,
@@ -259,7 +259,12 @@ class ClutterExtractionPlanner:
 
 
 def _is_direct_grasp(edge: PhysicalActionEdge) -> bool:
-    return edge.action_type in {ActionType.PICK_PLACE, ActionType.EXTRACT_THEN_PLACE}
+    return edge.action_type in {
+        ActionType.PICK_PLACE,
+        ActionType.EXTRACT_THEN_PLACE,
+        ActionType.PLACE_HOUSE_ROLE,
+        ActionType.REPAIR_STRUCTURE,
+    }
 
 
 def _final_gate_candidates(

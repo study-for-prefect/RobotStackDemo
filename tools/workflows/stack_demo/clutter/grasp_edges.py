@@ -172,27 +172,38 @@ def _default_geometry_check(
     )
     center_offset = float(target.source.get("grasp_center_offset_m", 0.0))
     palm_blockers = _palm_blockers(target, objects, yaw_deg, config)
+    upper_finger_blockers = _upper_finger_descent_blockers(
+        target, objects, yaw_deg, config,
+    )
     finger_blockers = tuple(
         _blocker_track_id(item, objects)
         for item in fingers.get("blocking_objects", [])
     )
-    blockers = tuple(sorted({item for item in finger_blockers + palm_blockers if item}))
+    blockers = tuple(sorted({
+        item
+        for item in finger_blockers + palm_blockers + upper_finger_blockers
+        if item
+    }))
     finger_safe = bool(fingers.get("feasible"))
     palm_safe = not palm_blockers
+    upper_finger_safe = not upper_finger_blockers
+    descent_safe = finger_safe and palm_safe and upper_finger_safe
     return {
         "opening_ok": closing_extent + 2.0 * center_offset <= float(gripper["open_inner_width_m"]),
         "center_offset_ok": center_offset <= float(safety["grasp_center_tolerance_m"]),
         "contact_length_ok": contact_length >= float(safety["minimum_contact_length_m"]),
         "finger_safe": finger_safe,
         "palm_safe": palm_safe,
-        "descent_safe": finger_safe and palm_safe,
-        "lift_safe": finger_safe and palm_safe,
+        "upper_finger_safe": upper_finger_safe,
+        "descent_safe": descent_safe,
+        "lift_safe": descent_safe,
         "closing_extent_m": round(closing_extent, 6),
         "grasp_center_offset_m": round(center_offset, 6),
         "effective_contact_length_m": round(contact_length, 6),
         "fingertip_axial_overhang_m": round(axial_overhang, 6),
         "fingertip_clearance_m": float(fingers.get("clearance_m", 0.0)),
         "palm_clearance_m": 0.0 if palm_blockers else float(safety["object_clearance_m"]),
+        "upper_finger_blocking_track_ids": list(upper_finger_blockers),
         "vertical_lift_clearance_m": 0.0 if blockers else float(safety["observation_height_m"]),
         "blocking_track_ids": list(blockers),
     }
@@ -233,6 +244,60 @@ def _palm_blockers(
         local_v = -dx * math.sin(angle) + dy * math.cos(angle)
         radius = 0.5 * max(other.size_xyz_m[:2])
         if abs(local_u) <= palm_depth / 2.0 + radius and abs(local_v) <= palm_width / 2.0 + radius:
+            blockers.append(other.track_id)
+    return tuple(sorted(blockers))
+
+
+def _upper_finger_descent_blockers(
+    target: SceneObjectState,
+    objects: Sequence[SceneObjectState],
+    yaw_deg: float,
+    config: StackDemoConfig,
+) -> tuple[str, ...]:
+    """Reject a yaw whose open upper fingers descend through a tall neighbor.
+
+    ``evaluate_grasp_yaw`` deliberately models the narrow fingertips.  The
+    GF225 body above them is much wider: at the open pose each upper finger
+    occupies one side of the 49--112 mm opening envelope.  A neighboring block
+    can therefore clear the fingertip yet be struck by the upper finger during
+    the final vertical descent.  Depth measurements at table height are noisy,
+    so use a two-clearance (12 mm with the current config) vertical uncertainty
+    band instead of requiring the measured tops to cross exactly.
+    """
+    gripper = config.section("gripper")
+    clearance = float(config.section("safety")["object_clearance_m"])
+    inner_half = 0.5 * float(gripper["open_inner_width_m"])
+    outer_half = 0.5 * float(gripper["open_outer_width_m"])
+    axial_half = 0.5 * float(gripper["upper_finger_width_m"])
+    target_top = target.center_xyz_m[2] + 0.5 * target.size_xyz_m[2]
+    angle = math.radians(yaw_deg)
+    cos_yaw = math.cos(angle)
+    sin_yaw = math.sin(angle)
+    blockers: list[str] = []
+    for other in objects:
+        if other.track_id == target.track_id:
+            continue
+        other_top = other.center_xyz_m[2] + 0.5 * other.size_xyz_m[2]
+        if other_top < target_top - 2.0 * clearance:
+            continue
+
+        dx = other.center_xyz_m[0] - target.center_xyz_m[0]
+        dy = other.center_xyz_m[1] - target.center_xyz_m[1]
+        local_u = dx * cos_yaw + dy * sin_yaw
+        local_v = -dx * sin_yaw + dy * cos_yaw
+        relative = math.radians(other.yaw_deg - yaw_deg)
+        half_x = 0.5 * other.size_xyz_m[0]
+        half_y = 0.5 * other.size_xyz_m[1]
+        extent_u = abs(half_x * math.cos(relative)) + abs(half_y * math.sin(relative))
+        extent_v = abs(half_x * math.sin(relative)) + abs(half_y * math.cos(relative))
+        axial_overlap = abs(local_u) - extent_u <= axial_half + clearance
+        abs_v_min = max(0.0, abs(local_v) - extent_v)
+        abs_v_max = abs(local_v) + extent_v
+        side_finger_overlap = (
+            abs_v_max >= inner_half - clearance
+            and abs_v_min <= outer_half + clearance
+        )
+        if axial_overlap and side_finger_overlap:
             blockers.append(other.track_id)
     return tuple(sorted(blockers))
 

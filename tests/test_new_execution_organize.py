@@ -8,7 +8,11 @@ from unittest.mock import patch
 
 from robot_scene_pipeline.perception_contract import PerceptionServerError
 from tools.workflows.stack_demo.app import _merge_expected_tracks
-from tools.workflows.stack_demo.clutter.edge_generation import generate_physical_edges
+from tools.workflows.stack_demo.clutter.edge_generation import (
+    PlacementTarget,
+    TargetSpec,
+    generate_physical_edges,
+)
 from tools.workflows.stack_demo.clutter.extraction_planner import ClutterExtractionPlanner
 from tools.workflows.stack_demo.clutter.target_options import build_target_options
 from tools.workflows.stack_demo.common.action_edges import ActionType
@@ -134,15 +138,40 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         self.assertIn("release", executor.calls)
         self.assertEqual(executor.calls[-2:], ["retreat", "return_observation"])
 
+    def test_place_descent_failure_retreats_while_holding_and_never_releases(self):
+        class FailedDescentExecutor(MockExecutor):
+            def descend_place(self, selected):
+                self.calls.append("place_descent")
+                raise RuntimeError("final position error exceeded")
+
+        before = scene([raw_object(1, "t1", [0.5, 0.0, 0.02])])
+        after_lift = scene([
+            raw_object(6, "t1", [0.5, 0.0, 0.12]),
+        ], revision=2, expected=["t1"])
+        executor = FailedDescentExecutor()
+
+        with self.assertRaisesRegex(RuntimeError, "final position error exceeded"):
+            execute_one_edge(
+                edge(), before, executor, MockObserver([after_lift]),
+                lambda action, state: (True, {"inside": True}),
+            )
+
+        self.assertEqual(executor.calls[-3:], ["transport", "place_descent", "retreat"])
+        self.assertNotIn("release", executor.calls)
+
     def test_22_place_failure_never_marks_success(self):
         before = scene([raw_object(1, "t1", [0.5, 0.0, 0.02])])
         after_lift = scene([
             raw_object(6, "t1", [0.5, 0.0, 0.12]),
         ], revision=2, expected=["t1"])
         after_place = scene([raw_object(7, "t1", [0.45, 0.0, 0.02])], revision=3, expected=["t1"])
-        result = execute_one_edge(edge(), before, MockExecutor(), MockObserver([after_lift, after_place]), lambda action, state: (False, {"inside": False}))
+        executor = MockExecutor()
+        result = execute_one_edge(edge(), before, executor, MockObserver([after_lift, after_place]), lambda action, state: (False, {"inside": False}))
         self.assertFalse(result.success)
         self.assertEqual(result.status, "place_failed")
+        self.assertEqual(executor.calls[-1], "retreat")
+        self.assertNotIn("return_observation", executor.calls)
+        self.assertEqual(result.stages[-1]["reason"], "place_not_verified")
 
     def test_23_organize_color_region_completion(self):
         initial = scene([raw_object(1, "t1", [0.5, 0.0, 0.02], color="red")])
@@ -308,7 +337,10 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         )
         with patch("tools.workflows.stack_demo.commands.run") as run:
             return_to_ready_observation(args)
-        self.assertIn("--ready-stage-wrist-3", run.call_args.args[0])
+        command = run.call_args.args[0]
+        self.assertIn("--ready-stage-wrist-3", command)
+        self.assertEqual(command[command.index("--velocity") + 1], "0.3")
+        self.assertEqual(command[command.index("--acceleration") + 1], "0.3")
 
     def test_35_clearance_cannot_move_protected_structure(self):
         current = scene([
@@ -463,6 +495,28 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         self.assertIn("--execute", command)
         self.assertIn("--yes", command)
 
+    def test_push_execution_reuses_edge_specific_contact_height(self):
+        current = scene([raw_object(1, "t1", [0.5, 0.0, 0.02])])
+        generated = generate_physical_edges(
+            current, ["t1"], "organize_blocks", config(), placement, lambda obj: None,
+        )
+        nudge = next(
+            item for item in generated.edges_by_target["t1"]
+            if item.action_type == ActionType.NUDGE_BLOCKER
+        )
+        nudge = replace(nudge, physical_parameters={
+            **nudge.physical_parameters,
+            "contact_z_offset_m": 0.0102,
+        })
+        args = SimpleNamespace(
+            execute=True, yes=True, execute_push_clearing=False,
+            ros_python="/usr/bin/python3", tool_frame="tool0", tf_timeout=8.0,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = MoveItEdgeAdapter(args, config(), directory)._write_push_plan(nudge)
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        self.assertAlmostEqual(plan["contact_z_offset_m"], 0.0102)
+
     def test_close_gripper_returns_machine_readable_holding_hint(self):
         args = SimpleNamespace(
             execute=True,
@@ -514,6 +568,55 @@ class NewExecutionOrganizeTests(unittest.TestCase):
             )
         self.assertIsNotNone(result.selected_edge)
         self.assertNotEqual(result.selected_edge.action_type, ActionType.NUDGE_BLOCKER)
+        self.assertEqual(result.decision_source, "code_direct_grasp_priority")
+        self.assertEqual(calls, [result.selected_edge.candidate_id])
+        self.assertFalse(client.calls)
+
+    def test_simple_house_scene_prioritizes_direct_support_without_qwen_push_reasoning(self):
+        current = scene([raw_object(1, "support", [0.5, 0.0, 0.02])])
+        client = MockQwenClient([])
+        calls = []
+
+        def checker(selected):
+            calls.append(selected.candidate_id)
+            return {"passed": True, "moveit_plan_only": True, "mode": "moveit_plan_only"}
+
+        def house_placement(_obj, _interval, _role):
+            return PlacementTarget(
+                ActionType.PLACE_HOUSE_ROLE,
+                None,
+                "left_support_lower",
+                {"frame_id": "base_link", "position_m": [0.3775, 0.27, 0.015], "yaw_deg": 0.0},
+                1.0,
+                ("complete_house_role:left_support_lower",),
+                {
+                    "transport_safe": True, "place_descent_safe": True,
+                    "release_safe": True, "return_safe": True,
+                    "protected_safe": True,
+                },
+            )
+
+        gate = FinalSafetyGate(config(), checker, require_real_moveit_plan=True)
+        planner = ClutterExtractionPlanner(
+            config(), QwenTargetSelector(client), QwenEdgeSelector(client), gate, checker,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result = planner.plan_cycle(
+                scene=current,
+                task_type="build_house",
+                task_state={},
+                target_track_ids=(),
+                placement_provider=lambda _obj, _interval: None,
+                staging_provider=lambda _obj: None,
+                task_precondition=lambda _selected, _state: (True, "ok"),
+                logger=CycleLogger(Path(directory)),
+                target_specs=(TargetSpec(
+                    "support__left_support_lower", "support", "left_support_lower",
+                ),),
+                variant_placement_provider=house_placement,
+            )
+        self.assertIsNotNone(result.selected_edge)
+        self.assertEqual(result.selected_edge.action_type, ActionType.PLACE_HOUSE_ROLE)
         self.assertEqual(result.decision_source, "code_direct_grasp_priority")
         self.assertEqual(calls, [result.selected_edge.candidate_id])
         self.assertFalse(client.calls)

@@ -77,7 +77,8 @@
     "support_classes": ["square"],
     "roof_classes": ["concave_rectangle", "rectangle"],
     "triangle_classes": ["triangle"],
-    "origin_center_base_m": [0.360, 0.180, 0.020],
+    "origin_center_base_m": [0.400, 0.270, 0.020],
+    "final_place_z_offset_m": -0.005,
     "orientation_staging_camera_bounds_base_m": {
       "xmin": 0.245,
       "xmax": 0.450,
@@ -92,6 +93,7 @@
       [0.400, 0.180],
       [0.300, 0.180]
     ],
+    "roof_blocker_staging_min_house_distance_m": 0.150,
     "support_inner_gap_m": 0.015,
     "support_height_tolerance_m": 0.008,
     "center_tolerance_m": 0.010,

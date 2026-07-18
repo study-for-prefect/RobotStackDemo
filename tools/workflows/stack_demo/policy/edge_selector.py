@@ -57,14 +57,21 @@ class QwenEdgeSelector:
         call = self._client.call("edge_selection", request, EDGE_SELECTION_SCHEMA, image_paths, artifact_dir)
         if not call.success or call.parsed_output is None:
             return _invalid(call, request)
+        parsed_output, alias_repairs = _repair_redundant_action_aliases(
+            call.parsed_output, eligible,
+        )
         try:
-            parsed = parse_edge_selection(call.parsed_output, eligible, scene.scene_revision)
+            parsed = parse_edge_selection(parsed_output, eligible, scene.scene_revision)
         except PolicyOutputError as exc:
             return EdgeSelectionOutcome(None, (), "policy_invalid_output", (), request, _response_log(call), str(exc))
         selected = next(edge for edge in eligible if edge.candidate_id == parsed["selected_candidate_id"])
+        response = _response_log(call)
+        if alias_repairs:
+            response["candidate_id_alias_repairs"] = alias_repairs
         return EdgeSelectionOutcome(
-            selected, tuple(parsed["backup_candidate_ids"]), "qwen_edge_selection",
-            tuple(parsed["reason_codes"]), request, _response_log(call),
+            selected, tuple(parsed["backup_candidate_ids"]),
+            "qwen_edge_selection_alias_resolved" if alias_repairs else "qwen_edge_selection",
+            tuple(parsed["reason_codes"]), request, response,
         )
 
 
@@ -95,11 +102,57 @@ def _edge_request(
             "avoid_failed_fingerprint",
         ],
         "output_contract": {
-            "selected_candidate_id": "one exact supplied candidate_id",
+            "selected_candidate_id": (
+                "one exact supplied candidate_id; copy it verbatim and never insert action_type text"
+            ),
             "backup_candidate_ids": "zero to three distinct supplied ids",
             "reason_codes": "short comparison codes only",
         },
     }
+
+
+def _repair_redundant_action_aliases(
+    parsed_output: Mapping[str, Any],
+    edges: Sequence[PhysicalActionEdge],
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Remove one known redundant action token only when the match is unique.
+
+    Qwen occasionally copies the exact first staging ID but expands
+    ``_staging_`` to ``_extract_to_staging_`` using the adjacent action_type.
+    That is a serialization alias, not a different physical decision.  No
+    edit-distance or prefix matching is allowed here: every other unknown ID
+    remains invalid and triggers the normal reobserve path.
+    """
+    output = dict(parsed_output)
+    exact_ids = {edge.candidate_id for edge in edges}
+    aliases: dict[str, set[str]] = {}
+    for edge in edges:
+        if edge.action_type.value != "extract_to_staging":
+            continue
+        alias = edge.candidate_id.replace(
+            "_staging_", "_extract_to_staging_", 1,
+        )
+        if alias != edge.candidate_id:
+            aliases.setdefault(alias, set()).add(edge.candidate_id)
+
+    repairs: list[dict[str, str]] = []
+
+    def resolve(value: Any) -> str:
+        candidate_id = str(value)
+        if candidate_id in exact_ids:
+            return candidate_id
+        matches = aliases.get(candidate_id, set())
+        if len(matches) != 1:
+            return candidate_id
+        repaired = next(iter(matches))
+        repairs.append({"received": candidate_id, "resolved": repaired})
+        return repaired
+
+    output["selected_candidate_id"] = resolve(output.get("selected_candidate_id", ""))
+    output["backup_candidate_ids"] = [
+        resolve(value) for value in output.get("backup_candidate_ids", [])
+    ]
+    return output, repairs
 
 
 def _invalid(call: QwenCallResult, request: Mapping[str, Any]) -> EdgeSelectionOutcome:

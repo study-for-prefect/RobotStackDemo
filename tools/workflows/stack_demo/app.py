@@ -43,6 +43,7 @@ from .organize.state import OrganizeTaskState, build_organize_task_state
 from .policy.edge_selector import QwenEdgeSelector
 from .policy.qwen_client import JsonFileQwenClient, StatelessQwenClient
 from .policy.target_selector import QwenTargetSelector
+from .perception_semantic_review import review_build_house_scene
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,7 +102,7 @@ def _run(
     *,
     integration: LiveIntegrationReport | None = None,
 ) -> int:
-    raw = _initial_observation(args, output)
+    raw = _initial_observation(args, output, task_type)
     if integration is not None:
         initial = output / "initial_observation"
         snapshot_validation = validate_live_snapshot(initial, raw)
@@ -199,6 +200,7 @@ def _run(
             scene, raw, expected_tracks = _reobserve_without_action(
                 args,
                 config,
+                task_type,
                 output,
                 cycle_index,
                 consecutive_reobserve,
@@ -235,7 +237,7 @@ def _run(
             return 0
 
         observer = _LiveObserver(
-            args, config, output, cycle_index, scene, expected_tracks,
+            args, config, task_type, output, cycle_index, scene, expected_tracks,
             action_history, forbidden, track_memory, cycle.selected_edge,
         )
         result = execute_one_edge(
@@ -276,12 +278,20 @@ def _run(
         scene = result.final_scene
         raw = observer.latest_raw
         expected_tracks = observer.expected_tracks
+        if result.status == "place_failed":
+            print(
+                "Placement was not visually verified; keeping the robot at the "
+                "safe retreat pose and stopping this run.",
+                flush=True,
+            )
+            return 2
     return 2
 
 
 def _reobserve_without_action(
     args: Any,
     config: StackDemoConfig,
+    task_type: str,
     output: Path,
     cycle_index: int,
     attempt: int,
@@ -307,6 +317,7 @@ def _reobserve_without_action(
         )
         if raw is None:
             raise RuntimeError("fresh reobserve did not produce a scene")
+        raw = _review_live_observation(args, raw, directory, task_type)
         raw["scene_revision"] = before.scene_revision + 1
         _bind_observation_tracks(raw, track_memory)
     merged_expected = _merge_expected_tracks(expected_tracks, raw, track_memory)
@@ -405,6 +416,7 @@ class _LiveObserver(SceneObserver):
         self,
         args: Any,
         config: StackDemoConfig,
+        task_type: str,
         output: Path,
         cycle_index: int,
         before: ClutterSceneState,
@@ -414,7 +426,9 @@ class _LiveObserver(SceneObserver):
         track_memory: dict[str, Any],
         selected_edge,
     ):
-        self._args, self._config, self._output = args, config, output
+        self._args, self._config, self._task_type, self._output = (
+            args, config, task_type, output,
+        )
         self._cycle_index, self._revision = cycle_index, before.scene_revision
         self._expected, self._history, self._forbidden = expected_tracks, history, forbidden
         self._track_memory, self._selected_edge = track_memory, selected_edge
@@ -428,6 +442,9 @@ class _LiveObserver(SceneObserver):
         )
         if raw is None:
             raise RuntimeError(f"fresh observation missing after {reason}")
+        raw = _review_live_observation(
+            self._args, raw, directory, self._task_type,
+        )
         self._revision += 1
         raw["scene_revision"] = self._revision
         _bind_observation_tracks(
@@ -509,7 +526,7 @@ def _log_execution(logger: CycleLogger, result: EdgeExecutionResult, history: li
     logger.write("action_history.json", history)
 
 
-def _initial_observation(args: Any, output: Path) -> dict[str, Any]:
+def _initial_observation(args: Any, output: Path, task_type: str) -> dict[str, Any]:
     if args.offline_scene_state:
         raw = load_json(args.offline_scene_state)
     else:
@@ -518,7 +535,23 @@ def _initial_observation(args: Any, output: Path) -> dict[str, Any]:
             raise RuntimeError("initial live observation was not produced")
     raw.setdefault("scene_revision", 1)
     raw.setdefault("frame_id", "base_link")
+    if not args.offline_scene_state:
+        raw = _review_live_observation(
+            args, raw, output / "initial_observation", task_type,
+        )
     return raw
+
+
+def _review_live_observation(
+    args: Any,
+    raw: dict[str, Any],
+    output_dir: Path,
+    task_type: str,
+) -> dict[str, Any]:
+    """Apply the house visual review uniformly to every live observation."""
+    if task_type != "build_house":
+        return raw
+    return review_build_house_scene(args, raw, output_dir)
 
 
 def _apply_motion_config(args: Any, config: StackDemoConfig) -> None:
@@ -582,6 +615,36 @@ def _bind_observation_tracks(
         "source": "explicit_one_to_one_rebinding",
         "assignments": assignments,
     }
+    visible_ids = {str(item.get("track_id")) for item in objects if item.get("track_id")}
+    remembered = []
+    for track_id, track in sorted((memory.get("tracks") or {}).items()):
+        # A confirmed identity handoff means the stale ID and its successor
+        # refer to one physical block. Keeping the stale ID as a remembered
+        # obstacle would create coincident geometry and reject every grasp of
+        # the visible successor as a finger collision.
+        if (
+            track_id in visible_ids
+            or track.get("manipulation_state") == "held_by_gripper"
+            or track.get("superseded_by_track_id")
+        ):
+            continue
+        center = track.get("center_base_m")
+        size = track.get("dimensions_m")
+        if not (_finite_xyz(center) and _finite_xyz(size)):
+            continue
+        remembered.append({
+            "id": f"remembered_{track_id}",
+            "track_id": str(track_id),
+            "label": str(track.get("label") or track.get("semantic_shape") or "remembered object"),
+            "visual_color": str(track.get("color") or "unknown"),
+            "geometry_center_m": [float(value) for value in center[:3]],
+            "dimensions_m": [float(value) for value in size[:3]],
+            "table_yaw_deg": float(track.get("table_yaw_deg") or 0.0),
+            "orientation_confidence": 0.0,
+            "collision_memory_only": True,
+            "last_seen_revision": int(track.get("last_seen_revision", revision)),
+        })
+    raw["remembered_collision_obstacles"] = remembered
 
 
 def _merge_expected_tracks(

@@ -18,6 +18,7 @@ DEFAULT_WEIGHT = os.path.join(
 def add_detector_args(parser):
     parser.add_argument("--detector-weight", default=DEFAULT_WEIGHT)
     parser.add_argument("--score-thresh", type=float, default=0.5)
+    parser.add_argument("--candidate-score-thresh", type=float, default=0.15)
     parser.add_argument("--max-detections", type=int, default=30)
     parser.add_argument("--debug-topk", type=int, default=20)
     parser.add_argument("--detector-scale", type=float, default=1.0)
@@ -48,6 +49,9 @@ class DetectorModel:
         self.device = getattr(args, "detector_device", "cuda:0")
         self.iou = float(getattr(args, "detector_iou", 0.5))
         self.imgsz = int(getattr(args, "detector_imgsz", 1280))
+        self.candidate_score_thresh = float(
+            getattr(args, "candidate_score_thresh", 0.15)
+        )
 
         if not os.path.exists(self.weight_path):
             raise FileNotFoundError(f"YOLO weight does not exist: {self.weight_path}")
@@ -80,9 +84,13 @@ class DetectorModel:
             )
 
         # Ultralytics 接受 BGR numpy 图像
+        candidate_threshold = min(
+            float(score_thresh),
+            float(getattr(self, "candidate_score_thresh", 0.15)),
+        )
         results = self.model.predict(
             source=inference_bgr,
-            conf=float(score_thresh),
+            conf=candidate_threshold,
             iou=self.iou,
             device=self.device,
             imgsz=self.imgsz if self.imgsz > 0 else None,
@@ -119,7 +127,7 @@ class DetectorModel:
                 break
 
             score = float(confs[i])
-            if score < float(score_thresh):
+            if score < candidate_threshold:
                 continue
 
             cls_id = int(clss[i])
@@ -148,6 +156,7 @@ class DetectorModel:
                 "class_id": cls_id,
                 "score": score,
                 "confidence": score,
+                "primary_detector_passed": score >= float(score_thresh),
                 "bbox": [x1, y1, x2, y2],
                 "center_px": [(x1 + x2) * 0.5, (y1 + y2) * 0.5],
             }

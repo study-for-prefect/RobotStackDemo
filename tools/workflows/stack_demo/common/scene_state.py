@@ -61,6 +61,7 @@ class ClutterSceneState:
     target_regions: tuple[Mapping[str, Any], ...]
     recent_action_results: tuple[Mapping[str, Any], ...]
     forbidden_action_fingerprints: tuple[str, ...]
+    collision_obstacles: tuple[SceneObjectState, ...] = ()
 
     def object_by_track(self, track_id: str) -> SceneObjectState | None:
         return next((obj for obj in self.current_objects if obj.track_id == track_id), None)
@@ -68,6 +69,7 @@ class ClutterSceneState:
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["current_objects"] = [obj.to_dict() for obj in self.current_objects]
+        value["collision_obstacles"] = [obj.to_dict() for obj in self.collision_obstacles]
         return value
 
 
@@ -114,6 +116,24 @@ def build_clutter_scene_state(
         raise ValueError("detector ids must be unique inside one scene_revision")
     base_objects = [_base_object(item, revision, completed, protected) for item in raw_objects]
     objects = tuple(_with_relations(obj, base_objects, workspace) for obj in base_objects)
+    visible_track_ids = {obj.track_id for obj in objects}
+    remembered_raw = [
+        item for item in observation.get("remembered_collision_obstacles", [])
+        if isinstance(item, dict)
+        and _has_metric_geometry(item)
+        and str(item.get("track_id") or "") not in visible_track_ids
+    ]
+    remembered_base = [
+        _base_object(item, revision, frozenset(), frozenset())
+        for item in remembered_raw
+    ]
+    collision_obstacles = tuple(
+        SceneObjectState(**{
+            **{name: getattr(obj, name) for name in obj.__dataclass_fields__},
+            "currently_visible": False,
+        })
+        for obj in remembered_base
+    )
     visible = tuple(sorted({obj.track_id for obj in objects}))
     expected = tuple(sorted(set(str(value) for value in (expected_tracks or visible))))
     missing = tuple(sorted(set(expected) - set(visible)))
@@ -138,6 +158,7 @@ def build_clutter_scene_state(
         target_regions=tuple(dict(item) for item in target_regions),
         recent_action_results=tuple(dict(item) for item in recent_action_results),
         forbidden_action_fingerprints=tuple(sorted(set(forbidden_action_fingerprints))),
+        collision_obstacles=collision_obstacles,
     )
 
 

@@ -151,6 +151,10 @@ detector ID 的图。不会追加旧 assistant 回答、旧图片或对话历史
 不会按 detector ID 或数组顺序绑定左右角色。上层支撑依赖同侧下层；屋顶依赖两个稳定上层；
 三角顶依赖已验证屋顶。完成结构自动进入 `protected_tracks`。
 
+梁柱直接放置会逐个检查两种相差 `90°` 的沿边夹持方向；一个方向被相邻柱体挡住时继续检查
+正交方向，任一方向通过几何与 MoveIt 就直接执行，不进入中转。两种方向都失败时才允许中转。
+尚未满足屋顶前置条件的屋顶若需要为梁柱清障，会优先放到距房屋中心至少 `0.15 m` 的安全点。
+
 屋顶状态显式记录凹槽面、正反面、长轴、抓取姿态、左右覆盖、中心偏差、支撑余量和稳定性；
 代码用最新观测重新计算支撑间距、高差、覆盖、中心和接触。三角顶显式记录尖端、底边、
 face、目标 yaw、底边接触、质心投影、支撑余量和屋顶相对位姿。姿态证据不足时只生成安全
@@ -193,10 +197,18 @@ face、目标 yaw、底边接触、质心投影、支撑余量和屋顶相对位
 当前请求参数处理同一组同步 RGB-D 帧，不再依赖服务启动时残留的 TF 路径。
 
 `GET /health` 返回 RGB/depth/camera-info readiness、序号/时间戳/来源 frame、三个 topic、固定
-base/camera/frame mode、detector weight/imgsz/iou/device、server PID 和配置 fingerprint。pipeline
+base/camera/frame mode、detector weight/imgsz/iou/device、低置信度候选阈值与语义复核候选池能力、
+server PID 和配置 fingerprint。pipeline
 在 `/snapshot` 前逐项比较固定配置；不一致会以
 `perception_server_config_mismatch` 拒绝继续。`score_thresh` 和当前 `tf_json` 是每次 snapshot
 的动态参数，不是服务端固定配置。
+
+搭房子时，初始、抓后、放后及无候选重观测都会对主检测和具备深度几何的低置信度候选执行
+VLM 图像语义复核。VLM 可修正已有候选类别并提升真实低分候选，但不能凭空创建检测框或三维
+坐标；重叠低分重复框由代码确定性抑制。旧感知服务若不提供候选池能力会被配置契约拒绝，
+必须重启加载新版服务。
+绿色 YOLO 方块不会仅凭大模型一次 `square/high` 进入梁柱候选：轮廓贴图像边界、方块/三角复核
+缺失，或桌面轮廓比例明显不符合方块时，代码硬门会拒绝该次候选并等待重新观测。
 
 结构化错误使用 `ok=false`、HTTP status、`error_code`、`error_type`、`error`、`request_id` 和
 `effective_config`。请求/TF 错误通常为 400；`camera_not_ready`、RGB-D 不同步为 503；

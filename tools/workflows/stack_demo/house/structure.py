@@ -20,7 +20,7 @@ def role_observation_checks(
     role_object: SceneObjectState | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Evaluate one bound role solely from current base_link geometry."""
-    obj = role_object or scene.object_by_track(bindings.get(role, ""))
+    obj = role_object or _scene_object(scene, bindings.get(role, ""))
     checks: dict[str, Any] = {"role_object_visible": obj is not None}
     if obj is None:
         return False, checks
@@ -47,6 +47,7 @@ def object_at_pose(obj: SceneObjectState, pose: Mapping[str, Any]) -> SceneObjec
         obj,
         center_xyz_m=tuple(float(value) for value in position[:3]),
         yaw_deg=float(pose.get("yaw_deg", obj.yaw_deg)),
+        source={**dict(obj.source), "planned_house_pose": True},
     )
 
 
@@ -56,11 +57,53 @@ def _lower_checks(obj: SceneObjectState, role: str, config: StackDemoConfig) -> 
     center_spacing = float(obj.size_xyz_m[0]) + float(house["support_inner_gap_m"])
     expected_x = origin_x + (-0.5 if role.startswith("left_") else 0.5) * center_spacing
     offset = math.hypot(obj.center_xyz_m[0] - expected_x, obj.center_xyz_m[1] - origin_y)
+    vertical_gap, height_mode = _lower_vertical_gap(obj, config)
     return {
         "center_offset_valid": offset <= float(house["center_tolerance_m"]),
-        "layer_height_valid": abs(obj.center_xyz_m[2] - origin_z) <= float(house["support_height_tolerance_m"]),
+        "layer_height_valid": abs(vertical_gap) <= float(house["support_height_tolerance_m"]),
         "center_offset_m": offset,
+        "vertical_contact_gap_m": vertical_gap,
+        "layer_height_verification_mode": height_mode,
     }
+
+
+def _lower_vertical_gap(
+    obj: SceneObjectState,
+    config: StackDemoConfig,
+) -> tuple[float, str]:
+    """Compare observations to the local table, not an absolute calibrated z.
+
+    The commanded release pose intentionally includes a real-machine downward
+    compensation.  Once released, perception reports the settled object center
+    relative to the locally observed tabletop, whose base_link z is not fixed.
+    """
+    house = config.section("house")
+    if bool(obj.source.get("planned_house_pose")):
+        expected = (
+            float(house["origin_center_base_m"][2])
+            + float(house.get("final_place_z_offset_m", 0.0))
+        )
+        return obj.center_xyz_m[2] - expected, "planned_release_pose"
+
+    local_support = obj.source.get("local_support_surface")
+    support_z = None
+    if isinstance(local_support, Mapping):
+        value = local_support.get("support_z_base_m")
+        if value is not None:
+            support_z = float(value)
+    if support_z is None:
+        center_on_table = obj.source.get("center_on_table_m")
+        if isinstance(center_on_table, (list, tuple)) and len(center_on_table) >= 3:
+            support_z = float(center_on_table[2])
+    if support_z is not None:
+        return _bottom(obj) - support_z, "observed_local_support_contact"
+
+    # Offline fixtures and legacy observations may not carry local support
+    # evidence.  Preserve the nominal absolute-height fallback for those only.
+    return (
+        obj.center_xyz_m[2] - float(house["origin_center_base_m"][2]),
+        "nominal_center_height_fallback",
+    )
 
 
 def _upper_checks(
@@ -71,20 +114,55 @@ def _upper_checks(
     config: StackDemoConfig,
 ) -> dict[str, Any]:
     lower_role = role.replace("upper", "lower")
-    lower = scene.object_by_track(bindings.get(lower_role, ""))
+    lower = _scene_object(scene, bindings.get(lower_role, ""))
     if lower is None:
         return {"lower_support_visible": False}
     tolerance = float(config.section("house")["support_height_tolerance_m"])
     center_tolerance = float(config.section("house")["center_tolerance_m"])
     offset = math.hypot(obj.center_xyz_m[0] - lower.center_xyz_m[0], obj.center_xyz_m[1] - lower.center_xyz_m[1])
     vertical_gap = _bottom(obj) - _top(lower)
+    merged_column = _merged_two_support_column(obj, lower, offset, config)
     return {
         "lower_support_visible": True,
         "column_center_offset_valid": offset <= center_tolerance,
-        "vertical_contact_valid": abs(vertical_gap) <= tolerance,
+        # Two same-colour cubes in direct contact are frequently returned by
+        # instance segmentation as one roughly 2H-tall column.  In that case
+        # comparing the merged blob's bottom against the remembered lower
+        # cube's top creates a false positive gap.  Accept only the tightly
+        # constrained two-cube column geometry; ordinary rectangles and loose
+        # objects cannot satisfy this predicate.
+        "vertical_contact_valid": abs(vertical_gap) <= tolerance or merged_column,
+        "vertical_contact_verification_mode": (
+            "merged_two_support_column" if merged_column else "separate_support_surfaces"
+        ),
         "column_center_offset_m": offset,
         "vertical_contact_gap_m": vertical_gap,
     }
+
+
+def _merged_two_support_column(
+    obj: SceneObjectState,
+    lower: SceneObjectState,
+    center_offset_m: float,
+    config: StackDemoConfig,
+) -> bool:
+    """Recognize a detector blob formed by two vertically touching cubes."""
+    house = config.section("house")
+    x_size, y_size, height = (float(value) for value in obj.size_xyz_m)
+    lower_height = float(lower.size_xyz_m[2])
+    footprint_min = min(x_size, y_size)
+    footprint_max = max(x_size, y_size)
+    expected_height = 2.0 * lower_height
+    return bool(
+        obj.shape in set(house["support_classes"])
+        and footprint_min >= 0.015
+        and footprint_max / footprint_min <= 1.35
+        and 1.65 * footprint_min <= height <= 2.35 * footprint_max
+        and abs(height - expected_height) <= max(
+            0.008, 2.0 * float(house["support_height_tolerance_m"])
+        )
+        and center_offset_m <= float(house["center_tolerance_m"])
+    )
 
 
 def _roof_checks(
@@ -94,8 +172,8 @@ def _roof_checks(
     config: StackDemoConfig,
 ) -> dict[str, Any]:
     house = config.section("house")
-    left = scene.object_by_track(bindings.get("left_support_upper", ""))
-    right = scene.object_by_track(bindings.get("right_support_upper", ""))
+    left = _scene_object(scene, bindings.get("left_support_upper", ""))
+    right = _scene_object(scene, bindings.get("right_support_upper", ""))
     if left is None or right is None:
         return {"both_upper_supports_visible": False}
     span = (right.center_xyz_m[0] - left.center_xyz_m[0], right.center_xyz_m[1] - left.center_xyz_m[1])
@@ -154,7 +232,7 @@ def _triangle_checks(
     config: StackDemoConfig,
 ) -> dict[str, Any]:
     house = config.section("house")
-    roof = scene.object_by_track(bindings.get("roof", ""))
+    roof = _scene_object(scene, bindings.get("roof", ""))
     if roof is None:
         return {"roof_visible": False}
     orientation = triangle_orientation_from_object(triangle)
@@ -178,6 +256,16 @@ def _triangle_checks(
         "support_margin_m": support_margin,
         "base_contact_gap_m": vertical_gap,
     }
+
+
+def _scene_object(
+    scene: ClutterSceneState,
+    track_id: str,
+) -> SceneObjectState | None:
+    return scene.object_by_track(track_id) or next(
+        (obj for obj in scene.collision_obstacles if obj.track_id == track_id),
+        None,
+    )
 
 
 def _projected_half_extents(obj: SceneObjectState, axis_yaw_deg: float) -> tuple[float, float]:

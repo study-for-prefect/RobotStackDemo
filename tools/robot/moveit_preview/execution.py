@@ -370,6 +370,7 @@ def plan_and_maybe_execute_motion(
     final_tool = node.current_tool_transform(timeout=args.tf_timeout)
     final_pos, final_quat = transform_position_quat(final_tool)
     err = xyz_delta(final_pos, tool_goal)
+    position_error_m = math.sqrt(sum(float(value) ** 2 for value in err))
     orientation_error_deg = math.degrees(quaternion_distance_rad(final_quat, quat_xyzw))
     node.get_logger().info(
         "Final tool0 position={}, goal={}, error={}, orientation_error_deg={:.3f}".format(
@@ -386,6 +387,15 @@ def plan_and_maybe_execute_motion(
         )
     )
     if not ok:
+        return False
+    if position_error_m > float(args.max_final_position_error_m):
+        node.get_logger().error(
+            "Executed motion final position error {:.4f} m exceeds {:.4f} m; "
+            "treating the stage as failed.".format(
+                position_error_m,
+                float(args.max_final_position_error_m),
+            )
+        )
         return False
     return joint_state_from_trajectory(trajectory) or True
 

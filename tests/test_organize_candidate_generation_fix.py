@@ -10,7 +10,10 @@ from robot_scene_pipeline.pushed_object_sweep import analyze_push_contact_chain
 from tools.robot.moveit_preview.orientation import object_yaw_candidate_values
 from tools.workflows.stack_demo.app import main
 from tools.workflows.stack_demo.clutter.edge_generation import generate_physical_edges
-from tools.workflows.stack_demo.clutter.path_safety import build_nudge_parameters
+from tools.workflows.stack_demo.clutter.path_safety import (
+    build_nudge_parameters,
+    placement_path_checks,
+)
 from tools.workflows.stack_demo.clutter.push_orientation_priority import prefer_axis_aligned_pushes
 from tools.workflows.stack_demo.clutter.target_options import build_target_options
 from tools.workflows.stack_demo.clutter.grasp_edges import (
@@ -23,6 +26,35 @@ from tests.new_arch_fixtures import config, placement, raw_object, scene
 
 
 class OrganizeCandidateGenerationFixTests(unittest.TestCase):
+    def test_final_object_footprint_reports_unfinished_place_blocker(self):
+        current = scene([
+            raw_object(1, "blue", [0.275, 0.095, 0.0], size=(0.024, 0.024, 0.024)),
+            raw_object(
+                2, "long_rectangle", [0.4085, 0.1982, -0.0063],
+                label="rectangle red", size=(0.0587, 0.0271, 0.0152),
+                yaw_deg=8.4,
+            ),
+        ])
+        obj = current.object_by_track("blue")
+        place_pose = {
+            "frame_id": "base_link",
+            "position_m": [0.3807, 0.1772, 0.015],
+            "yaw_deg": -42.0,
+        }
+        checks = placement_path_checks(
+            current,
+            obj,
+            place_pose,
+            {
+                "release_pose": {**place_pose, "yaw_deg": -42.0},
+                "transport_path": (),
+            },
+            config(),
+        )
+        self.assertFalse(checks["place_object_footprint_safe"])
+        self.assertFalse(checks["release_safe"])
+        self.assertIn("long_rectangle", checks["place_blocking_track_ids"])
+
     def test_145_degree_grasp_axis_normalizes_to_negative_35(self):
         self.assertEqual(normalize_gripper_yaw_deg(145.0), -35.0)
 
@@ -153,6 +185,21 @@ class OrganizeCandidateGenerationFixTests(unittest.TestCase):
         self.assertAlmostEqual(push_end[0] - contact[0], 0.056)
         self.assertAlmostEqual(targets["pre_push"][2] - targets["contact"][2], 0.05)
         self.assertAlmostEqual(targets["retreat"][2] - targets["push_end"][2], 0.10)
+
+    def test_thin_block_uses_contact_height_inside_detected_object(self):
+        current = scene([raw_object(
+            1, "thin", [0.39, 0.20, 0.0068],
+            size=[0.0577, 0.0274, 0.0136],
+        )])
+        physical = build_nudge_parameters(
+            current.current_objects[0], [1.0, 0.0, 0.0], 0.05, 0.0, config(),
+        )
+        self.assertAlmostEqual(physical["requested_contact_z_offset_m"], 0.015)
+        self.assertAlmostEqual(physical["contact_z_offset_m"], 0.0102)
+        self.assertLessEqual(
+            physical["contact_z_offset_m"],
+            0.75 * current.current_objects[0].size_xyz_m[2],
+        )
 
     def test_blocked_contact_side_rejects_only_that_direction(self):
         current = scene([raw_object(1, "a", [0.50, 0.0, 0.02])])

@@ -34,12 +34,18 @@ def placement_path_checks(
             "yaw_deg": float(place_pose.get("yaw_deg", obj.yaw_deg)),
         }
     )
-    obstacles = [other for other in scene.current_objects if other.track_id != obj.track_id]
+    obstacles = [
+        other for other in (*scene.current_objects, *scene.collision_obstacles)
+        if other.track_id != obj.track_id
+    ]
     release_pose = physical.get("release_pose") or {}
     release_yaw = float(release_pose.get("yaw_deg", physical.get("release_gripper_yaw_deg", obj.yaw_deg)))
     clearance = evaluate_gripper_pose_clearance(
         moved, [moved, *obstacles],
         release_yaw, config,
+    )
+    footprint_blockers = _placement_footprint_blockers(
+        moved, obstacles, scene.protected_tracks, config,
     )
     gripper = config.section("gripper")
     transport = check_transport_swept_volume(
@@ -57,20 +63,98 @@ def placement_path_checks(
         tcp_offset_tool_m=gripper["tcp_offset_tool_m"],
         safety_margin_m=float(config.section("safety")["object_clearance_m"]),
     )
-    place_clear = bool(clearance.get("finger_safe") and clearance.get("palm_safe"))
+    # A placement is not safe merely because the narrow fingertips and palm
+    # clear the scene.  During the final descent (and especially while opening
+    # to release), either wide upper finger can overlap a neighboring block.
+    # ``descent_safe`` is the aggregate produced by
+    # ``evaluate_gripper_pose_clearance`` and includes that upper-finger
+    # envelope.  The former two-term gate silently discarded this result.
+    gripper_place_clear = bool(
+        clearance.get("finger_safe")
+        and clearance.get("palm_safe")
+        and clearance.get("upper_finger_safe")
+        and clearance.get("descent_safe")
+    )
+    place_clear = bool(gripper_place_clear and not footprint_blockers)
+    gripper_blockers = {
+        str(track_id) for track_id in clearance.get("blocking_track_ids", [])
+        if track_id
+    }
     return {
         "transport_safe": bool(transport.get("feasible")),
         "place_descent_safe": place_clear,
         "release_safe": place_clear,
         "return_safe": place_clear,
         "place_finger_safe": bool(clearance.get("finger_safe")),
+        "place_upper_finger_safe": bool(clearance.get("upper_finger_safe")),
         "place_palm_safe": bool(clearance.get("palm_safe")),
-        "place_blocking_track_ids": list(clearance.get("blocking_track_ids", [])),
+        "place_gripper_descent_safe": bool(clearance.get("descent_safe")),
+        "place_upper_finger_blocking_track_ids": list(
+            clearance.get("upper_finger_blocking_track_ids", ())
+        ),
+        "place_object_footprint_safe": not footprint_blockers,
+        "place_object_footprint_blocking_track_ids": footprint_blockers,
+        "place_blocking_track_ids": sorted(
+            gripper_blockers.union(footprint_blockers)
+        ),
         "release_gripper_yaw_deg": release_yaw,
         "transport_checked_components": transport.get("checked_components", []),
         "transport_blocking_track_ids": sorted({str(item.get("id")) for item in transport.get("collisions", [])}),
         "transport_swept_volume_reason": transport.get("reason"),
     }
+
+
+def _placement_footprint_blockers(
+    moved: SceneObjectState,
+    obstacles: Sequence[SceneObjectState],
+    protected_tracks: Sequence[str],
+    config: StackDemoConfig,
+) -> list[str]:
+    """Reject ordinary live clutter under the final released footprint.
+
+    Protected completed objects are allowed because house upper roles, roof,
+    and triangle intentionally overlap their verified supports in XY.  An
+    unfinished object becomes a ``place_blocking_track_id`` so the existing
+    clearance-edge generator can move it first.
+    """
+    protected = set(protected_tracks)
+    clearance = float(config.section("safety")["object_clearance_m"])
+    moved_bounds = _footprint_bounds(moved)
+    return sorted(
+        other.track_id
+        for other in obstacles
+        if other.track_id not in protected
+        and _footprints_overlap(
+            moved_bounds, _footprint_bounds(other), clearance,
+        )
+    )
+
+
+def _footprint_bounds(obj: SceneObjectState) -> tuple[float, float, float, float]:
+    angle = math.radians(float(obj.yaw_deg))
+    half_x = 0.5 * float(obj.size_xyz_m[0])
+    half_y = 0.5 * float(obj.size_xyz_m[1])
+    projected_x = abs(half_x * math.cos(angle)) + abs(half_y * math.sin(angle))
+    projected_y = abs(half_x * math.sin(angle)) + abs(half_y * math.cos(angle))
+    return (
+        obj.center_xyz_m[0] - projected_x,
+        obj.center_xyz_m[0] + projected_x,
+        obj.center_xyz_m[1] - projected_y,
+        obj.center_xyz_m[1] + projected_y,
+    )
+
+
+def _footprints_overlap(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+    clearance: float,
+) -> bool:
+    return not (
+        first[1] + clearance <= second[0]
+        or second[1] + clearance <= first[0]
+        or first[3] + clearance <= second[2]
+        or second[3] + clearance <= first[2]
+    )
 
 
 def build_nudge_parameters(
@@ -87,6 +171,10 @@ def build_nudge_parameters(
         "push_direction_base": [float(value) for value in direction[:3]],
         "push_distance_m": float(distance),
         "push_wrist_yaw_deg": float(wrist_yaw),
+        "contact_z_offset_m": float(plan["contact_z_offset_m"]),
+        "requested_contact_z_offset_m": float(
+            config.section("clearing")["push_contact_z_offset_m"]
+        ),
         "push_start": {"frame_id": "base_link", "position_m": list(targets["contact"])},
         "push_end": {"frame_id": "base_link", "position_m": list(targets["push_end"])},
         "prepush_pose": {"frame_id": "base_link", "position_m": list(targets["pre_push"])},
@@ -115,7 +203,10 @@ def nudge_sweep_checks(
     )
     plan["workspace_bounds"] = dict(config.workspace)
     gripper = config.section("gripper")
-    geometry_objects = [_geometry_object_dict(item) for item in scene.current_objects]
+    geometry_objects = [
+        _geometry_object_dict(item)
+        for item in (*scene.current_objects, *scene.collision_obstacles)
+    ]
     entry_report = _check_push_tool_sweep(
         plan,
         geometry_objects,
@@ -266,13 +357,25 @@ def _push_plan(
         "distance_m": float(distance),
         "lift_m": float(config.section("safety")["approach_height_m"]),
         "retreat_lift_m": float(config.section("safety")["observation_height_m"]),
-        "contact_z_offset_m": float(config.section("clearing")["push_contact_z_offset_m"]),
+        "contact_z_offset_m": _effective_push_contact_z_offset(blocker, config),
         **contact_geometry,
         "target_yaw_deg": float(wrist_yaw),
         "robot_exclusion_geometry": [
             dict(item) for item in config.robot_exclusion_geometry
         ],
     }
+
+
+def _effective_push_contact_z_offset(
+    blocker: SceneObjectState,
+    config: StackDemoConfig,
+) -> float:
+    """Keep fingertip contact above the table and inside the object's height."""
+    height_m = float(blocker.size_xyz_m[2])
+    requested_m = float(config.section("clearing")["push_contact_z_offset_m"])
+    minimum_m = max(0.004, min(0.012, 0.20 * height_m))
+    maximum_m = max(0.004, 0.75 * height_m)
+    return min(max(requested_m, minimum_m), maximum_m)
 
 
 def _push_contact_geometry(

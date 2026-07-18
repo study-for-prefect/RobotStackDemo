@@ -250,7 +250,10 @@ class MoveItEdgeAdapter:
             "distance_m": float(physical["push_distance_m"]),
             "lift_m": float(self._config.section("safety")["approach_height_m"]),
             "retreat_lift_m": float(self._config.section("safety")["observation_height_m"]),
-            "contact_z_offset_m": float(self._config.section("clearing")["push_contact_z_offset_m"]),
+            "contact_z_offset_m": float(physical.get(
+                "contact_z_offset_m",
+                self._config.section("clearing")["push_contact_z_offset_m"],
+            )),
             "contact_standoff_m": float(physical["contact_standoff_m"]),
             "contact_clearance_m": float(physical["contact_clearance_m"]),
             "prepush_clearance_m": float(physical["prepush_clearance_m"]),

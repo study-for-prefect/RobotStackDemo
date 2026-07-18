@@ -16,6 +16,7 @@ POLICY_GENERATION_CONFIG = {
     "target_selection": {"num_ctx": 12288, "num_predict": 768},
     "edge_selection": {"num_ctx": 12288, "num_predict": 768},
     "orientation_analysis": {"num_ctx": 24576, "num_predict": 8192},
+    "semantic_detection_review": {"num_ctx": 12288, "num_predict": 1024},
     "final_json_generation": {"num_ctx": 12288, "num_predict": 768},
 }
 _MODEL_RUNTIME: Dict[str, dict] = {}

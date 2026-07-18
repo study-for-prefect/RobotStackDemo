@@ -247,6 +247,15 @@ def parse_args():
         help="Refuse final pick descent when the full tool orientation differs from the target by more than this.",
     )
     parser.add_argument(
+        "--max-final-position-error-m",
+        type=float,
+        default=0.005,
+        help=(
+            "Treat an executed Cartesian motion as failed when measured tool0 position "
+            "differs from its goal by more than this distance."
+        ),
+    )
+    parser.add_argument(
         "--orientation-settle-error-deg",
         type=float,
         default=0.2,

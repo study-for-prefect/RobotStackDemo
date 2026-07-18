@@ -94,11 +94,19 @@ def moveit_frame_args(args: Any) -> list[str]:
     return ["--base-link", args.base_frame, "--end-effector", args.tool_frame]
 
 
-def pose_command(args: Any, pose_json: str, *, stage_wrist_3: bool = False) -> list[str]:
+def pose_command(
+    args: Any,
+    pose_json: str,
+    *,
+    stage_wrist_3: bool = False,
+    motion_scale: float = 1.0,
+) -> list[str]:
+    velocity = float(args.velocity) * float(motion_scale)
+    acceleration = float(args.acceleration) * float(motion_scale)
     command = [
         args.ros_python, "tools/robot/moveit_plan_preview.py",
         "--ready-only", "--ready-joint-pose-json", pose_json,
-        "--velocity", str(args.velocity), "--acceleration", str(args.acceleration),
+        "--velocity", str(velocity), "--acceleration", str(acceleration),
         *moveit_frame_args(args), "--tf-timeout", str(args.tf_timeout), "--execute",
     ]
     if stage_wrist_3:
@@ -149,7 +157,9 @@ def return_to_ready_observation(args: Any) -> None:
         return
     if not args.ready_pose_json or not os.path.isfile(args.ready_pose_json):
         raise RuntimeError(f"ready pose JSON not found: {args.ready_pose_json}")
-    run(pose_command(args, args.ready_pose_json, stage_wrist_3=True))
+    run(pose_command(
+        args, args.ready_pose_json, stage_wrist_3=True, motion_scale=2.0,
+    ))
     if args.init_stable_wait_s > 0:
         time.sleep(float(args.init_stable_wait_s))
 
@@ -273,6 +283,7 @@ def snapshot_command(args: Any, output_dir: str) -> list[str]:
         "--estimate-tabletop",
         "--detector-weight", args.detector_weight,
         "--score-thresh", str(args.score_thresh),
+        "--candidate-score-thresh", str(args.candidate_score_thresh),
         "--detector-imgsz", str(args.detector_imgsz),
         "--detector-iou", str(args.detector_iou),
         "--detector-device", args.detector_device,

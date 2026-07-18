@@ -113,6 +113,10 @@ def process_rgbd_scene(
     write_json(paths["tabletop"], tabletop_payload)
 
     detections = drop_transient_detection_fields(detections)
+    primary_detections = [
+        item for item in detections
+        if bool(item.get("primary_detector_passed", True))
+    ]
     write_json(
         paths["objects"],
         {
@@ -129,12 +133,13 @@ def process_rgbd_scene(
     cv2.imwrite(paths["annotated"], annotated)
     private_state = build_private_state(
         args,
-        detections,
+        primary_detections,
         paths["snapshot"],
         paths["annotated"],
         used_profile,
         table_plane=table_plane,
     )
+    private_state["semantic_review_candidates"] = detections
     private_state["perception_source"] = "perception_server"
     write_json(paths["private_state"], private_state)
     return private_state, paths

@@ -103,16 +103,39 @@ def execute_one_edge(
 
     executor.transport(edge)
     stages.append({"stage": "transport", "status": "executed_after_grasp_verification"})
-    executor.descend_place(edge)
+    try:
+        executor.descend_place(edge)
+    except Exception as descent_error:
+        stages.append({
+            "stage": "place_descent",
+            "status": "failed",
+            "reason": str(descent_error),
+        })
+        try:
+            executor.retreat(edge)
+            stages.append({
+                "stage": "retreat_while_holding",
+                "status": "executed_after_place_descent_failure",
+            })
+        except Exception as retreat_error:
+            raise RuntimeError(
+                "place descent failed and safe retreat while holding also failed: "
+                f"descent={descent_error}; retreat={retreat_error}"
+            ) from descent_error
+        raise
     stages.append({"stage": "place_descent", "status": "executed"})
     executor.release(edge)
     stages.append({"stage": "release", "status": "executed"})
     executor.retreat(edge)
-    stages.append({"stage": "retreat", "status": "executed"})
-    executor.return_to_observation_pose(edge)
-    stages.append({"stage": "return_to_observation_pose", "status": "executed"})
+    stages.append({
+        "stage": "retreat",
+        "status": "executed_to_safe_height_before_place_verification",
+    })
     after_place = observer.observe("post_place")
-    stages.append({"stage": "fresh_post_place_observation", "scene_revision": after_place.scene_revision})
+    stages.append({
+        "stage": "fresh_post_place_observation_at_safe_height",
+        "scene_revision": after_place.scene_revision,
+    })
     place = verify_place_result(edge, before, after_place, destination_check)
     mark_after_place = getattr(observer, "mark_after_place", None)
     if callable(mark_after_place):
@@ -120,6 +143,18 @@ def execute_one_edge(
         stages.append({
             "stage": "track_state",
             "status": "placed" if place.success else "unresolved",
+        })
+    if place.success:
+        executor.return_to_observation_pose(edge)
+        stages.append({
+            "stage": "return_to_observation_pose",
+            "status": "executed_after_place_verification",
+        })
+    else:
+        stages.append({
+            "stage": "return_to_observation_pose",
+            "status": "skipped",
+            "reason": "place_not_verified",
         })
     return EdgeExecutionResult(
         "place_verified" if place.success else "place_failed",

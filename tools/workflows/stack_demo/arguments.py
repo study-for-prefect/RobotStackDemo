@@ -49,6 +49,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--vlm-max-budget-retries", type=int, default=2)
     parser.add_argument("--unload-model-after-task", action="store_true")
     parser.add_argument("--no-image", action="store_true")
+    parser.add_argument(
+        "--no-vlm-semantic-review",
+        action="store_true",
+        help="Disable initial build-house VLM review of YOLO labels and low-confidence candidates.",
+    )
 
     parser.add_argument("--perception-server-url", default=os.environ.get("ROBOT_SCENE_PERCEPTION_URL", "http://127.0.0.1:8765"))
     parser.add_argument("--perception-server-timeout-s", type=float, default=15.0)
@@ -58,6 +63,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ros-python", default="/usr/bin/python3")
     parser.add_argument("--detector-weight", default="models/yolo/weights/best.pt")
     parser.add_argument("--score-thresh", type=float, default=0.5)
+    parser.add_argument("--candidate-score-thresh", type=float, default=0.15)
     parser.add_argument("--detector-imgsz", type=int, default=960)
     parser.add_argument("--detector-iou", type=float, default=0.45)
     parser.add_argument("--detector-device", default="cuda:0")

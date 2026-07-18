@@ -144,6 +144,7 @@ def _bind(track: dict, detection: dict, revision: int, features: dict, ambiguous
         "current_object_ref": current_ref, "detector_object_id": detection.get("id"), "label": detection.get("label"),
         "semantic_shape": infer_object_shape(detection), "color": _color(detection), "center_base_m": get_center(detection),
         "dimensions_m": measured_size, "bbox": detection.get("bbox_xyxy_px") or detection.get("bbox"),
+        "table_yaw_deg": detection.get("table_yaw_deg", detection.get("yaw_deg", track.get("table_yaw_deg", 0.0))),
         "role": detection.get("role", track.get("role")), "state": detection.get("state", track.get("state")),
         "visible": True, "tracking_ambiguous": ambiguous,
         "last_seen_revision": int(revision),
@@ -178,15 +179,37 @@ def _match_features(
         size_delta = 0.015
     else:
         size_delta = 0.0
+    # The detector can change a block's shape label after manipulation (for
+    # example square -> semi-circle when one edge is partly occluded).  A
+    # post-action pose anchor is stronger identity evidence than that single
+    # semantic label, but only inside a tight metric/color/size gate.  Without
+    # this exception the released object gets a new track id and a physically
+    # correct house placement is reported as invisible.
+    anchored_shape_override = bool(
+        anchored is not None
+        and color_ok
+        and current is not None
+        # The release pose carries the real-machine downward compensation,
+        # whereas perception reports the block's settled geometric centre
+        # relative to the local table.  Keep XY tight and allow only the
+        # expected small Z convention/settling difference.
+        and math.dist(anchored[:2], current[:2]) <= 0.012
+        and abs(float(anchored[2]) - float(current[2])) <= 0.030
+        and size_delta <= 0.020
+    )
     old_box, box = track.get("bbox"), detection.get("bbox_xyxy_px") or detection.get("bbox")
     bbox_overlap = _bbox_iou(old_box, box)
     cost = distance / 0.15 + size_delta / 0.10 + (1.0 - bbox_overlap) * 0.15
     if track.get("role") in {"base", "structure", "protected"}: cost *= 0.75
     return {
         "compatible": bool(
-            shape_ok and color_ok and current is not None and action_anchor_compatible
+            (shape_ok or anchored_shape_override)
+            and color_ok
+            and current is not None
+            and action_anchor_compatible
         ),
         "shape_compatible": shape_ok,
+        "action_anchor_shape_override": anchored_shape_override,
         "color_compatible": color_ok,
         "center_distance_m": distance,
         "action_anchor_compatible": action_anchor_compatible,

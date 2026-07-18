@@ -65,6 +65,8 @@ def apply_detector_config(args: argparse.Namespace) -> argparse.Namespace:
         args.detector_weight = config["weights"]
     if not _cli_flag_present("--score-thresh") and config.get("conf") is not None:
         args.score_thresh = float(config["conf"])
+    if not _cli_flag_present("--candidate-score-thresh") and config.get("candidate_conf") is not None:
+        args.candidate_score_thresh = float(config["candidate_conf"])
     if not _cli_flag_present("--detector-iou") and config.get("iou") is not None:
         args.detector_iou = float(config["iou"])
     if not _cli_flag_present("--detector-imgsz") and config.get("imgsz") is not None:
@@ -111,6 +113,7 @@ class PerceptionServerState:
 
     def effective_config(self) -> Dict[str, Any]:
         return {
+            "semantic_review_candidate_pool": True,
             "color_topic": str(self.args.color_topic),
             "depth_topic": str(self.args.depth_topic),
             "camera_info_topic": str(self.args.camera_info_topic),
@@ -120,6 +123,7 @@ class PerceptionServerState:
             "detector_weight": os.path.abspath(str(self.args.detector_weight)),
             "detector_imgsz": int(self.args.detector_imgsz),
             "detector_iou": float(self.args.detector_iou),
+            "candidate_score_thresh": float(self.args.candidate_score_thresh),
             "detector_device": str(self.args.detector_device),
             "request_timeout_s": float(self.args.request_timeout_s),
             "max_tf_age_s": float(self.args.max_tf_age_s),

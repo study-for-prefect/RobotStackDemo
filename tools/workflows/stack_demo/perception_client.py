@@ -174,6 +174,7 @@ def _expected_server_config(args: Any) -> dict[str, Any]:
     if not os.path.isabs(weight):
         weight = os.path.join(PROJECT_ROOT, weight)
     return {
+        "semantic_review_candidate_pool": True,
         "color_topic": str(args.color_topic),
         "depth_topic": str(args.depth_topic),
         "camera_info_topic": str(args.camera_info_topic),
@@ -183,5 +184,6 @@ def _expected_server_config(args: Any) -> dict[str, Any]:
         "detector_weight": os.path.abspath(weight),
         "detector_imgsz": int(args.detector_imgsz),
         "detector_iou": float(args.detector_iou),
+        "candidate_score_thresh": float(args.candidate_score_thresh),
         "detector_device": str(args.detector_device),
     }
