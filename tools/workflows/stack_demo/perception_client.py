@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 
 from robot_scene_pipeline.perception_contract import (
+    PERCEPTION_PIPELINE_REVISION,
     PerceptionServerError,
     PerceptionServerHealth,
     PerceptionSnapshotRequest,
@@ -174,6 +175,7 @@ def _expected_server_config(args: Any) -> dict[str, Any]:
     if not os.path.isabs(weight):
         weight = os.path.join(PROJECT_ROOT, weight)
     return {
+        "perception_pipeline_revision": PERCEPTION_PIPELINE_REVISION,
         "semantic_review_candidate_pool": True,
         "color_topic": str(args.color_topic),
         "depth_topic": str(args.depth_topic),

@@ -7,7 +7,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from robot_scene_pipeline.perception_contract import PerceptionServerError
-from tools.workflows.stack_demo.app import _merge_expected_tracks
+from tools.workflows.stack_demo.app import (
+    _LiveObserver,
+    _merge_expected_tracks,
+    _reobserve_without_action,
+)
 from tools.workflows.stack_demo.clutter.edge_generation import (
     PlacementTarget,
     TargetSpec,
@@ -21,6 +25,7 @@ from tools.workflows.stack_demo.common.action_validation import FinalSafetyGate
 from tools.workflows.stack_demo.common.moveit_adapter import MoveItEdgeAdapter
 from tools.workflows.stack_demo.common.track_lifecycle import mark_track_after_place
 from tools.workflows.stack_demo.commands import (
+    _refresh_tf_with_retry,
     _perception_snapshot_with_retry,
     return_to_ready_observation,
 )
@@ -45,6 +50,54 @@ from tests.new_arch_fixtures import (
 
 
 class NewExecutionOrganizeTests(unittest.TestCase):
+    def test_live_house_review_receives_incremented_scene_revision(self):
+        before = scene([raw_object(1, "roof", [0.50, 0.0, 0.02])], revision=4)
+        reviewed_revisions = []
+
+        def review(_args, raw, _directory, _task_type):
+            reviewed_revisions.append(raw["scene_revision"])
+            return raw
+
+        with tempfile.TemporaryDirectory() as output_dir, patch(
+            "tools.workflows.stack_demo.app.capture_empty_current_pose",
+            return_value={"frame_id": "base_link", "objects": []},
+        ), patch(
+            "tools.workflows.stack_demo.app._review_live_observation",
+            side_effect=review,
+        ):
+            observer = _LiveObserver(
+                SimpleNamespace(), config(), "build_house", Path(output_dir), 1,
+                before, (), [], set(), {}, edge(revision=4),
+            )
+            observed = observer.observe("post_grasp")
+
+        self.assertEqual(reviewed_revisions, [5])
+        self.assertEqual(observed.scene_revision, 5)
+
+    def test_no_action_house_reobserve_reviews_the_new_revision(self):
+        before = scene([raw_object(1, "roof", [0.50, 0.0, 0.02])], revision=6)
+        reviewed_revisions = []
+
+        def review(_args, raw, _directory, _task_type):
+            reviewed_revisions.append(raw["scene_revision"])
+            return raw
+
+        with tempfile.TemporaryDirectory() as output_dir, patch(
+            "tools.workflows.stack_demo.app.capture_empty_current_pose",
+            return_value={"frame_id": "base_link", "objects": []},
+        ), patch(
+            "tools.workflows.stack_demo.app._review_live_observation",
+            side_effect=review,
+        ):
+            observed, raw, _ = _reobserve_without_action(
+                SimpleNamespace(offline_scene_state=None), config(), "build_house",
+                Path(output_dir), 1, 1, before, (), [], set(), {},
+            )
+
+        self.assertEqual(reviewed_revisions, [7])
+        self.assertEqual(raw["scene_revision"], 7)
+        self.assertEqual(observed.scene_revision, 7)
+
     def test_12_no_feasible_edge_is_not_task_complete(self):
         current = scene([raw_object(1, "t1", [0.5, 0.0, 0.02])])
         state = build_organize_task_state(current, config())
@@ -169,9 +222,50 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         result = execute_one_edge(edge(), before, executor, MockObserver([after_lift, after_place]), lambda action, state: (False, {"inside": False}))
         self.assertFalse(result.success)
         self.assertEqual(result.status, "place_failed")
-        self.assertEqual(executor.calls[-1], "retreat")
-        self.assertNotIn("return_observation", executor.calls)
+        self.assertEqual(executor.calls[-2:], ["retreat", "return_observation"])
         self.assertEqual(result.stages[-1]["reason"], "place_not_verified")
+
+    def test_lifted_same_geometry_new_track_verifies_grasp(self):
+        before = scene([raw_object(
+            1, "track_red_01", [0.4507, 0.1915, -0.0055],
+            label="rectangle red", color="red", size=[0.0453, 0.0266, 0.0138],
+        )])
+        after_lift = scene([raw_object(
+            2, "track_red_03", [0.4626, 0.1964, 0.0114],
+            label="rectangle red", color="red", size=[0.0375, 0.0059, 0.0497],
+        )], revision=2, expected=["track_red_01"])
+        placed = scene([raw_object(
+            3, "track_red_01", [0.40, 0.27, 0.08],
+            label="rectangle red", color="red",
+        )], revision=3, expected=["track_red_01"])
+        result = execute_one_edge(
+            edge(target="track_red_01", acted="track_red_01"),
+            before, MockExecutor(), MockObserver([after_lift, placed]),
+            lambda selected, state: (True, {}),
+        )
+        self.assertTrue(result.post_grasp_verification.success)
+        self.assertEqual(
+            result.post_grasp_verification.evidence["lifted_geometry_rebound_track_id"],
+            "track_red_03",
+        )
+
+    def test_tf_lookup_retries_one_transient_failure(self):
+        args = SimpleNamespace(
+            ros_python="python3", tf_json="/tmp/test_scene_tf.json",
+            base_frame="base_link", camera_frame="camera_color_optical_frame",
+            tool_frame="tool0", tf_timeout=1.0,
+        )
+        transient = __import__("subprocess").CalledProcessError(1, ["tf_lookup"])
+        with tempfile.TemporaryDirectory() as output_dir, patch(
+            "tools.workflows.stack_demo.commands.run_non_actuating",
+            side_effect=[transient, None],
+        ) as mocked:
+            _refresh_tf_with_retry(args, output_dir)
+            attempts = json.loads(
+                (Path(output_dir) / "tf_lookup_attempts.json").read_text()
+            )
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual([item["ok"] for item in attempts], [False, True])
 
     def test_23_organize_color_region_completion(self):
         initial = scene([raw_object(1, "t1", [0.5, 0.0, 0.02], color="red")])
@@ -272,12 +366,12 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         ]
         self.assertTrue(ordinary)
         self.assertTrue(any(
-            item.physical_parameters["transport_path"][-1]["motion_role"]
+            item.physical_parameters["transport_path"][-2]["motion_role"]
             == "ordinary_yaw_only_at_safe_height"
             for item in ordinary
         ))
         self.assertTrue(all(
-            item.physical_parameters["orientation_policy"] == "downward_yaw_only"
+            item.physical_parameters["orientation_mode"] == "downward_yaw_only"
             for item in ordinary
         ))
 
@@ -648,7 +742,7 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         self.assertAlmostEqual(quaternion[2], 0.0)
         self.assertAlmostEqual(quaternion[3], 0.0)
 
-    def test_ordinary_release_contacts_surface_but_special_shape_keeps_gap(self):
+    def test_organize_objects_use_ordinary_contact_release_even_for_shape_labels(self):
         ordinary_scene = scene([raw_object(1, "ordinary", [0.5, 0.0, 0.02])])
         ordinary = generate_physical_edges(
             ordinary_scene, ["ordinary"], "organize_blocks", config(), placement,
@@ -667,7 +761,8 @@ class NewExecutionOrganizeTests(unittest.TestCase):
             special_scene, ["triangle"], "organize_blocks", config(), placement,
             lambda obj: None,
         ).edges_by_target["triangle"][0]
-        self.assertAlmostEqual(special.physical_parameters["release_height_extra_m"], 0.01)
+        self.assertAlmostEqual(special.physical_parameters["release_height_extra_m"], 0.0)
+        self.assertEqual(special.physical_parameters["orientation_mode"], "downward_yaw_only")
 
     def test_transport_skips_duplicate_fixed_yaw_destination_pose(self):
         selected = edge()
@@ -677,7 +772,7 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         }
         physical = {
             **selected.physical_parameters,
-            "orientation_policy": "downward_yaw_only",
+            "orientation_mode": "downward_yaw_only",
             "transport_path": [
                 {"position_m": [0.5, 0.0, 0.12], "yaw_deg": 35.0},
                 duplicate,
@@ -700,7 +795,7 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         selected = edge()
         physical = {
             **selected.physical_parameters,
-            "orientation_policy": "downward_yaw_only",
+            "orientation_mode": "downward_yaw_only",
             "transport_path": [
                 {"position_m": [0.5, 0.0, 0.12], "yaw_deg": 35.0},
                 {"position_m": [0.28, 0.18, 0.12], "yaw_deg": 35.0},
@@ -723,7 +818,7 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         selected = edge()
         physical = {
             **selected.physical_parameters,
-            "orientation_policy": "downward_yaw_only",
+            "orientation_mode": "downward_yaw_only",
             "release_pose": {"position_m": [0.28, 0.18, 0.04], "yaw_deg": 35.0},
         }
         selected = replace(selected, physical_parameters=physical)
@@ -744,7 +839,7 @@ class NewExecutionOrganizeTests(unittest.TestCase):
             selected,
             physical_parameters={
                 **selected.physical_parameters,
-                "orientation_policy": "downward_yaw_only",
+                "orientation_mode": "downward_yaw_only",
                 "grasp_pose": {"position_m": [0.27, 0.23, 0.0], "yaw_deg": -25.0},
                 "lift_pose": {"position_m": [0.27, 0.23, 0.1], "yaw_deg": -25.0},
             },
@@ -771,7 +866,7 @@ class NewExecutionOrganizeTests(unittest.TestCase):
             physical_parameters={
                 **selected.physical_parameters,
                 "acted_object_shape": "triangle",
-                "orientation_policy": "full_3d_allowed",
+                "orientation_mode": "fixed_grasp_tcp_3d_rotation",
                 "grasp_pose": {
                     "position_m": [0.27, 0.23, 0.0],
                     "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
@@ -791,6 +886,134 @@ class NewExecutionOrganizeTests(unittest.TestCase):
         self.assertNotIn("--hover-disable-orientation-settle", command)
         strategy_index = command.index("--pre-rotate-strategy")
         self.assertEqual(command[strategy_index + 1], "pose")
+
+    def test_special_shape_place_descent_disables_remote_ik_settle(self):
+        selected = edge()
+        selected = replace(
+            selected,
+            physical_parameters={
+                **selected.physical_parameters,
+                "acted_object_shape": "triangle",
+                "orientation_mode": "fixed_grasp_tcp_3d_rotation",
+                "release_pose": {
+                    "position_m": [0.4, 0.27, 0.069],
+                    "orientation_xyzw": [0.9989, 0.0475, 0.0, 0.0],
+                },
+            },
+        )
+        args = SimpleNamespace(
+            ros_python="/usr/bin/python3", tool_frame="tool0", tf_timeout=8.0,
+        )
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "tools.workflows.stack_demo.common.moveit_adapter.run"
+        ) as execute:
+            MoveItEdgeAdapter(args, config(), directory).descend_place(selected)
+        command = execute.call_args.args[0]
+        self.assertIn("--hover-disable-orientation-settle", command)
+        self.assertIn("--pre-rotate-before-translation", command)
+        strategy_index = command.index("--pre-rotate-strategy")
+        self.assertEqual(command[strategy_index + 1], "pose")
+
+    def test_special_preflight_uses_one_continuous_full_3d_pose_sequence(self):
+        selected = edge()
+        quat0 = [0.70710678, 0.0, 0.0, 0.70710678]
+        quat1 = [0.6830127, -0.1830127, 0.1830127, 0.6830127]
+        selected = replace(selected, physical_parameters={
+            **selected.physical_parameters,
+            "orientation_mode": "fixed_grasp_tcp_3d_rotation",
+            # Historical special edges keep the full grasp quaternion on lift;
+            # approach/grasp must inherit it without falling back to yaw.
+            "approach_pose": {"position_m": [0.50, 0.0, 0.10], "yaw_deg": 0.0},
+            "grasp_pose": {"position_m": [0.50, 0.0, 0.02], "yaw_deg": 0.0},
+            "lift_pose": {"position_m": [0.50, 0.0, 0.12], "orientation_xyzw": quat0},
+            "transport_path": [
+                {"position_m": [0.50, 0.0, 0.12], "orientation_xyzw": quat0},
+                {"position_m": [0.50, 0.0, 0.12], "orientation_xyzw": quat1,
+                 "motion_role": "fixed_tcp_rotation_1"},
+                {"position_m": [0.28, 0.18, 0.12], "orientation_xyzw": quat1,
+                 "motion_role": "roof_transport"},
+            ],
+            "release_pose": {"position_m": [0.28, 0.18, 0.05], "orientation_xyzw": quat1},
+        })
+        args = SimpleNamespace(
+            ros_python="/usr/bin/python3", tool_frame="tool0", tf_timeout=8.0,
+        )
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "tools.workflows.stack_demo.common.moveit_adapter.run_non_actuating"
+        ) as plan:
+            result = MoveItEdgeAdapter(args, config(), directory).check(selected)
+            self.assertTrue(result["passed"])
+            self.assertEqual(plan.call_count, 1)
+            command = plan.call_args.args[0]
+            self.assertIn("--pose-sequence-json", command)
+            self.assertNotIn("--hover-only", command)
+            sequence_path = Path(command[command.index("--pose-sequence-json") + 1])
+            payload = json.loads(sequence_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema_version"], "tcp_pose_sequence_v1")
+        self.assertEqual(payload["waypoints"][0]["orientation_xyzw"], quat0)
+        self.assertEqual(payload["waypoints"][1]["orientation_xyzw"], quat0)
+        self.assertEqual(
+            [waypoint["name"] for waypoint in payload["waypoints"]],
+            ["approach_pose", "grasp_pose", "lift_pose", "fixed_tcp_rotation_1",
+             "roof_transport", "release_pose", "vertical_retreat_final_orientation_held"],
+        )
+        self.assertEqual(payload["waypoints"][3]["orientation_xyzw"], quat1)
+        self.assertEqual(payload["waypoints"][-1]["orientation_xyzw"], quat1)
+
+    def test_special_transport_executes_as_one_continuous_sequence(self):
+        selected = edge()
+        quat0 = [0.70710678, 0.0, 0.0, 0.70710678]
+        quat1 = [0.6830127, -0.1830127, 0.1830127, 0.6830127]
+        selected = replace(selected, physical_parameters={
+            **selected.physical_parameters,
+            "orientation_mode": "fixed_grasp_tcp_3d_rotation",
+            "transport_path": [
+                {"position_m": [0.50, 0.0, 0.12], "orientation_xyzw": quat0},
+                {"position_m": [0.50, 0.0, 0.12], "orientation_xyzw": quat1},
+                {"position_m": [0.28, 0.18, 0.12], "orientation_xyzw": quat1},
+            ],
+        })
+        args = SimpleNamespace(
+            ros_python="/usr/bin/python3", tool_frame="tool0", tf_timeout=8.0,
+        )
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "tools.workflows.stack_demo.common.moveit_adapter.run"
+        ) as execute:
+            MoveItEdgeAdapter(args, config(), directory).transport(selected)
+            self.assertEqual(execute.call_count, 1)
+            command = execute.call_args.args[0]
+            self.assertIn("--pose-sequence-json", command)
+            self.assertIn("--execute", command)
+
+    def test_special_retreat_keeps_release_quaternion_above_roof(self):
+        selected = edge()
+        release_quaternion = [0.92, -0.02, 0.01, -0.39]
+        selected = replace(selected, physical_parameters={
+            **selected.physical_parameters,
+            "orientation_mode": "fixed_grasp_tcp_3d_rotation",
+            "release_pose": {
+                "position_m": [0.4, 0.27, 0.06],
+                "orientation_xyzw": release_quaternion,
+            },
+        })
+        args = SimpleNamespace(
+            ros_python="/usr/bin/python3", tool_frame="tool0", tf_timeout=8.0,
+        )
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "tools.workflows.stack_demo.common.moveit_adapter.run"
+        ) as execute:
+            MoveItEdgeAdapter(args, config(), directory).retreat(selected)
+        command = execute.call_args.args[0]
+        quaternion_index = command.index("--hover-orientation-xyzw")
+        actual = [float(value) for value in command[quaternion_index + 1:quaternion_index + 5]]
+        self.assertEqual(actual, release_quaternion)
+        self.assertNotEqual(actual, [1.0, 0.0, 0.0, 0.0])
+        self.assertIn("--hover-disable-orientation-settle", command)
+
+    def test_tiny_negative_quaternion_cli_value_never_uses_exponent_notation(self):
+        value = MoveItEdgeAdapter._cli_float(-9.290394557142738e-05)
+        self.assertEqual(value, "-0.00009290394557143")
+        self.assertNotIn("e", value.lower())
 
 
 def _one_option():

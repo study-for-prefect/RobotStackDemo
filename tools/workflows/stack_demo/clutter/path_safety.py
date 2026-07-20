@@ -10,6 +10,7 @@ from robot_scene_pipeline.tool_swept_volume import check_tool_swept_volume, chec
 from tools.robot.push_primitives import build_push_targets
 
 from ..common.config import StackDemoConfig
+from ..common.pose3d import rotation_error_deg
 from ..common.scene_state import ClutterSceneState, SceneObjectState
 from .grasp_edges import evaluate_gripper_pose_clearance
 
@@ -40,8 +41,16 @@ def placement_path_checks(
     ]
     release_pose = physical.get("release_pose") or {}
     release_yaw = float(release_pose.get("yaw_deg", physical.get("release_gripper_yaw_deg", obj.yaw_deg)))
+    release_height_extra = float(physical.get("release_height_extra_m", 0.0))
+    release_moved = SceneObjectState(**{
+        **{name: getattr(moved, name) for name in moved.__dataclass_fields__},
+        "center_xyz_m": (
+            moved.center_xyz_m[0], moved.center_xyz_m[1],
+            moved.center_xyz_m[2] + release_height_extra,
+        ),
+    })
     clearance = evaluate_gripper_pose_clearance(
-        moved, [moved, *obstacles],
+        release_moved, [release_moved, *obstacles],
         release_yaw, config,
     )
     footprint_blockers = _placement_footprint_blockers(
@@ -76,6 +85,7 @@ def placement_path_checks(
         and clearance.get("descent_safe")
     )
     place_clear = bool(gripper_place_clear and not footprint_blockers)
+    orientation_checks = _final_orientation_checks(physical, config)
     gripper_blockers = {
         str(track_id) for track_id in clearance.get("blocking_track_ids", [])
         if track_id
@@ -98,9 +108,45 @@ def placement_path_checks(
             gripper_blockers.union(footprint_blockers)
         ),
         "release_gripper_yaw_deg": release_yaw,
+        "release_height_extra_checked_m": release_height_extra,
         "transport_checked_components": transport.get("checked_components", []),
         "transport_blocking_track_ids": sorted({str(item.get("id")) for item in transport.get("collisions", [])}),
         "transport_swept_volume_reason": transport.get("reason"),
+        **orientation_checks,
+    }
+
+
+def _final_orientation_checks(
+    physical: Mapping[str, Any],
+    config: StackDemoConfig,
+) -> dict[str, Any]:
+    trajectory = physical.get("orientation_trajectory")
+    if not isinstance(trajectory, Mapping):
+        return {}
+    final_pre = trajectory.get("final_pre_place_pose") or {}
+    release = physical.get("release_pose") or {}
+    target_q = trajectory.get("target_orientation_xyzw")
+    final_q = final_pre.get("orientation_xyzw") if isinstance(final_pre, Mapping) else None
+    release_q = release.get("orientation_xyzw") if isinstance(release, Mapping) else None
+    valid_quaternions = all(isinstance(value, (list, tuple)) and len(value) == 4
+                            for value in (target_q, final_q, release_q))
+    tolerance = float(config.section("house_orientation")["flip_tolerance_deg"])
+    final_error = rotation_error_deg(target_q, final_q) if valid_quaternions else float("inf")
+    descent_error = rotation_error_deg(final_q, release_q) if valid_quaternions else float("inf")
+    final_position = final_pre.get("position_m") if isinstance(final_pre, Mapping) else None
+    release_position = release.get("position_m") if isinstance(release, Mapping) else None
+    vertical = bool(
+        isinstance(final_position, (list, tuple)) and isinstance(release_position, (list, tuple))
+        and len(final_position) >= 3 and len(release_position) >= 3
+        and math.dist(final_position[:2], release_position[:2]) <= 0.001
+        and float(final_position[2]) >= float(release_position[2])
+    )
+    return {
+        "final_orientation_reached_before_house_region": final_error <= tolerance,
+        "final_orientation_held_after_adjustment": descent_error <= 1.0,
+        "final_descent_vertical_only": vertical,
+        "final_pre_place_orientation_error_deg": final_error,
+        "release_descent_orientation_change_deg": descent_error,
     }
 
 
@@ -118,16 +164,41 @@ def _placement_footprint_blockers(
     clearance-edge generator can move it first.
     """
     protected = set(protected_tracks)
+    protected_objects = [
+        item for item in obstacles if item.track_id in protected
+    ]
     clearance = float(config.section("safety")["object_clearance_m"])
     moved_bounds = _footprint_bounds(moved)
     return sorted(
         other.track_id
         for other in obstacles
         if other.track_id not in protected
+        and not _contained_below_protected_structure(other, protected_objects)
         and _footprints_overlap(
             moved_bounds, _footprint_bounds(other), clearance,
         )
     )
+
+
+def _contained_below_protected_structure(
+    candidate: SceneObjectState,
+    protected_objects: Sequence[SceneObjectState],
+) -> bool:
+    """Ignore a segmentation fragment fully enclosed below verified structure."""
+    candidate_bounds = _footprint_bounds(candidate)
+    candidate_top = candidate.center_xyz_m[2] + 0.5 * candidate.size_xyz_m[2]
+    for protected in protected_objects:
+        protected_bounds = _footprint_bounds(protected)
+        protected_top = protected.center_xyz_m[2] + 0.5 * protected.size_xyz_m[2]
+        contained_xy = bool(
+            candidate_bounds[0] >= protected_bounds[0] - 0.002
+            and candidate_bounds[1] <= protected_bounds[1] + 0.002
+            and candidate_bounds[2] >= protected_bounds[2] - 0.002
+            and candidate_bounds[3] <= protected_bounds[3] + 0.002
+        )
+        if contained_xy and candidate_top <= protected_top - 0.003:
+            return True
+    return False
 
 
 def _footprint_bounds(obj: SceneObjectState) -> tuple[float, float, float, float]:

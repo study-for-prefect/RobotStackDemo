@@ -6,6 +6,7 @@ from typing import Any, Dict, Tuple
 import cv2
 
 from .depth_geometry import attach_3d, build_private_state, coordinate_convention, draw_annotated
+from .fragmented_triangle_merge import merge_fragmented_green_triangle_detections
 from .io_utils import write_json
 from .perception_contract import DetectorProcessingError, SceneProcessingError
 from .snapshot_pipeline import drop_transient_detection_fields
@@ -103,11 +104,20 @@ def process_rgbd_scene(
             args,
             transform_matrix=transform_matrix,
         )
+        detections, fragment_merges = merge_fragmented_green_triangle_detections(detections)
+        if fragment_merges:
+            # Recompute the union mask's point cloud and full 3-D orientation;
+            # never reuse either partial square's geometry as the triangle.
+            detections, table_plane = attach_tabletop_geometry(
+                detections, depth_frame, intrinsics, args,
+                transform_matrix=transform_matrix,
+            )
         tabletop_payload.update(
             {
                 "status": "ok",
                 "table_plane": table_plane,
                 "valid_object_count": sum(bool(det.get("pointcloud_geometry_valid")) for det in detections),
+                "fragment_merges": fragment_merges,
             }
         )
     write_json(paths["tabletop"], tabletop_payload)

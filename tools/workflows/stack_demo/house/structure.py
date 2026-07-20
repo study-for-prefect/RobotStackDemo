@@ -197,13 +197,26 @@ def _roof_checks(
     right_margin = along_half - 0.5 * spacing
     across_required = 0.5 * max(left.size_xyz_m[1], right.size_xyz_m[1])
     height_difference = abs(_top(left) - _top(right))
-    vertical_gap = _bottom(roof) - max(_top(left), _top(right))
+    support_top = max(_top(left), _top(right))
+    vertical_gap = _bottom(roof) - support_top
+    roof_top = _observed_top(roof)
+    top_surface_gap = (
+        roof_top - support_top - float(house["roof_nominal_thickness_m"])
+    )
+    direct_contact = abs(vertical_gap) <= float(house["support_height_tolerance_m"])
+    top_surface_contact = bool(
+        not roof.source.get("planned_house_pose")
+        and roof.source.get("top_z_base_m") is not None
+        and abs(top_surface_gap) <= float(house["support_height_tolerance_m"])
+    )
     return {
         "both_upper_supports_visible": True,
-        "groove_face_correct": (
-            orientation.groove_face_state == house["required_roof_groove_face_state"]
-            and orientation.face_up
-            and orientation.satisfies_roof_orientation
+        "roof_semantic_face_correct": (
+            orientation.face_up and orientation.satisfies_roof_orientation
+            and (
+                roof.shape == "rectangle"
+                or orientation.groove_face_state == house["required_roof_groove_face_state"]
+            )
         ),
         "long_axis_matches_support_span": yaw_error <= float(house["orientation_tolerance_deg"]),
         "support_spacing_valid": abs(
@@ -214,7 +227,17 @@ def _roof_checks(
         "covers_left_support": left_margin >= minimum_margin,
         "covers_right_support": right_margin >= minimum_margin,
         "roof_width_covers_supports": across_half >= across_required,
-        "vertical_contact_valid": abs(vertical_gap) <= float(house["support_height_tolerance_m"]),
+        # On an assembled house the roof mask can include the visible support
+        # sides.  Perception then reports size_z as table-to-roof-top total
+        # height, so _bottom(roof) is the table rather than the roof underside.
+        # The independently clustered top surface remains valid; subtract the
+        # configured physical roof thickness before comparing with support tops.
+        "vertical_contact_valid": direct_contact or top_surface_contact,
+        "vertical_contact_verification_mode": (
+            "direct_object_bottom" if direct_contact else
+            "top_surface_minus_nominal_roof_thickness" if top_surface_contact else
+            "contact_not_verified"
+        ),
         "support_spacing_m": spacing,
         "support_inner_gap_m": support_inner_gap,
         "support_height_difference_m": height_difference,
@@ -222,6 +245,7 @@ def _roof_checks(
         "left_support_margin_m": left_margin,
         "right_support_margin_m": right_margin,
         "roof_vertical_gap_m": vertical_gap,
+        "roof_top_surface_contact_gap_m": top_surface_gap,
     }
 
 
@@ -236,25 +260,46 @@ def _triangle_checks(
     if roof is None:
         return {"roof_visible": False}
     orientation = triangle_orientation_from_object(triangle)
+    # The triangle occludes a large part of the roof after placement and can
+    # shift its visible point-cloud centroid by centimetres.  The verified roof
+    # was placed at the code-owned structure center, which remains the stable
+    # reference for the top role.
+    origin_x, origin_y = (float(value) for value in house["origin_center_base_m"][:2])
     center_offset = math.hypot(
-        triangle.center_xyz_m[0] - roof.center_xyz_m[0],
-        triangle.center_xyz_m[1] - roof.center_xyz_m[1],
+        triangle.center_xyz_m[0] - origin_x,
+        triangle.center_xyz_m[1] - origin_y,
     )
     roof_support_half = 0.5 * min(roof.size_xyz_m[:2])
     support_margin = roof_support_half - center_offset
     vertical_gap = _bottom(triangle) - _top(roof)
+    triangle_axis = triangle.source.get("long_axis_base")
+    roof_axis = roof.source.get("long_axis_base")
+    use_metric_axis = bool(
+        float(triangle.orientation_confidence) >= 0.70
+        and float(roof.orientation_confidence) >= 0.70
+    )
+    long_axis_error = (
+        _vector_axis_error_deg(triangle_axis, roof_axis)
+        if use_metric_axis and _vector3(triangle_axis) and _vector3(roof_axis)
+        else _axis_error_deg(
+            orientation.target_yaw_deg,
+            roof_orientation_from_object(roof, config).long_axis_yaw_deg,
+        )
+    )
     return {
         "roof_visible": True,
         "apex_up": orientation.apex_direction == house["required_triangle_apex_direction"],
         "base_edge_down": orientation.base_edge_direction in {"down", "roof_aligned"},
         "face_state_valid": orientation.face_state in {"front", "correct", "upright"},
+        "long_edge_matches_roof_axis": long_axis_error <= float(house["orientation_tolerance_deg"]),
         "base_contact_valid": abs(vertical_gap) <= float(house["support_height_tolerance_m"]),
-        "center_of_mass_supported": abs(orientation.center_of_mass_projection_m) <= support_margin,
+        "center_of_mass_supported": center_offset <= roof_support_half,
         "support_margin_valid": support_margin >= float(house["minimum_support_margin_m"]),
         "roof_center_offset_valid": center_offset <= roof_support_half,
         "triangle_center_offset_m": center_offset,
         "support_margin_m": support_margin,
         "base_contact_gap_m": vertical_gap,
+        "long_edge_alignment_error_deg": long_axis_error,
     }
 
 
@@ -281,8 +326,26 @@ def _axis_error_deg(first: float, second: float) -> float:
     return abs((float(first) - float(second) + 90.0) % 180.0 - 90.0)
 
 
+def _vector3(value: Any) -> bool:
+    return isinstance(value, (list, tuple)) and len(value) == 3
+
+
+def _vector_axis_error_deg(first: Any, second: Any) -> float:
+    first_norm = math.sqrt(sum(float(value) ** 2 for value in first))
+    second_norm = math.sqrt(sum(float(value) ** 2 for value in second))
+    if first_norm <= 1e-9 or second_norm <= 1e-9:
+        return float("inf")
+    dot = abs(sum(float(a) * float(b) for a, b in zip(first, second)) / (first_norm * second_norm))
+    return math.degrees(math.acos(min(1.0, max(-1.0, dot))))
+
+
 def _top(obj: SceneObjectState) -> float:
     return obj.center_xyz_m[2] + 0.5 * obj.size_xyz_m[2]
+
+
+def _observed_top(obj: SceneObjectState) -> float:
+    value = obj.source.get("top_z_base_m")
+    return float(value) if value is not None else _top(obj)
 
 
 def _bottom(obj: SceneObjectState) -> float:

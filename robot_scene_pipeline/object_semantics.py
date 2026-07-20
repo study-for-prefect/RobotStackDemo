@@ -24,7 +24,9 @@ def infer_object_color(obj: dict) -> Optional[str]:
 
 
 def infer_object_shape(obj: dict) -> str:
-    explicit = str(obj.get("fused_shape") or obj.get("shape") or "").strip().lower()
+    explicit = str(
+        obj.get("semantic_shape") or obj.get("fused_shape") or obj.get("shape") or ""
+    ).strip().lower()
     return normalize_semantic_shape(explicit or str(obj.get("label") or ""))
 
 

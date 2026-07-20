@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 from typing import Any, Mapping
 
 from ..common.config import StackDemoConfig
@@ -49,17 +50,31 @@ def roof_orientation_from_object(
     config: StackDemoConfig,
 ) -> RoofOrientationState:
     source = obj.source
+    groove_normal = source.get("groove_opening_normal_base")
+    broad_normal = source.get("broad_face_normal_base")
     groove = str(source.get("groove_face_state") or source.get("face_state") or "unknown")
+    if isinstance(groove_normal, (list, tuple)) and len(groove_normal) == 3:
+        groove = "opening_down" if float(groove_normal[2]) < 0.0 else "opening_up"
     required = str(config.section("house")["required_roof_groove_face_state"])
-    long_axis = float(source.get("long_axis_yaw_deg", obj.yaw_deg))
-    face_up = bool(source.get("face_up", groove == required))
+    long_axis_vector = source.get("long_axis_base")
+    long_axis = (
+        math.degrees(math.atan2(float(long_axis_vector[1]), float(long_axis_vector[0])))
+        if isinstance(long_axis_vector, (list, tuple)) and len(long_axis_vector) == 3
+        else float(source.get("long_axis_yaw_deg", obj.yaw_deg))
+    )
+    semantic_face_correct = bool(
+        groove == required
+        or isinstance(broad_normal, (list, tuple)) and len(broad_normal) == 3
+        and float(broad_normal[2]) > 0.0
+    )
+    face_up = bool(source.get("face_up", semantic_face_correct))
     return RoofOrientationState(
         track_id=obj.track_id,
         groove_face_state=groove,
         face_up=face_up,
         long_axis_yaw_deg=long_axis,
         current_grasp_pose=source.get("current_grasp_pose"),
-        satisfies_roof_orientation=bool(source.get("satisfies_roof_orientation", groove == required and face_up)),
+        satisfies_roof_orientation=bool(source.get("satisfies_roof_orientation", semantic_face_correct and face_up)),
         left_support_coverage_m=float(source.get("left_support_coverage_m", 0.0)),
         right_support_coverage_m=float(source.get("right_support_coverage_m", 0.0)),
         center_offset_m=float(source.get("roof_center_offset_m", 0.0)),
@@ -71,12 +86,22 @@ def roof_orientation_from_object(
 
 def triangle_orientation_from_object(obj: SceneObjectState) -> TriangleOrientationState:
     source = obj.source
+    designated = source.get("designated_right_angle_edge_base")
+    long_axis = source.get("long_axis_base")
+    designated_up = bool(
+        isinstance(designated, (list, tuple)) and len(designated) == 3
+        and float(designated[2]) > 0.0
+    )
     return TriangleOrientationState(
         track_id=obj.track_id,
-        apex_direction=str(source.get("apex_direction") or "unknown"),
-        base_edge_direction=str(source.get("base_edge_direction") or "unknown"),
-        face_state=str(source.get("face_state") or "unknown"),
-        target_yaw_deg=float(source.get("target_yaw_deg", obj.yaw_deg)),
+        apex_direction=str(source.get("apex_direction") or ("up" if designated_up else "unknown")),
+        base_edge_direction=str(source.get("base_edge_direction") or ("roof_aligned" if designated_up else "unknown")),
+        face_state=str(source.get("face_state") or ("upright" if designated_up else "unknown")),
+        target_yaw_deg=(
+            math.degrees(math.atan2(float(long_axis[1]), float(long_axis[0])))
+            if isinstance(long_axis, (list, tuple)) and len(long_axis) == 3
+            else float(source.get("target_yaw_deg", obj.yaw_deg))
+        ),
         base_contact=bool(source.get("base_contact", False)),
         center_of_mass_projection_m=float(source.get("center_of_mass_projection_m", float("inf"))),
         support_margin_m=float(source.get("support_margin_m", 0.0)),

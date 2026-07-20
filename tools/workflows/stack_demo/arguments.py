@@ -20,6 +20,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--planner-config", default="config/stack_demo_planner.json")
     parser.add_argument("--workspace-bounds-json", default="config/workspace_bounds.json")
     parser.add_argument("--offline-scene-state", default="")
+    parser.add_argument(
+        "--continue-from-cycle", default="",
+        help=(
+            "Seed verified role/track continuity from a prior live cycle while "
+            "still requiring a fresh live observation before planning."
+        ),
+    )
     parser.add_argument("--mock-policy-response-dir", default="")
     parser.add_argument("--max-task-steps", type=int, default=20)
 

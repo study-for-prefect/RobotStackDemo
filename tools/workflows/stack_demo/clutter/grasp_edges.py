@@ -84,10 +84,14 @@ def scan_grasp_yaws(
         result = dict(checker(target, objects, yaw))
         result["yaw_deg"] = round(yaw, 6)
         result["safe"] = all(
-            bool(result.get(key))
+            bool(result.get(
+                key,
+                True if key in {"axial_coverage_ok", "stable_opposed_contact_ok"} else False,
+            ))
             for key in (
-                "opening_ok", "center_offset_ok", "contact_length_ok", "finger_safe",
-                "palm_safe", "descent_safe", "lift_safe",
+                "opening_ok", "axial_coverage_ok", "stable_opposed_contact_ok",
+                "center_offset_ok", "contact_length_ok", "finger_safe", "palm_safe",
+                "descent_safe", "lift_safe",
             )
         )
         result["score"] = _sample_score(result, yaw, current_wrist_yaw_deg)
@@ -110,7 +114,7 @@ def scan_grasp_yaws(
             score=round(float(selected["score"]) + span / 180.0, 6),
             selected_check=selected,
         ))
-    robust.sort(key=lambda item: (item.score, item.span_deg), reverse=True)
+    robust.sort(key=_grasp_interval_priority)
     blockers = sorted({
         str(track_id)
         for sample in samples if not sample["safe"]
@@ -147,15 +151,20 @@ def _default_geometry_check(
     target_raw = _geometry_object(target)
     raw_objects = [_geometry_object(obj) for obj in objects]
     closing_extent, contact_length = _target_contact_geometry(target, yaw_deg)
-    # ``evaluate_grasp_yaw`` models the fingertip footprint as the target's
-    # projected half-length plus an axial overhang.  That overhang is bounded
-    # by the real 25 mm GF225 fingertip, rather than being a fixed 20 mm added
-    # beyond every target.  The old fixed addition made the modeled fingertip
-    # roughly 60 mm long around a 20--25 mm block and rejected otherwise safe
-    # top-down grasps next to another block.
+    # Keep the configured full GF225 finger depth for axial coverage.  The
+    # separate 25 mm fingertip width below only controls the narrow contact
+    # footprint used by the surrounding-object clearance model.
+    fingertip_axial_extent = float(gripper["finger_length_m"])
+    allowed_overhang = float(config.section("grasp")["allowed_axial_overhang_m"])
+    left_axial_overhang = max(0.0, 0.5 * (contact_length - fingertip_axial_extent))
+    right_axial_overhang = left_axial_overhang
+    axial_coverage_ok = bool(
+        contact_length <= fingertip_axial_extent + 2.0 * allowed_overhang
+        and left_axial_overhang <= allowed_overhang
+        and right_axial_overhang <= allowed_overhang
+    )
     physical_fingertip_overhang = max(
-        0.0,
-        0.5 * (float(gripper["fingertip_width_m"]) - contact_length),
+        0.0, 0.5 * (float(gripper["fingertip_width_m"]) - contact_length),
     )
     axial_overhang = min(
         float(config.section("grasp")["approach_envelope_length_m"]),
@@ -171,6 +180,7 @@ def _default_geometry_check(
         side_clearance_m=float(safety["object_clearance_m"]),
     )
     center_offset = float(target.source.get("grasp_center_offset_m", 0.0))
+    stable_contact, contact_error = _stable_opposed_contact(target, yaw_deg, config)
     palm_blockers = _palm_blockers(target, objects, yaw_deg, config)
     upper_finger_blockers = _upper_finger_descent_blockers(
         target, objects, yaw_deg, config,
@@ -189,7 +199,13 @@ def _default_geometry_check(
     upper_finger_safe = not upper_finger_blockers
     descent_safe = finger_safe and palm_safe and upper_finger_safe
     return {
-        "opening_ok": closing_extent + 2.0 * center_offset <= float(gripper["open_inner_width_m"]),
+        "opening_ok": closing_extent + 2.0 * center_offset <= (
+            float(gripper["open_inner_width_m"])
+            - float(config.section("grasp")["opening_margin_m"])
+        ),
+        "axial_coverage_ok": axial_coverage_ok,
+        "stable_opposed_contact_ok": stable_contact,
+        "opposed_contact_alignment_error_deg": round(contact_error, 6),
         "center_offset_ok": center_offset <= float(safety["grasp_center_tolerance_m"]),
         "contact_length_ok": contact_length >= float(safety["minimum_contact_length_m"]),
         "finger_safe": finger_safe,
@@ -198,6 +214,10 @@ def _default_geometry_check(
         "descent_safe": descent_safe,
         "lift_safe": descent_safe,
         "closing_extent_m": round(closing_extent, 6),
+        "finger_axial_extent_m": round(contact_length, 6),
+        "effective_fingertip_length_m": round(fingertip_axial_extent, 6),
+        "left_axial_overhang_m": round(left_axial_overhang, 6),
+        "right_axial_overhang_m": round(right_axial_overhang, 6),
         "grasp_center_offset_m": round(center_offset, 6),
         "effective_contact_length_m": round(contact_length, 6),
         "fingertip_axial_overhang_m": round(axial_overhang, 6),
@@ -206,7 +226,71 @@ def _default_geometry_check(
         "upper_finger_blocking_track_ids": list(upper_finger_blockers),
         "vertical_lift_clearance_m": 0.0 if blockers else float(safety["observation_height_m"]),
         "blocking_track_ids": list(blockers),
+        **_grasp_semantic_metrics(target, yaw_deg, center_offset, contact_length),
     }
+
+
+def _stable_opposed_contact(
+    target: SceneObjectState,
+    yaw_deg: float,
+    config: StackDemoConfig,
+) -> tuple[bool, float]:
+    """Require a triangular prism to be clamped across its short footprint axis.
+
+    Closing across the long footprint axis puts one GF225 finger on the
+    triangular apex instead of producing two stable opposing side contacts.
+    The opening can be wide enough while that grasp is still physically
+    incapable of retaining the part.
+    """
+    alignment_error = abs((float(yaw_deg) - target.yaw_deg + 90.0) % 180.0 - 90.0)
+    if target.shape != "triangle":
+        return True, alignment_error
+    maximum_error = float(config.section("grasp")[
+        "triangle_side_grasp_max_alignment_error_deg"
+    ])
+    return alignment_error <= maximum_error, alignment_error
+
+
+def _grasp_semantic_metrics(
+    target: SceneObjectState,
+    yaw_deg: float,
+    center_offset_m: float,
+    finger_axial_extent_m: float,
+) -> dict[str, Any]:
+    primary_error = abs((yaw_deg - target.yaw_deg + 90.0) % 180.0 - 90.0)
+    orthogonal_error = abs((yaw_deg - target.yaw_deg - 90.0 + 90.0) % 180.0 - 90.0)
+    edge_error = min(primary_error, orthogonal_error)
+    if edge_error <= 2.5:
+        grasp_class = 0 if primary_error <= orthogonal_error else 1
+    elif edge_error <= 10.0:
+        grasp_class = 2
+    elif edge_error <= 25.0:
+        grasp_class = 3
+    else:
+        grasp_class = 4
+    return {
+        "grasp_class": grasp_class,
+        "edge_alignment_error_deg": edge_error,
+        "grasp_center_offset_m": center_offset_m,
+        "finger_axial_extent_m": finger_axial_extent_m,
+        "required_3d_rotation_deg": float(target.source.get("required_3d_rotation_deg", 0.0)),
+        "held_object_rotation_radius_m": 0.5 * math.sqrt(sum(value ** 2 for value in target.size_xyz_m)),
+        "joint_motion_cost": abs(yaw_deg) / 180.0,
+    }
+
+
+def _grasp_interval_priority(interval: GraspInterval) -> tuple[Any, ...]:
+    check = interval.selected_check
+    return (
+        int(check.get("grasp_class", 4)),
+        float(check.get("edge_alignment_error_deg", 180.0)),
+        not bool(check.get("axial_coverage_ok", False)),
+        float(check.get("grasp_center_offset_m", float("inf"))),
+        float(check.get("held_object_rotation_radius_m", float("inf"))),
+        float(check.get("required_3d_rotation_deg", float("inf"))),
+        float(check.get("joint_motion_cost", float("inf"))),
+        -float(check.get("fingertip_clearance_m", 0.0)),
+    )
 
 
 def _target_contact_geometry(target: SceneObjectState, gripper_yaw_deg: float) -> tuple[float, float]:
@@ -329,13 +413,28 @@ def _select_inside_interval(
     config: StackDemoConfig,
 ) -> Mapping[str, Any]:
     inset = min(float(config.section("grasp")["interval_boundary_inset_deg"]), 0.25 * (end_deg - start_deg))
+    # -90 and +90 are the same parallel-gripper pose, not physical interval
+    # boundaries.  Keep that exact edge-aligned pose eligible instead of
+    # forcing a 5-degree offset into the interval.
+    periodic_boundary = start_deg <= -90.0 + 1e-9 or end_deg >= 90.0 - 1e-9
     interior = [
         item for item in samples[start_index:end_index + 1]
-        if start_deg + inset <= float(item["yaw_deg"]) <= end_deg - inset
+        if (
+            (start_deg if periodic_boundary else start_deg + inset)
+            <= float(item["yaw_deg"])
+            <= (end_deg if periodic_boundary else end_deg - inset)
+        )
     ]
     if not interior:
         interior = list(samples[start_index:end_index + 1])
-    return max(interior, key=lambda item: (float(item["score"]), -abs(float(item["yaw_deg"]) - (start_deg + end_deg) / 2.0)))
+    return min(interior, key=lambda item: (
+        int(item.get("grasp_class", 4)),
+        float(item.get("edge_alignment_error_deg", 180.0)),
+        not bool(item.get("axial_coverage_ok", False)),
+        float(item.get("grasp_center_offset_m", float("inf"))),
+        -float(item.get("score", 0.0)),
+        abs(float(item["yaw_deg"]) - (start_deg + end_deg) / 2.0),
+    ))
 
 
 def _sample_score(result: Mapping[str, Any], yaw_deg: float, current_wrist_yaw_deg: float | None) -> float:

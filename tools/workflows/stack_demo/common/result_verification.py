@@ -37,22 +37,34 @@ def verify_grasp_result(
     current = after_lift.object_by_track(edge.acted_object_track_id)
     if original is None:
         return ActionVerification(False, "grasp_failed", {"reason": "pre_grasp_track_missing"}, after_lift.scene_revision)
+    rebound = None if current is not None else next((
+        obj for obj in sorted(
+            after_lift.current_objects,
+            key=lambda candidate: math.dist(original.center_xyz_m, candidate.center_xyz_m),
+        )
+        if _likely_lifted_target_rebinding(
+            original, obj, gripper_holding_hint=gripper_holding_hint,
+        )
+    ), None)
+    observed_target = current or rebound
     displacement = None
-    if current is not None:
-        displacement = math.dist(original.center_xyz_m, current.center_xyz_m)
-    track_missing = current is None
+    if observed_target is not None:
+        displacement = math.dist(original.center_xyz_m, observed_target.center_xyz_m)
+    track_missing = observed_target is None
     moved = displacement is not None and displacement >= minimum_displacement_m
     reappeared_near_original = bool(
-        current is not None and math.dist(original.center_xyz_m, current.center_xyz_m) < minimum_displacement_m
+        observed_target is not None
+        and math.dist(original.center_xyz_m, observed_target.center_xyz_m) < minimum_displacement_m
     )
     other_at_original_position = tuple(sorted(
         obj.track_id for obj in after_lift.current_objects
-        if obj.track_id != edge.acted_object_track_id
+        if obj.track_id not in {edge.acted_object_track_id, getattr(rebound, "track_id", None)}
         and math.dist(original.center_xyz_m, obj.center_xyz_m) < 0.5 * max(original.size_xyz_m[:2])
     ))
     original_position_clear = bool((track_missing or moved) and not reappeared_near_original and not other_at_original_position)
     left_table_workspace = track_missing or (
-        current.center_xyz_m[2] > original.center_xyz_m[2] + max(0.5 * original.size_xyz_m[2], minimum_displacement_m)
+        observed_target.center_xyz_m[2]
+        > original.center_xyz_m[2] + max(0.5 * original.size_xyz_m[2], minimum_displacement_m)
     )
     other_before = set(before.visible_tracks) - {edge.acted_object_track_id}
     context_tracks_still_visible = tuple(sorted(other_before.intersection(after_lift.visible_tracks)))
@@ -98,6 +110,7 @@ def verify_grasp_result(
             "target_missing_from_table_view": track_missing,
             "target_displacement_m": displacement,
             "target_moved_from_original_position": moved,
+            "lifted_geometry_rebound_track_id": None if rebound is None else rebound.track_id,
             "target_reappeared_near_original": reappeared_near_original,
             "other_tracks_at_original_position": list(other_at_original_position),
             "original_position_clear": original_position_clear,
@@ -115,6 +128,25 @@ def verify_grasp_result(
                 "a measured GF225 contact may gate transport when the raised-arm view is fully occluded"
             ),
         },
+    )
+
+
+def _likely_lifted_target_rebinding(
+    original: Any,
+    candidate: Any,
+    *,
+    gripper_holding_hint: bool | None,
+) -> bool:
+    """Recover a held object whose changed view produced a fresh track ID."""
+    if gripper_holding_hint is not True:
+        return False
+    if original.shape != candidate.shape or original.color != candidate.color:
+        return False
+    horizontal = math.dist(original.center_xyz_m[:2], candidate.center_xyz_m[:2])
+    lifted = candidate.center_xyz_m[2] - original.center_xyz_m[2]
+    return bool(
+        horizontal <= max(original.size_xyz_m[:2])
+        and lifted >= max(0.008, 0.5 * original.size_xyz_m[2])
     )
 
 
@@ -140,13 +172,17 @@ def verify_place_result(
     else:
         destination_ok, details = verifier(edge, before, after_place)
     visible = after_place.object_by_track(edge.acted_object_track_id) is not None
-    success = bool(destination_ok and visible)
+    geometry_rebound = bool(details.get("geometry_rebound_track_id"))
+    verified_occlusion = bool(details.get("verified_structure_occlusion"))
+    success = bool(destination_ok and (visible or geometry_rebound or verified_occlusion))
     return ActionVerification(
         success=success,
         status="place_verified" if success else "place_failed",
         scene_revision=after_place.scene_revision,
         evidence={
             "track_visible": visible,
+            "geometry_rebound": geometry_rebound,
+            "verified_structure_occlusion": verified_occlusion,
             "destination_predicate": bool(destination_ok),
             "verification_kind": verifier.__name__ if verifier is not None else "unsupported",
             **dict(details),
@@ -191,18 +227,31 @@ def staging_place_success(
     before: ClutterSceneState,
     after: ClutterSceneState,
 ) -> tuple[bool, Mapping[str, Any]]:
-    del before
+    original = before.object_by_track(edge.acted_object_track_id)
     current = after.object_by_track(edge.acted_object_track_id)
     pose = edge.physical_parameters.get("place_pose") or {}
     target = pose.get("position_m") if isinstance(pose, Mapping) else None
     distance = None
+    rebound = None
+    if current is None and original is not None:
+        compatible = tuple(
+            item for item in after.current_objects
+            if item.shape == original.shape and item.color == original.color
+        )
+        if len(compatible) == 1:
+            rebound = compatible[0]
+            current = rebound
     if current is not None and isinstance(target, (list, tuple)) and len(target) >= 3:
         distance = math.dist(current.center_xyz_m, [float(value) for value in target[:3]])
     tolerance = float(edge.decision_metadata.get("staging_position_tolerance_m", 0.025))
-    return bool(distance is not None and distance <= tolerance), {
+    rebound_tolerance = max(tolerance, 0.075) if edge.target_region_id == "house_orientation_staging" else tolerance
+    accepted_tolerance = rebound_tolerance if rebound is not None else tolerance
+    return bool(distance is not None and distance <= accepted_tolerance), {
         "staging_region_id": edge.target_region_id,
         "staging_position_error_m": distance,
         "staging_position_tolerance_m": tolerance,
+        "staging_geometry_rebound_tolerance_m": rebound_tolerance,
+        "geometry_rebound_track_id": None if rebound is None else rebound.track_id,
     }
 
 

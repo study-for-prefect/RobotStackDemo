@@ -91,7 +91,10 @@ def _bounds(value: Any, *, include_z: bool) -> dict[str, float]:
 
 
 def _require_sections(planner: Mapping[str, Any]) -> None:
-    required = ("gripper", "safety", "grasp", "clearing", "motion", "policy", "organize", "house")
+    required = (
+        "gripper", "safety", "grasp", "clearing", "motion", "policy",
+        "organize", "special_shape_vlm", "house_orientation", "house",
+    )
     missing = [name for name in required if not isinstance(planner.get(name), dict)]
     if missing:
         raise ValueError(f"missing planner configuration sections: {missing}")
@@ -111,6 +114,9 @@ def _validate_planner_values(planner: Mapping[str, Any]) -> None:
         )
     if float(grasp["minimum_continuous_safe_yaw_span_deg"]) < 10.0:
         raise ValueError("minimum continuous safe grasp yaw span must be at least 10 degrees")
+    triangle_side_error = float(grasp["triangle_side_grasp_max_alignment_error_deg"])
+    if not 0.0 < triangle_side_error <= 10.0:
+        raise ValueError("triangle side-grasp alignment error must be in (0, 10] degrees")
     if abs(float(safety["ordinary_release_height_extra_m"])) > 1e-9:
         raise ValueError("ordinary placement must release at the table-contact center height")
     if abs(float(safety["special_shape_release_height_extra_m"]) - 0.010) > 1e-9:
@@ -122,8 +128,29 @@ def _validate_planner_values(planner: Mapping[str, Any]) -> None:
         raise ValueError("motion.max_wrist_3_start_goal_delta_rad must remain 1.75")
     if int(planner["policy"].get("max_consecutive_reobserve", 0)) < 1:
         raise ValueError("policy.max_consecutive_reobserve must be at least one")
+    if int(planner["policy"].get("num_ctx", 0)) != 32768:
+        raise ValueError("stack_demo requires policy.num_ctx=32768")
+    special_vlm = planner["special_shape_vlm"]
+    maximum = int(special_vlm["maximum_candidates_per_request"])
+    hard_maximum = int(special_vlm["hard_maximum_candidates_per_request"])
+    if not 1 <= maximum <= hard_maximum <= 8:
+        raise ValueError("special-shape VLM batches must contain at most eight candidates")
+    orientation = planner["house_orientation"]
+    if float(orientation["fixed_tcp_position_tolerance_m"]) > 0.001:
+        raise ValueError("fixed GF225 TCP tolerance must not exceed 1 mm")
+    if float(orientation["orientation_interpolation_step_deg"]) > 5.0:
+        raise ValueError("3D orientation interpolation steps must not exceed 5 degrees")
+    tilted_clearance = float(orientation["tilted_place_clearance_m"])
+    if not 0.003 <= tilted_clearance <= 0.005:
+        raise ValueError("tilted special-shape placement clearance must remain within 3-5 mm")
+    if float(orientation["tilted_place_clearance_min_tilt_deg"]) < 0.0:
+        raise ValueError("tilted placement clearance threshold must be non-negative")
     if abs(float(planner["house"]["support_inner_gap_m"]) - 0.015) > 1e-9:
         raise ValueError("house.support_inner_gap_m must remain 0.015")
+    assembled_min = float(planner["house"]["assembled_roof_height_above_table_min_m"])
+    assembled_max = float(planner["house"]["assembled_roof_height_above_table_max_m"])
+    if abs(assembled_min - 0.060) > 1e-9 or abs(assembled_max - 0.067) > 1e-9:
+        raise ValueError("assembled roof height above table must remain within 60-67 mm")
 
 
 def _validate_organize_layout(

@@ -12,12 +12,14 @@ import requests
 from .schema_validation import validate_against_schema
 
 
+DEFAULT_VLM_NUM_CTX = 32768
 POLICY_GENERATION_CONFIG = {
-    "target_selection": {"num_ctx": 12288, "num_predict": 768},
-    "edge_selection": {"num_ctx": 12288, "num_predict": 768},
-    "orientation_analysis": {"num_ctx": 24576, "num_predict": 8192},
-    "semantic_detection_review": {"num_ctx": 12288, "num_predict": 1024},
-    "final_json_generation": {"num_ctx": 12288, "num_predict": 768},
+    "target_selection": {"num_predict": 768},
+    "edge_selection": {"num_predict": 768},
+    "orientation_analysis": {"num_predict": 8192},
+    "semantic_detection_review": {"num_predict": 1024},
+    "special_shape_semantic_review": {"num_predict": 1536},
+    "final_json_generation": {"num_predict": 768},
 }
 _MODEL_RUNTIME: Dict[str, dict] = {}
 
@@ -382,9 +384,19 @@ def _request_payload(
 
 def _generation_budget(args: Any, policy_kind: str) -> Tuple[int, int]:
     config = POLICY_GENERATION_CONFIG.get(policy_kind, POLICY_GENERATION_CONFIG["edge_selection"])
-    num_ctx = int(getattr(args, "vlm_num_ctx", 0) or config["num_ctx"])
+    num_ctx = effective_vlm_num_ctx(args)
     num_predict = int(getattr(args, "vlm_num_predict", 0) or config["num_predict"])
     return num_ctx, num_predict
+
+
+def effective_vlm_num_ctx(args: Any) -> int:
+    """Return the one supported context size and reject stale runtime overrides."""
+    value = int(getattr(args, "vlm_num_ctx", 0) or DEFAULT_VLM_NUM_CTX)
+    if value != DEFAULT_VLM_NUM_CTX:
+        raise ValueError(
+            f"stack_demo requires vlm num_ctx={DEFAULT_VLM_NUM_CTX}, got {value}"
+        )
+    return value
 
 
 def _populate_response_fields(result: PolicyCallResult, data: dict) -> None:
@@ -437,6 +449,7 @@ def _save_call_artifacts(
         "think_requested": think_requested,
         "thinking_length_chars": len(result.thinking),
         "content_length_chars": len(result.content),
+        "requested_num_ctx": int(payload["options"]["num_ctx"]),
         "actual_num_ctx": int(num_ctx),
         "actual_num_predict": int(num_predict),
     })

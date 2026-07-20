@@ -100,6 +100,7 @@ def transport_tool_swept_obbs(
         ("upper_fingers", float(upper_finger_width_m), float(palm_depth_m), 0.025, float(upper_finger_height_m)),
         ("palm", float(palm_width_m), float(palm_depth_m), float(upper_finger_height_m), float(palm_height_m)),
         ("tcp_to_gripper_body", float(palm_width_m), float(palm_depth_m), 0.0, abs(float(tcp_offset_tool_m[2]))),
+        ("d435i_and_mount", 0.095, 0.050, 0.100, 0.220),
     )
     output: List[Dict[str, Any]] = []
     for segment_index, (start_pose, end_pose) in enumerate(zip(path, path[1:])):
@@ -110,6 +111,11 @@ def transport_tool_swept_obbs(
         start_yaw = float(start_pose.get("yaw_deg", 0.0))
         end_yaw = float(end_pose.get("yaw_deg", start_yaw))
         yaw_delta = (end_yaw - start_yaw + 90.0) % 180.0 - 90.0
+        full_3d_segment = all(
+            isinstance(pose.get("orientation_xyzw"), (list, tuple))
+            and len(pose["orientation_xyzw"]) == 4
+            for pose in (start_pose, end_pose)
+        )
         distance = math.dist([float(value) for value in start[:3]], [float(value) for value in end[:3]])
         divisions = max(1, int(math.ceil(max(distance / max(1e-6, sample_step_m), abs(yaw_delta) / 5.0))))
         for index in range(divisions):
@@ -118,17 +124,35 @@ def transport_tool_swept_obbs(
             second = _interpolate3(start, end, second_ratio)
             yaw = math.radians(start_yaw + yaw_delta * 0.5 * (first_ratio + second_ratio))
             for name, width, depth, zmin_offset, zmax_offset in profiles:
-                envelope = _segment_obb(
-                    "transport", first, second, yaw,
-                    0.5 * depth + safety_margin_m,
-                    0.5 * width + safety_margin_m,
-                    0.0, 0.0,
-                )
+                if full_3d_segment:
+                    height = zmax_offset - zmin_offset
+                    rotation_radius = 0.5 * math.sqrt(width ** 2 + depth ** 2 + height ** 2)
+                    envelope = _segment_obb(
+                        "transport_3d_rotation", first, second, 0.0,
+                        rotation_radius + safety_margin_m,
+                        rotation_radius + safety_margin_m, 0.0, 0.0,
+                    )
+                    z_center_offset = 0.5 * (zmin_offset + zmax_offset)
+                    envelope.update({
+                        "zmin": min(first[2], second[2]) + z_center_offset - rotation_radius - safety_margin_m,
+                        "zmax": max(first[2], second[2]) + z_center_offset + rotation_radius + safety_margin_m,
+                        "orientation_sweep_mode": "conservative_full_3d_rotation_sphere",
+                    })
+                else:
+                    envelope = _segment_obb(
+                        "transport", first, second, yaw,
+                        0.5 * depth + safety_margin_m,
+                        0.5 * width + safety_margin_m,
+                        0.0, 0.0,
+                    )
+                    envelope.update({
+                        "zmin": min(first[2], second[2]) + zmin_offset - safety_margin_m,
+                        "zmax": max(first[2], second[2]) + zmax_offset + safety_margin_m,
+                        "orientation_sweep_mode": "downward_yaw_obb",
+                    })
                 envelope.update({
                     "profile_name": name,
                     "segment_index": segment_index,
-                    "zmin": min(first[2], second[2]) + zmin_offset - safety_margin_m,
-                    "zmax": max(first[2], second[2]) + zmax_offset + safety_margin_m,
                 })
                 envelope["diagnostic_aabb"] = _obb_aabb(envelope)
                 output.append(envelope)

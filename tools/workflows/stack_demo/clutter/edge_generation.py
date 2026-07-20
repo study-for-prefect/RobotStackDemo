@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Callable, Mapping, Sequence
 
 from ..common.action_edges import ActionType, PhysicalActionEdge, make_edge
@@ -61,7 +62,7 @@ VariantPlacementProvider = Callable[[SceneObjectState, GraspInterval, str | None
 StagingProvider = Callable[[SceneObjectState], PlacementTargets]
 PlanChecker = Callable[[PhysicalActionEdge], Mapping[str, Any]]
 
-FULL_3D_ORIENTATION_SHAPES = frozenset({"triangle", "concave_rectangle"})
+FULL_3D_ORIENTATION_SHAPES = frozenset({"rectangle", "concave_rectangle", "triangle"})
 
 
 def generate_physical_edges(
@@ -139,7 +140,13 @@ def generate_physical_edges(
             # clearing actions.  Staging remains the fallback for failures
             # without an identified physical blocker (for example an
             # edge-alignment regrasp or a bare planning failure).
-            if scan.safe_intervals and not direct_failure_blockers:
+            if (
+                scan.safe_intervals
+                and not direct_failure_blockers
+                and not _successful_orientation_staging_without_gain(
+                    scene, target, spec.task_role,
+                )
+            ):
                 staging = staging_provider(target)
                 if _placement_targets(staging):
                     edges.extend(_staging_edges(
@@ -185,7 +192,7 @@ def _direct_edges(
     for index, interval in enumerate(scan.safe_intervals[:limit], start=1):
         placements = _placement_targets(placement_provider(target, interval))
         for placement_index, placement in enumerate(placements, start=1):
-            physical = _pick_parameters(target, interval, placement, config)
+            physical = _pick_parameters(scene, target, interval, placement, config)
             placement_checks = placement_path_checks(scene, target, physical["place_pose"], physical, config)
             prechecks = {
                 "finger_safe": True, "palm_safe": True,
@@ -230,12 +237,14 @@ def _direct_edges(
                     ActionType.PLACE_HOUSE_ROLE, ActionType.REPAIR_STRUCTURE,
                 }
                 and bool(checked.precheck_results.get("passed"))
+                and bool(checked.precheck_results.get("moveit_plan_only"))
             ):
                 # Edge-aligned house placements are ordered by required grasp
-                # change.  Once one direct final placement passes geometry and
-                # MoveIt, further 90-degree-equivalent grasps add planning cost
-                # but no task value.  A rejected first orientation still falls
-                # through to the orthogonal alternative.
+                # change.  Stop only after one direct final placement has a
+                # real MoveIt plan-only pass.  The default offline geometry
+                # checker must retain every full-SE(3) alternative so the
+                # final safety gate can try +45/-45 target orientations when
+                # the first IK branch fails from the live joint state.
                 return edges
     return edges
 
@@ -291,7 +300,7 @@ def _clearance_edges(
                 ):
                     continue
                 interval = blocker_scan.safe_intervals[0]
-                physical = _pick_parameters(blocker, interval, staging, config)
+                physical = _pick_parameters(scene, blocker, interval, staging, config)
                 placement_checks = placement_path_checks(scene, blocker, physical["place_pose"], physical, config)
                 prechecks = {
                     "finger_safe": True, "palm_safe": True,
@@ -369,7 +378,7 @@ def _staging_edges(
         }:
             continue
         for grasp_index, interval in enumerate(scan.safe_intervals[:1], start=1):
-            physical = _pick_parameters(target, interval, target_staging, config)
+            physical = _pick_parameters(scene, target, interval, target_staging, config)
             checks = {
                 "finger_safe": True,
                 "palm_safe": True,
@@ -520,6 +529,7 @@ def _nudge_edges(
 
 
 def _pick_parameters(
+    scene: ClutterSceneState,
     target: SceneObjectState,
     interval: GraspInterval,
     placement: PlacementTarget,
@@ -538,30 +548,38 @@ def _pick_parameters(
     current_object_yaw = float(target.yaw_deg)
     requested_object_yaw = float(place_pose.get("yaw_deg", current_object_yaw))
     object_relative_to_gripper_yaw = _axis_delta_deg(current_object_yaw, grasp_yaw)
-    full_3d_orientation = target.shape in FULL_3D_ORIENTATION_SHAPES
+    orientation_trajectory = additional.get("orientation_trajectory")
+    full_3d_orientation = bool(
+        target.shape in FULL_3D_ORIENTATION_SHAPES
+        and isinstance(orientation_trajectory, Mapping)
+        and orientation_trajectory.get("mode") == "fixed_grasp_tcp_3d_rotation"
+    )
     release_height_extra_m = float(safety[
         "special_shape_release_height_extra_m"
         if full_3d_orientation else "ordinary_release_height_extra_m"
     ])
+    tilted_place_clearance_m = float(
+        additional.get("tilted_place_clearance_m", 0.0)
+        if full_3d_orientation else 0.0
+    )
+    release_height_extra_m += tilted_place_clearance_m
     if full_3d_orientation:
         expected_object_yaw = requested_object_yaw
-        release_gripper_yaw = _normalize_axis_yaw_deg(
-            expected_object_yaw - object_relative_to_gripper_yaw
-        )
-        placement_yaw_policy = "special_shape_target_orientation"
+        release_gripper_yaw = grasp_yaw
+        placement_yaw_policy = "target_object_quaternion_from_rigid_grasp_transform"
     else:
         requested_release_yaw = (placement.additional_physical_parameters or {}).get(
             "ordinary_release_gripper_yaw_deg"
         )
-        release_gripper_yaw = (
-            grasp_yaw if requested_release_yaw is None
-            else _normalize_axis_yaw_deg(float(requested_release_yaw))
+        release_gripper_yaw = _normalize_axis_yaw_deg(
+            requested_object_yaw - object_relative_to_gripper_yaw
+            if requested_release_yaw is None else float(requested_release_yaw)
         )
         expected_object_yaw = _normalize_axis_yaw_deg(
             release_gripper_yaw + object_relative_to_gripper_yaw
         )
         placement_yaw_policy = (
-            "preserve_grasp_yaw_until_release"
+            "already_aligned_no_adjustment_required"
             if abs(_axis_delta_deg(release_gripper_yaw, grasp_yaw)) <= 1e-6
             else "safe_height_yaw_only_for_clearance"
         )
@@ -571,42 +589,51 @@ def _pick_parameters(
     release_position[2] += release_height_extra_m
     release_pose["position_m"] = release_position
     release_pose["yaw_deg"] = release_gripper_yaw
-    orientation_policy = (
-        "full_3d_allowed"
-        if full_3d_orientation
-        else "downward_yaw_only"
+    orientation_mode = "fixed_grasp_tcp_3d_rotation" if full_3d_orientation else "downward_yaw_only"
+    safe_yaw_position = _ordinary_yaw_adjustment_position(
+        scene, target, lift_z, place_pose, config,
     )
     destination_at_lift = {
         "frame_id": "base_link",
-        "position_m": list(place_pose["position_m"][:2]) + [lift_z],
-        "yaw_deg": grasp_yaw,
-        "motion_role": "translate_to_destination_preserving_grasp_yaw",
+        "position_m": list(place_pose["position_m"][:2]) + [safe_yaw_position[2]],
+        "yaw_deg": release_gripper_yaw,
+        "motion_role": "final_orientation_transport",
     }
     transport_path = [
         {
             "frame_id": "base_link",
-            "position_m": [x, y, lift_z],
+            "position_m": [x, y, safe_yaw_position[2]],
             "yaw_deg": grasp_yaw,
             "motion_role": "source_lift",
         },
-        destination_at_lift,
     ]
     if full_3d_orientation:
-        transport_path.append({
-            "frame_id": "base_link",
-            "position_m": list(place_pose["position_m"][:2]) + [lift_z],
-            "yaw_deg": release_gripper_yaw,
-            "motion_role": "special_shape_orientation_at_destination",
-        })
+        release_pose = dict(orientation_trajectory["release_grasp_tcp_pose"])
+        release_pose["position_m"] = list(release_pose["position_m"])
+        release_pose["position_m"][2] += release_height_extra_m
+        transport_path = [transport_path[0], orientation_trajectory["safe_orientation_adjustment_approach_pose"]]
+        transport_path.extend(dict(item["grasp_tcp_pose"]) for item in orientation_trajectory["waypoints"])
+        transport_path.extend([
+            orientation_trajectory["orientation_adjustment_complete_pose"],
+            orientation_trajectory["final_pre_place_pose"],
+        ])
     elif abs(_axis_delta_deg(release_gripper_yaw, grasp_yaw)) > 1e-6:
         transport_path.append({
             "frame_id": "base_link",
-            "position_m": list(place_pose["position_m"][:2]) + [lift_z],
+            "position_m": list(safe_yaw_position),
+            "yaw_deg": grasp_yaw,
+            "motion_role": "translate_to_safe_yaw_adjustment",
+        })
+        transport_path.append({
+            "frame_id": "base_link",
+            "position_m": list(safe_yaw_position),
             "yaw_deg": release_gripper_yaw,
             "motion_role": "ordinary_yaw_only_at_safe_height",
         })
+    if not full_3d_orientation:
+        transport_path.append(destination_at_lift)
     return {
-        "orientation_policy": orientation_policy,
+        "orientation_mode": orientation_mode,
         "placement_yaw_policy": placement_yaw_policy,
         "acted_object_shape": target.shape,
         "grasp_yaw_deg": grasp_yaw,
@@ -620,10 +647,51 @@ def _pick_parameters(
         "expected_place_object_yaw_deg": expected_object_yaw,
         "release_gripper_yaw_deg": release_gripper_yaw,
         "release_height_extra_m": release_height_extra_m,
+        "tilted_place_clearance_m": tilted_place_clearance_m,
+        "ordinary_yaw_adjustment": {
+            "mode": "downward_yaw_only",
+            "adjustment_position_m": list(safe_yaw_position),
+            "grasp_yaw_deg": grasp_yaw,
+            "target_object_yaw_deg": requested_object_yaw,
+            "release_gripper_yaw_deg": release_gripper_yaw,
+            "completed_before_final_transport": True,
+        } if not full_3d_orientation else None,
         "transport_path": transport_path,
         "grasp_checks": dict(additional.get("required_grasp_checks") or interval.selected_check),
         **additional,
     }
+
+
+def _ordinary_yaw_adjustment_position(
+    scene: ClutterSceneState,
+    target: SceneObjectState,
+    lift_z: float,
+    place_pose: Mapping[str, Any],
+    config: StackDemoConfig,
+) -> tuple[float, float, float]:
+    """Choose a high, structure-separated point before final transport/descent."""
+    margin = float(config.section("house_orientation")["airborne_adjustment_safety_margin_m"])
+    highest = max((obj.center_xyz_m[2] + 0.5 * obj.size_xyz_m[2]
+                   for obj in (*scene.current_objects, *scene.collision_obstacles)), default=lift_z)
+    safe_z = max(lift_z, highest + 0.5 * max(target.size_xyz_m) + margin,
+                 float(config.section("motion")["safe_pre_rotate_height_m"]))
+    target_xy = tuple(float(value) for value in place_pose["position_m"][:2])
+    source_xy = target.center_xyz_m[:2]
+    minimum = float(config.section("house_orientation")["minimum_airborne_adjustment_house_distance_m"])
+    protected = [obj for obj in (*scene.current_objects, *scene.collision_obstacles)
+                 if obj.track_id in scene.protected_tracks]
+    source_safe = math.dist(source_xy, target_xy) >= minimum and all(
+        math.dist(source_xy, obj.center_xyz_m[:2]) >= minimum for obj in protected
+    )
+    if source_safe:
+        return (source_xy[0], source_xy[1], safe_z)
+    candidates = [tuple(float(value) for value in item[:2])
+                  for item in config.section("house")["orientation_staging_candidates_base_m"]]
+    safe = [point for point in candidates if math.dist(point, target_xy) >= minimum and all(
+        math.dist(point, obj.center_xyz_m[:2]) >= minimum for obj in protected
+    )]
+    point = min(safe, key=lambda item: math.dist(item, source_xy)) if safe else source_xy
+    return (point[0], point[1], safe_z)
 
 
 def _axis_delta_deg(first: float, second: float) -> float:
@@ -675,10 +743,49 @@ def _direct_failure_blockers(edges: Sequence[PhysicalActionEdge]) -> tuple[str, 
     return tuple(sorted({
         str(track_id)
         for edge in edges
-        for key in ("transport_blocking_track_ids", "place_blocking_track_ids")
+        for key in (
+            "transport_blocking_track_ids", "place_blocking_track_ids",
+            "orientation_space_blocking_track_ids",
+        )
         for track_id in edge.precheck_results.get(key, [])
         if track_id
     }))
+
+
+def _successful_orientation_staging_without_gain(
+    scene: ClutterSceneState,
+    target: SceneObjectState,
+    task_role: str | None,
+) -> bool:
+    """Prevent the shared blocker fallback from restaging a roof target."""
+    if target.shape not in FULL_3D_ORIENTATION_SHAPES or task_role not in {
+        "roof", "triangle_top",
+    }:
+        return False
+    if task_role == "triangle_top" and any(
+        result.get("acted_object_track_id") == target.track_id
+        and result.get("action_type") == ActionType.EXTRACT_TO_STAGING.value
+        and (
+            result.get("staging_purpose") == "incremental_tabletop_apex_up_reorientation"
+            or result.get("status") == "released_tabletop_step_requires_fresh_geometry"
+            or result.get("fresh_metric_triangle_rebound") is True
+        )
+        for result in scene.recent_action_results
+    ):
+        # Each incremental edge ends with release and a newly measured object
+        # pose.  A prior successful 45-degree table step is therefore progress
+        # evidence, not the no-gain restaging loop this guard was built for.
+        return False
+    return any(
+        result.get("success") is True
+        and result.get("acted_object_track_id") == target.track_id
+        and result.get("task_role") == task_role
+        and result.get("action_type") in {
+            ActionType.EXTRACT_TO_STAGING.value,
+            ActionType.REGRASP_FOR_ORIENTATION.value,
+        }
+        for result in scene.recent_action_results
+    )
 
 
 def _released_neighbors(scene: ClutterSceneState, target: SceneObjectState) -> tuple[str, ...]:

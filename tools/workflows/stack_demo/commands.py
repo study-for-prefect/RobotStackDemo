@@ -27,6 +27,7 @@ TRANSIENT_PERCEPTION_ERROR_CODES = frozenset({
     "connection_failed",
 })
 PERCEPTION_SNAPSHOT_ATTEMPTS = 3
+TF_LOOKUP_ATTEMPTS = 3
 NON_ACTUATING_PLAN_TIMEOUT_S = 45.0
 
 
@@ -188,8 +189,10 @@ def capture_empty_current_pose(
         return None
     if args.second_snapshot_stable_wait_s > 0:
         time.sleep(float(args.second_snapshot_stable_wait_s))
-    if refresh_tf:
-        run(tf_lookup_command(args))
+    # capture_scene_observation always refreshes TF with bounded retries.  The
+    # former extra one-shot lookup here caused run 20260719_165508 to exit on a
+    # transient failure before the retry-capable observation path was reached.
+    del refresh_tf
     capture_scene_observation(args, output_dir, capture_reason="fresh_observation")
     return attach_configured_workspace(load_json(os.path.join(output_dir, "private_scene_state.json")), args)
 
@@ -204,7 +207,7 @@ def capture_scene_observation(
     """Force fresh live TF before every wrist-camera scene acquisition."""
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    run_non_actuating(tf_lookup_command(args))
+    _refresh_tf_with_retry(args, output_dir)
     request = build_perception_snapshot_request(
         args, output_dir, capture_reason=capture_reason, scene_revision=scene_revision,
     )
@@ -235,8 +238,33 @@ def capture_scene_observation(
         "server_error": error,
         "fallback_command": command,
     })
-    run_non_actuating(tf_lookup_command(args))
+    _refresh_tf_with_retry(args, output_dir)
     run_non_actuating(command)
+
+
+def _refresh_tf_with_retry(args: Any, output_dir: str) -> None:
+    """Bound transient ROS TF lookup failures and retain every attempt."""
+    attempts: list[dict[str, Any]] = []
+    last_error: Exception | None = None
+    for attempt in range(1, TF_LOOKUP_ATTEMPTS + 1):
+        try:
+            run_non_actuating(tf_lookup_command(args))
+            attempts.append({"attempt": attempt, "ok": True})
+            _write_json(os.path.join(output_dir, "tf_lookup_attempts.json"), attempts)
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            last_error = exc
+            attempts.append({
+                "attempt": attempt,
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            })
+            if attempt < TF_LOOKUP_ATTEMPTS:
+                time.sleep(0.25)
+    _write_json(os.path.join(output_dir, "tf_lookup_attempts.json"), attempts)
+    assert last_error is not None
+    raise last_error
 
 
 def _perception_snapshot_with_retry(

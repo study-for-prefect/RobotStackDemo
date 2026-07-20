@@ -125,6 +125,14 @@ def build_failure_fingerprint(
         "push_start": _pose_bin(physical_parameters.get("push_start")),
         "push_end": _pose_bin(physical_parameters.get("push_end")),
         "place_pose": _pose_bin(physical_parameters.get("place_pose")),
+        "staging_purpose": physical_parameters.get("staging_purpose"),
+        "staging_candidate_id": physical_parameters.get("staging_candidate_id"),
+        "expected_next_grasp_family": physical_parameters.get("expected_next_grasp_family"),
+        "failed_direct_orientation_reason": physical_parameters.get("failed_direct_orientation_reason"),
+        "orientation_evidence_revision": (
+            physical_parameters.get("observed_object_pose", {}).get("evidence_scene_revision")
+            if isinstance(physical_parameters.get("observed_object_pose"), Mapping) else None
+        ),
     }
     canonical = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return f"action_{hashlib.sha256(canonical.encode()).hexdigest()[:20]}:{canonical}"
@@ -150,4 +158,10 @@ def _pose_bin(value: Any) -> tuple[float, ...] | None:
     if not isinstance(position, (list, tuple)) or len(position) < 3:
         return None
     yaw = value.get("yaw_deg")
-    return tuple([_quantize(item, 0.005) for item in position[:3]] + [_quantize(yaw, 5.0)])
+    quaternion = value.get("orientation_xyzw")
+    orientation = (
+        [_quantize(item, 0.01) for item in quaternion]
+        if isinstance(quaternion, (list, tuple)) and len(quaternion) == 4
+        else [_quantize(yaw, 5.0)]
+    )
+    return tuple([_quantize(item, 0.005) for item in position[:3]] + orientation)

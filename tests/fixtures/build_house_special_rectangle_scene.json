@@ -1,0 +1,64 @@
+{
+  "scene_revision": 1,
+  "frame_id": "base_link",
+  "timestamp": "2026-07-19T00:00:00Z",
+  "objects": [
+    {
+      "id": 1,
+      "track_id": "left_lower",
+      "label": "square red",
+      "shape": "square",
+      "geometry_center_m": [0.3775, 0.2700, 0.0200],
+      "dimensions_m": [0.0300, 0.0300, 0.0400],
+      "yaw_deg": 0.0,
+      "house_role": "left_support_lower"
+    },
+    {
+      "id": 2,
+      "track_id": "right_lower",
+      "label": "square blue",
+      "shape": "square",
+      "geometry_center_m": [0.4225, 0.2700, 0.0200],
+      "dimensions_m": [0.0300, 0.0300, 0.0400],
+      "yaw_deg": 0.0,
+      "house_role": "right_support_lower"
+    },
+    {
+      "id": 3,
+      "track_id": "left_upper",
+      "label": "square green",
+      "shape": "square",
+      "geometry_center_m": [0.3775, 0.2700, 0.0600],
+      "dimensions_m": [0.0300, 0.0300, 0.0400],
+      "yaw_deg": 0.0,
+      "house_role": "left_support_upper"
+    },
+    {
+      "id": 4,
+      "track_id": "right_upper",
+      "label": "square yellow",
+      "shape": "square",
+      "geometry_center_m": [0.4225, 0.2700, 0.0600],
+      "dimensions_m": [0.0300, 0.0300, 0.0400],
+      "yaw_deg": 0.0,
+      "house_role": "right_support_upper"
+    },
+    {
+      "id": 5,
+      "track_id": "roof_rectangle",
+      "label": "rectangle",
+      "shape": "rectangle",
+      "semantic_shape": "rectangle",
+      "semantic_shape_confidence": 0.95,
+      "semantic_shape_uncertain": false,
+      "geometry_center_m": [0.5200, -0.0200, 0.0250],
+      "dimensions_m": [0.0700, 0.0300, 0.0200],
+      "yaw_deg": 0.0,
+      "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+      "orientation_confidence": 0.95,
+      "long_axis_base": [1.0, 0.0, 0.0],
+      "broad_face_normal_base": [0.0, 0.0, 1.0],
+      "evidence_scene_revision": 1
+    }
+  ]
+}

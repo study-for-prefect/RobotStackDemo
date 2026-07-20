@@ -35,6 +35,7 @@ from .orientation import (
 )
 from .plan_io import load_joint_pose, load_plan, load_tcp_offset
 from .pre_rotate_repair import repair_pre_rotate_yaw_if_needed
+from .pose_sequence import load_pose_sequence, run_pose_sequence
 from .push import run_push_plan
 from .steps import (
     command_sequence_for_step,
@@ -84,6 +85,7 @@ def main() -> Optional[int]:
     args = parse_args()
     _install_quiet_external_shutdown_hook()
     push_only = bool(args.push_plan_json)
+    pose_sequence_only = bool(args.pose_sequence_json)
     exclusive_modes = sum(
         bool(value)
         for value in (
@@ -93,12 +95,13 @@ def main() -> Optional[int]:
             args.relative_tool_translation_base is not None,
             args.hover_only,
             push_only,
+            pose_sequence_only,
         )
     )
     if exclusive_modes > 1:
         raise RuntimeError(
-            "--push-plan-json, --ready-only, --gripper-open-only, --gripper-close-only, "
-            "--relative-tool-translation-base, and --hover-only are mutually exclusive."
+            "--push-plan-json, --pose-sequence-json, --ready-only, --gripper-open-only, "
+            "--gripper-close-only, --relative-tool-translation-base, and --hover-only are mutually exclusive."
         )
     if args.ready_only and not args.ready_joint_pose_json:
         raise RuntimeError("--ready-only requires --ready-joint-pose-json.")
@@ -130,8 +133,10 @@ def main() -> Optional[int]:
         or args.gripper_close_only
         or args.hover_only
         or push_only
+        or pose_sequence_only
         else load_plan(args.plan_json)
     )
+    pose_sequence = load_pose_sequence(args.pose_sequence_json) if pose_sequence_only else None
     calibrated_tcp_offset_tool = load_tcp_offset(args.tcp_calibration_json)
     tcp_offset_tool = calibrated_tcp_offset_tool or [float(value) for value in args.tcp_offset_tool]
     ready_joint_pose = load_joint_pose(args.ready_joint_pose_json)
@@ -156,6 +161,8 @@ def main() -> Optional[int]:
         print("Hover-only: enabled")
     if push_only:
         print("Push clearing plan: {}".format(args.push_plan_json))
+    if pose_sequence_only:
+        print("Continuous TCP pose sequence: {}".format(args.pose_sequence_json))
     print("Path mode: {}".format(args.path_mode))
     print("Gripper: {}".format("enabled" if args.enable_gripper else "disabled"))
     print("Planner: {}".format("Cartesian" if args.cartesian else "Joint-space pose"))
@@ -291,6 +298,13 @@ def main() -> Optional[int]:
 
         if push_only:
             if not run_push_plan(node, args, planning_start_state, gripper=gripper):
+                return 2
+            return 0
+
+        if pose_sequence_only:
+            if not run_pose_sequence(
+                node, args, planning_start_state, tcp_offset_tool, pose_sequence,
+            ):
                 return 2
             return 0
 

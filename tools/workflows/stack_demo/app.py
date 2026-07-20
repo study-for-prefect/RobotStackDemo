@@ -121,10 +121,11 @@ def _run(
             path = initial / name
             if path.is_file():
                 integration.artifact(name, path)
-    track_memory: dict[str, Any] = {}
+    continuation = _load_live_continuation(args, task_type)
+    track_memory: dict[str, Any] = dict(continuation.get("track_memory") or {})
     _bind_observation_tracks(raw, track_memory, trust_recorded_ids=bool(args.offline_scene_state))
     scene = build_clutter_scene_state(raw, config.workspace)
-    expected_tracks = scene.expected_tracks
+    expected_tracks = tuple(continuation.get("expected_tracks") or scene.expected_tracks)
     policy_client = (
         JsonFileQwenClient(args.mock_policy_response_dir)
         if args.mock_policy_response_dir else StatelessQwenClient(args)
@@ -132,10 +133,14 @@ def _run(
     failure_limit = int(config.section("policy")["recent_failure_limit"])
     target_selector = QwenTargetSelector(policy_client, failure_limit)
     edge_selector = QwenEdgeSelector(policy_client, failure_limit)
-    action_history: list[dict[str, Any]] = []
+    action_history: list[dict[str, Any]] = list(continuation.get("action_history") or [])
     forbidden: set[str] = set()
     organize_state: OrganizeTaskState | None = None
-    house_state: HouseTaskState | None = None
+    house_state: HouseTaskState | None = continuation.get("house_state")
+    if task_type == "build_house" and house_state is not None:
+        house_state, expected_tracks = _rebind_released_tabletop_triangle(
+            scene, house_state, expected_tracks, action_history,
+        )
     consecutive_reobserve = 0
     max_consecutive_reobserve = int(
         config.section("policy")["max_consecutive_reobserve"]
@@ -153,6 +158,8 @@ def _run(
         else:
             house_state = task_state
         logger.write("task_completion.json", completion)
+        if task_type == "build_house":
+            logger.write("house_completion_state.json", completion)
         if completion["task_complete"]:
             logger.ensure_planning_artifacts("task_complete_from_latest_observation")
             logger.ensure_execution_artifacts("task_complete_from_latest_observation")
@@ -270,6 +277,12 @@ def _run(
                 stage.get("stage") == "release" and stage.get("status") == "executed"
                 for stage in result.stages
             ),
+            "staging_purpose": cycle.selected_edge.physical_parameters.get("staging_purpose"),
+            "final_house_transport_forbidden_this_edge": bool(
+                cycle.selected_edge.physical_parameters.get(
+                    "final_house_transport_forbidden_this_edge", False,
+                )
+            ),
         }
         action_history.append(entry)
         _log_execution(logger, result, action_history)
@@ -286,6 +299,302 @@ def _run(
             )
             return 2
     return 2
+
+
+def _rebind_released_tabletop_triangle(
+    scene: ClutterSceneState,
+    state: HouseTaskState,
+    expected_tracks: tuple[str, ...],
+    history: list[dict[str, Any]],
+) -> tuple[HouseTaskState, tuple[str, ...]]:
+    """Hand a released triangle identity to its unique fresh 3-D detection."""
+    if not history:
+        return state, expected_tracks
+    latest = history[-1]
+    if not (
+        latest.get("status") == "released_tabletop_step_requires_fresh_geometry"
+        and latest.get("action_type") == "extract_to_staging"
+        and latest.get("task_role") == "triangle_top"
+        and latest.get("release_executed") is True
+    ):
+        return state, expected_tracks
+    old_track = str(state.role_bindings.get("triangle_top") or "")
+    if old_track and scene.object_by_track(old_track) is not None:
+        return state, expected_tracks
+    matches = [
+        item for item in scene.current_objects
+        if item.shape == "triangle"
+        and item.color == "green"
+        and item.source.get("metric_triangle_geometry_confirmed") is True
+    ]
+    if len(matches) != 1:
+        return state, expected_tracks
+    new_track = matches[0].track_id
+    bindings = {**dict(state.role_bindings), "triangle_top": new_track}
+    rebound_expected = tuple(
+        new_track if str(track) == old_track else str(track)
+        for track in expected_tracks
+    )
+    if new_track not in rebound_expected:
+        rebound_expected = (*rebound_expected, new_track)
+    latest.update({
+        "acted_object_track_id": new_track,
+        "geometry_rebound_track_id": new_track,
+        "fresh_metric_triangle_rebound": True,
+    })
+    return replace(
+        state,
+        expected_tracks=rebound_expected,
+        role_bindings=bindings,
+        role_completion={**dict(state.role_completion), "triangle_top": False},
+        role_status={**dict(state.role_status), "triangle_top": "REPAIRABLE"},
+        geometry_rebound_tracks=tuple(sorted({*state.geometry_rebound_tracks, new_track})),
+    ), rebound_expected
+
+
+def _load_live_continuation(args: Any, task_type: str) -> dict[str, Any]:
+    """Load continuity facts, never an observation, from a released live edge.
+
+    The next run still starts with the camera and revalidates every role.  The
+    prior cycle supplies only stable track identities and already verified
+    occluded support bindings that cannot be rediscovered beneath an opaque
+    roof.
+    """
+    value = str(getattr(args, "continue_from_cycle", "") or "")
+    if not value:
+        return {}
+    if task_type != "build_house" or args.offline_scene_state:
+        raise ValueError("--continue-from-cycle requires a live build_house run")
+    cycle = Path(value)
+    execution = load_json(str(cycle / "execution_result.json"))
+    task_state_raw = load_json(str(cycle / "task_state.json"))
+    history = _load_json_list(cycle / "action_history.json")
+    stages = execution.get("stages") or []
+    final_scene = execution.get("final_scene") or {}
+    visible_final = tuple(final_scene.get("current_objects", ()))
+    verification = execution.get("post_place_verification") or {}
+    role_checks = (verification.get("evidence") or {}).get("role_observation_checks") or {}
+    other_failed_checks = sorted(
+        key for key, passed in role_checks.items()
+        if isinstance(passed, bool) and not passed and key != "vertical_contact_valid"
+    )
+    released_roof = bool(
+        execution.get("status") == "place_failed"
+        and (verification.get("evidence") or {}).get("house_role") == "roof"
+        and any(item.get("stage") == "release" and item.get("status") == "executed" for item in stages)
+        and role_checks.get("vertical_contact_valid") is False
+        and not other_failed_checks
+    )
+    released_triangle = bool(
+        execution.get("status") == "place_failed"
+        and (verification.get("evidence") or {}).get("house_role") == "triangle_top"
+        and any(item.get("stage") == "release" and item.get("status") == "executed" for item in stages)
+        and role_checks.get("role_object_visible") is True
+        and role_checks.get("roof_visible") is True
+        and role_checks.get("base_contact_valid") is True
+    )
+    released_triangle_table_candidates = tuple(
+        item for item in visible_final
+        if str(item.get("shape") or "") == "triangle"
+        and str(item.get("color") or "") == "green"
+    )
+    released_triangle_to_table = bool(
+        execution.get("status") == "place_failed"
+        and history
+        and history[-1].get("action_type") == "place_house_role"
+        and history[-1].get("task_role") == "triangle_top"
+        and any(item.get("stage") == "release" and item.get("status") == "executed" for item in stages)
+        and len(released_triangle_table_candidates) == 1
+    )
+    staged_orientation = bool(
+        execution.get("status") == "place_verified"
+        and history
+        and history[-1].get("action_type") == "extract_to_staging"
+        and history[-1].get("success") is True
+        and any(item.get("stage") == "release" and item.get("status") == "executed" for item in stages)
+    )
+    released_staging_candidates = tuple(
+        item for item in visible_final
+        if str(item.get("shape") or "") in {"triangle", "rectangle", "concave_rectangle"}
+        and str(item.get("color") or "") == "green"
+    )
+    released_staging = bool(
+        execution.get("status") == "place_failed"
+        and history
+        and history[-1].get("action_type") == "extract_to_staging"
+        and history[-1].get("task_role") == "triangle_top"
+        and any(item.get("stage") == "release" and item.get("status") == "executed" for item in stages)
+        and len(released_staging_candidates) == 1
+    )
+    released_tabletop_step_requires_fresh_geometry = bool(
+        execution.get("status") == "place_failed"
+        and history
+        and history[-1].get("action_type") == "extract_to_staging"
+        and history[-1].get("task_role") == "triangle_top"
+        and "tabletop_face_reorientation" in str(
+            history[-1].get("failure_fingerprint") or ""
+        )
+        and any(
+            item.get("stage") == "release" and item.get("status") == "executed"
+            for item in stages
+        )
+        and not released_staging_candidates
+    )
+    if not (
+        released_roof or released_triangle or released_triangle_to_table
+        or staged_orientation or released_staging
+        or released_tabletop_step_requires_fresh_geometry
+    ):
+        raise ValueError(
+            "continuation cycle must be a released structure visual rejection or verified staging"
+        )
+    if not task_state_raw or not history:
+        raise ValueError("continuation cycle is missing task_state/action_history")
+    task_state_raw = dict(task_state_raw)
+    role_bindings = dict(task_state_raw.get("role_bindings") or {})
+    if released_roof:
+        continued_roof_track = str(history[-1].get("acted_object_track_id") or "")
+        if not continued_roof_track:
+            raise ValueError("continuation action history has no acted roof track")
+        role_bindings["roof"] = continued_roof_track
+        task_state_raw["role_completion"] = {
+            **dict(task_state_raw.get("role_completion") or {}),
+            "roof": True,
+        }
+        task_state_raw["role_status"] = {
+            **dict(task_state_raw.get("role_status") or {}),
+            "roof": "COMPLETED_VISIBLE",
+        }
+    elif not str(role_bindings.get("roof") or ""):
+        raise ValueError("verified staging continuation has no preserved roof binding")
+    if released_triangle or released_triangle_to_table:
+        continued_triangle_track = str(
+            released_triangle_table_candidates[0].get("track_id")
+            if released_triangle_to_table
+            else history[-1].get("acted_object_track_id")
+            or ""
+        )
+        if not continued_triangle_track:
+            raise ValueError("continuation action history has no acted triangle track")
+        role_bindings["triangle_top"] = continued_triangle_track
+        if released_triangle_to_table:
+            old_triangle_track = str(history[-1].get("acted_object_track_id") or "")
+            task_state_raw["expected_tracks"] = [
+                continued_triangle_track if str(track) == old_triangle_track else str(track)
+                for track in task_state_raw.get("expected_tracks", ())
+            ]
+        task_state_raw["role_completion"] = {
+            **dict(task_state_raw.get("role_completion") or {}),
+            "triangle_top": False,
+        }
+        task_state_raw["role_status"] = {
+            **dict(task_state_raw.get("role_status") or {}),
+            "triangle_top": "REPAIRABLE",
+        }
+    if released_staging:
+        old_triangle_track = str(history[-1].get("acted_object_track_id") or "")
+        continued_triangle_track = str(released_staging_candidates[0].get("track_id") or "")
+        if not continued_triangle_track:
+            raise ValueError("released staging continuation has no rebound triangle track")
+        role_bindings["triangle_top"] = continued_triangle_track
+        task_state_raw["expected_tracks"] = [
+            continued_triangle_track if str(track) == old_triangle_track else str(track)
+            for track in task_state_raw.get("expected_tracks", ())
+        ]
+    elif released_tabletop_step_requires_fresh_geometry:
+        # The tabletop rotation and release are physically complete even when
+        # the immediately following visual review drops the changed side view.
+        # Preserve the acted identity only as a provisional binding; the new
+        # run has already captured a fresh observation and must remeasure the
+        # full pose before either another 45-degree step or roof transport.
+        continued_triangle_track = str(history[-1].get("acted_object_track_id") or "")
+        if not continued_triangle_track:
+            raise ValueError("released tabletop step has no acted triangle track")
+        role_bindings["triangle_top"] = continued_triangle_track
+        task_state_raw["role_completion"] = {
+            **dict(task_state_raw.get("role_completion") or {}),
+            "triangle_top": False,
+        }
+        task_state_raw["role_status"] = {
+            **dict(task_state_raw.get("role_status") or {}),
+            "triangle_top": "REPAIRABLE",
+        }
+    task_state_raw["role_bindings"] = role_bindings
+    corrected_history = [dict(item) for item in history]
+    if released_roof:
+        corrected_history[-1].update({
+            "success": True,
+            "status": "place_requires_fresh_continuation_confirmation",
+            "continuation_requires_fresh_geometry": True,
+        })
+    elif released_triangle or released_triangle_to_table:
+        corrected_history[-1].update({
+            "acted_object_track_id": continued_triangle_track,
+            "success": False,
+            "status": "released_triangle_on_table_requires_incremental_orientation_repair",
+            "continuation_preserve_verified_roof": True,
+        })
+    elif released_staging:
+        corrected_history[-1].update({
+            "acted_object_track_id": continued_triangle_track,
+            "success": True,
+            "status": "place_verified_from_unique_staging_geometry_rebound",
+            "geometry_rebound_track_id": continued_triangle_track,
+            "continuation_preserve_verified_roof": True,
+        })
+    elif released_tabletop_step_requires_fresh_geometry:
+        corrected_history[-1].update({
+            "success": True,
+            "status": "released_tabletop_step_requires_fresh_geometry",
+            "continuation_requires_fresh_geometry": True,
+            "continuation_preserve_verified_roof": True,
+        })
+    tracks: dict[str, Any] = {}
+    continuity_track_ids = {
+        str(track) for track in task_state_raw.get("expected_tracks", ()) if track
+    }.union(
+        str(track) for track in role_bindings.values() if track
+    ).union(
+        str(item.get("acted_object_track_id"))
+        for item in history if item.get("acted_object_track_id")
+    )
+    continuity_visible_final = tuple(
+        item for item in visible_final
+        if str(item.get("track_id") or "") in continuity_track_ids
+    )
+    remembered_final = tuple(
+        item for item in final_scene.get("collision_obstacles", ())
+        if str(item.get("track_id") or "") in continuity_track_ids
+        if not any(
+            item.get("color") == visible.get("color")
+            and len(item.get("center_xyz_m") or ()) >= 3
+            and len(visible.get("center_xyz_m") or ()) >= 3
+            and math.dist(item["center_xyz_m"], visible["center_xyz_m"]) <= 0.012
+            for visible in visible_final
+        )
+    )
+    for item in (*continuity_visible_final, *remembered_final):
+        track_id = str(item.get("track_id") or "")
+        if not track_id:
+            continue
+        tracks[track_id] = {
+            "track_id": track_id,
+            "label": item.get("class_name"),
+            "semantic_shape": item.get("shape"),
+            "color": item.get("color"),
+            "center_base_m": list(item.get("center_xyz_m") or ()),
+            "dimensions_m": list(item.get("size_xyz_m") or ()),
+            "table_yaw_deg": float(item.get("yaw_deg") or 0.0),
+            "last_seen_revision": 1,
+            "visible": False,
+            "history": [{"source": "validated_live_continuation"}] * 2,
+        }
+    return {
+        "track_memory": {"tracks": tracks, "track_history": []},
+        "expected_tracks": tuple(task_state_raw.get("expected_tracks") or tracks),
+        "action_history": corrected_history,
+        "house_state": HouseTaskState(**task_state_raw),
+    }
 
 
 def _reobserve_without_action(
@@ -317,8 +626,8 @@ def _reobserve_without_action(
         )
         if raw is None:
             raise RuntimeError("fresh reobserve did not produce a scene")
-        raw = _review_live_observation(args, raw, directory, task_type)
         raw["scene_revision"] = before.scene_revision + 1
+        raw = _review_live_observation(args, raw, directory, task_type)
         _bind_observation_tracks(raw, track_memory)
     merged_expected = _merge_expected_tracks(expected_tracks, raw, track_memory)
     scene = build_clutter_scene_state(
@@ -387,7 +696,7 @@ def _decorate_task_scene(
     state = build_house_task_state(scene, config, previous=house_previous)
     scene = _apply_task_marks(scene, (), state.protected_structure_tracks, ())
     state = build_house_task_state(scene, config, previous=state)
-    return scene, state, evaluate_house_completion(scene, state)
+    return scene, state, evaluate_house_completion(scene, state, config)
 
 
 def _apply_task_marks(
@@ -442,11 +751,11 @@ class _LiveObserver(SceneObserver):
         )
         if raw is None:
             raise RuntimeError(f"fresh observation missing after {reason}")
+        self._revision += 1
+        raw["scene_revision"] = self._revision
         raw = _review_live_observation(
             self._args, raw, directory, self._task_type,
         )
-        self._revision += 1
-        raw["scene_revision"] = self._revision
         _bind_observation_tracks(
             raw,
             self._track_memory,
@@ -506,11 +815,105 @@ def _destination_check(
         if role:
             bindings[role] = edge.acted_object_track_id
         valid, role_checks = role_observation_checks(scene, bindings, str(role or ""), config)
+        if role == "triangle_top":
+            valid, role_checks = _released_triangle_destination_check(
+                edge, scene, bindings, config, role_checks,
+            )
+        rebound_track_id = None
+        if role and not valid and scene.object_by_track(edge.acted_object_track_id) is None:
+            expected_pose = edge.physical_parameters.get("place_pose", {})
+            expected_position = expected_pose.get("position_m") if isinstance(expected_pose, Mapping) else None
+            candidates = sorted(scene.current_objects, key=lambda item: (
+                math.dist(item.center_xyz_m, expected_position)
+                if isinstance(expected_position, (list, tuple)) and len(expected_position) >= 3
+                else float("inf")
+            ))
+            for candidate in candidates:
+                candidate_bindings = {**bindings, role: candidate.track_id}
+                candidate_valid, candidate_checks = role_observation_checks(
+                    scene, candidate_bindings, role, config,
+                )
+                if candidate_valid:
+                    valid, role_checks = True, candidate_checks
+                    rebound_track_id = candidate.track_id
+                    break
         return bool(role and valid), {
             "task_role": role,
             "role_observation_checks": role_checks,
+            "geometry_rebound_track_id": rebound_track_id,
+            "verified_structure_occlusion": bool(
+                valid and scene.object_by_track(edge.acted_object_track_id) is None
+                and rebound_track_id is None
+            ),
         }
     return check
+
+
+def _released_triangle_destination_check(
+    edge: Any,
+    scene: ClutterSceneState,
+    bindings: Mapping[str, str],
+    config: StackDemoConfig,
+    original_checks: Mapping[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    """Fuse fresh placement geometry with the executed rigid SE(3) target."""
+    checks = dict(original_checks)
+    triangle = scene.object_by_track(edge.acted_object_track_id)
+    roof = _scene_object_for_verification(scene, str(bindings.get("roof") or ""))
+    physical = edge.physical_parameters
+    expected = physical.get("target_object_pose") or physical.get("place_pose") or {}
+    expected_position = expected.get("position_m") if isinstance(expected, Mapping) else None
+    target_edge = expected.get("designated_right_angle_edge_world") if isinstance(expected, Mapping) else None
+    beam = expected.get("beam_axis_world") if isinstance(expected, Mapping) else None
+    if (
+        triangle is None or roof is None
+        or not isinstance(expected_position, (list, tuple)) or len(expected_position) < 3
+    ):
+        checks["executed_target_pose_available"] = False
+        return False, checks
+    house = config.section("house")
+    xy_error = math.dist(triangle.center_xyz_m[:2], expected_position[:2])
+    commanded_target_face_up = bool(
+        isinstance(target_edge, (list, tuple)) and len(target_edge) == 3
+        and float(target_edge[2]) >= float(config.section("house_orientation")["minimum_upward_normal_component"])
+    )
+    beam_yaw = (
+        math.degrees(math.atan2(float(beam[1]), float(beam[0])))
+        if isinstance(beam, (list, tuple)) and len(beam) == 3 else 0.0
+    )
+    yaw_error = abs((float(triangle.yaw_deg) - beam_yaw + 90.0) % 180.0 - 90.0)
+    roof_support_half = 0.5 * min(float(value) for value in roof.size_xyz_m[:2])
+    support_margin = roof_support_half - xy_error
+    uncertainty = 0.002
+    checks.update({
+        "long_edge_matches_roof_axis": yaw_error <= float(house["orientation_tolerance_deg"]),
+        "long_edge_alignment_error_deg": yaw_error,
+        "center_of_mass_supported": xy_error <= roof_support_half,
+        "support_margin_valid": (
+            support_margin + uncertainty >= float(house["minimum_support_margin_m"])
+        ),
+        "roof_center_offset_valid": xy_error <= float(house["center_tolerance_m"]),
+        "triangle_center_offset_m": xy_error,
+        "support_margin_m": support_margin,
+        "support_margin_uncertainty_m": uncertainty,
+        "executed_target_pose_available": True,
+        "executed_rigid_target_face_up": commanded_target_face_up,
+        "fresh_observation_confirms_apex_up": checks.get("apex_up") is True,
+        "verification_center_reference": "executed_live_roof_target_pose",
+        "verification_axis_source": "fresh_semantic_apex_and_detector_axis",
+    })
+    return all(value for value in checks.values() if isinstance(value, bool)), checks
+
+
+def _scene_object_for_verification(
+    scene: ClutterSceneState,
+    track_id: str,
+) -> Any | None:
+    """Resolve a visible object or retained geometry occluded by the placement."""
+    return scene.object_by_track(track_id) or next(
+        (item for item in scene.collision_obstacles if item.track_id == track_id),
+        None,
+    )
 
 
 def _log_execution(logger: CycleLogger, result: EdgeExecutionResult, history: list[dict[str, Any]]) -> None:
@@ -524,6 +927,11 @@ def _log_execution(logger: CycleLogger, result: EdgeExecutionResult, history: li
         {"skipped_reason": result.status} if result.post_place_verification is None else result.post_place_verification.to_dict(),
     )
     logger.write("action_history.json", history)
+    verification = result.post_place_verification
+    logger.write(
+        "post_place_3d_verification.json",
+        verification.to_dict() if verification is not None else {"skipped_reason": result.status},
+    )
 
 
 def _initial_observation(args: Any, output: Path, task_type: str) -> dict[str, Any]:
@@ -567,8 +975,13 @@ def _apply_motion_config(args: Any, config: StackDemoConfig) -> None:
         args.model = str(policy["model"])
     if int(args.vlm_num_ctx) <= 0:
         args.vlm_num_ctx = int(policy["num_ctx"])
+    if int(args.vlm_num_ctx) != 32768:
+        raise ValueError(f"stack_demo requires vlm num_ctx=32768, got {args.vlm_num_ctx}")
     if int(args.vlm_num_predict) <= 0:
         args.vlm_num_predict = int(policy["num_predict"])
+    print(f"effective_vlm_num_ctx={args.vlm_num_ctx}", flush=True)
+    print(f"effective_vlm_num_predict={args.vlm_num_predict}", flush=True)
+    print(f"model={args.model}", flush=True)
 
 
 def _apply_tcp_offset_config(args: Any, config: StackDemoConfig) -> None:

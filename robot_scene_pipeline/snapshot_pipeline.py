@@ -7,6 +7,7 @@ import time
 import cv2
 
 from .depth_geometry import add_depth_args, attach_3d, build_private_state, coordinate_convention, draw_annotated
+from .fragmented_triangle_merge import merge_fragmented_green_triangle_detections
 from .detector_runtime import DetectorModel, add_detector_args
 from .io_utils import project_path, write_json
 from .realsense_capture import add_realsense_args, capture_rgbd
@@ -221,12 +222,19 @@ def main():
                 args,
                 transform_matrix=transform_matrix,
             )
+            detections, fragment_merges = merge_fragmented_green_triangle_detections(detections)
+            if fragment_merges:
+                detections, table_plane = attach_tabletop_geometry(
+                    detections, depth_frame, intrinsics, args,
+                    transform_matrix=transform_matrix,
+                )
             valid_objects = sum(bool(det.get("pointcloud_geometry_valid")) for det in detections)
             tabletop_payload.update(
                 {
                     "status": "ok",
                     "table_plane": table_plane,
                     "valid_object_count": valid_objects,
+                    "fragment_merges": fragment_merges,
                 }
             )
         except Exception as exc:

@@ -65,20 +65,24 @@ fi
 exec bash
 "
 
-tmux new-window -t "$SESSION" -n moveit "
-sleep 5
-source /opt/ros/humble/setup.bash
-if [ -f /home/wxm/realsense_ws/install/setup.bash ]; then
-  source /home/wxm/realsense_ws/install/setup.bash
-fi
+rm -f /tmp/robot_stack_moveit.pgid
 
-if [ -f /home/wxm/ros2_ws/install/setup.bash ]; then
-  source /home/wxm/ros2_ws/install/setup.bash
-fi
+gnome-terminal --title="MoveIt" -- bash -ic '
+MOVEIT_PGID="$(ps -o pgid= -p $$ | tr -d " ")"
+printf "%s\n" "$MOVEIT_PGID" > /tmp/robot_stack_moveit.pgid
+
+trap "rm -f /tmp/robot_stack_moveit.pgid" EXIT
+
+sleep 5
+
+echo "[moveit] process group: $MOVEIT_PGID"
+echo "[moveit] ur_moveit_config: $(ros2 pkg prefix ur_moveit_config)"
+echo "[moveit] ur_robot_driver: $(ros2 pkg prefix ur_robot_driver)"
 
 ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur5
+
 exec bash
-"
+' &
 
 tmux new-window -t "$SESSION" -n camera "
 sleep 3

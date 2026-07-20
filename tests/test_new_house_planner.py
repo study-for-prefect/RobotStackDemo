@@ -11,6 +11,7 @@ from tools.workflows.stack_demo.clutter.grasp_edges import scan_grasp_yaws
 from tools.workflows.stack_demo.common.action_edges import ActionType
 from tools.workflows.stack_demo.house.completion import evaluate_house_completion
 from tools.workflows.stack_demo.house.placement import (
+    _role_pose,
     house_placement_target,
     staging_orientation_targets,
 )
@@ -29,6 +30,124 @@ from tests.new_arch_fixtures import config, raw_object, scene
 
 
 class NewHousePlannerTests(unittest.TestCase):
+    def test_roof_target_uses_configured_house_center_without_negative_z_offset(self):
+        left = raw_object(
+            1, "left_upper", [0.383, 0.266, 0.010],
+            size=[0.024, 0.024, 0.050], label="square yellow",
+        )
+        right = raw_object(
+            2, "right_upper", [0.419, 0.264, 0.011],
+            size=[0.025, 0.025, 0.050], label="square blue",
+        )
+        roof = raw_object(
+            3, "roof", [0.45, 0.18, 0.0],
+            size=[0.056, 0.027, 0.014], label="rectangle red",
+        )
+        current = scene([left, right, roof])
+        state = replace(
+            build_house_task_state(current, config()),
+            role_bindings={
+                "left_support_upper": "left_upper",
+                "right_support_upper": "right_upper",
+            },
+        )
+        pose = _role_pose(current, state, current.object_by_track("roof"), "roof", config())
+        self.assertEqual(pose["position_m"][:2], [0.4, 0.27])
+        self.assertAlmostEqual(pose["position_m"][2], 0.043, places=6)
+
+    def test_triangle_target_uses_configured_center_not_noisy_roof_mask_center(self):
+        roof = raw_object(
+            1, "roof", [0.405, 0.268, 0.052],
+            size=[0.060, 0.030, 0.014], label="rectangle red",
+        )
+        triangle = raw_object(
+            2, "triangle", [0.416, 0.139, 0.0],
+            size=[0.048, 0.024, 0.024], label="triangle green",
+        )
+        current = scene([roof, triangle])
+        state = replace(
+            build_house_task_state(current, config()),
+            role_bindings={"roof": "roof"},
+        )
+        pose = _role_pose(
+            current, state, current.object_by_track("triangle"), "triangle_top", config(),
+        )
+        self.assertEqual(pose["position_m"][:2], [0.4, 0.27])
+
+    def test_successful_orientation_staging_is_not_repeated_without_evidence_gain(self):
+        current = scene([raw_object(
+            1, "roof", [0.40, 0.08, 0.0],
+            label="rectangle red", size=[0.056, 0.027, 0.014],
+        )])
+        current = replace(current, recent_action_results=({
+            "success": True,
+            "action_type": "extract_to_staging",
+            "acted_object_track_id": "roof",
+            "task_role": "roof",
+        },))
+        interval = scan_grasp_yaws(
+            current.object_by_track("roof"), current.current_objects, config(),
+        ).safe_intervals[0]
+        self.assertEqual(
+            staging_orientation_targets(
+                current, current.object_by_track("roof"), "roof", config(), interval=interval,
+            ),
+            (),
+        )
+
+    def test_failed_final_triangle_placement_allows_new_tabletop_reorientation(self):
+        current = scene([raw_object(
+            1, "triangle", [0.40, 0.27, 0.06],
+            label="triangle", size=[0.048, 0.024, 0.024],
+        )])
+        current = replace(current, recent_action_results=(
+            {
+                "success": True,
+                "action_type": "extract_to_staging",
+                "acted_object_track_id": "triangle",
+                "task_role": "triangle_top",
+            },
+            {
+                "success": False,
+                "action_type": "place_house_role",
+                "acted_object_track_id": "triangle",
+                "task_role": "triangle_top",
+            },
+        ))
+        triangle = current.object_by_track("triangle")
+        interval = scan_grasp_yaws(triangle, current.current_objects, config()).safe_intervals[0]
+        targets = staging_orientation_targets(
+            current, triangle, "triangle_top", config(), interval=interval,
+        )
+        self.assertTrue(targets)
+        self.assertTrue(all(
+            target.additional_physical_parameters["staging_purpose"]
+            == "change_orientation_observation"
+            for target in targets
+        ))
+
+    def test_shared_blocker_fallback_cannot_restaging_successful_roof(self):
+        current = scene([raw_object(
+            1, "roof", [0.30, 0.18, 0.0],
+            label="rectangle red", size=[0.056, 0.027, 0.014],
+        )])
+        current = replace(current, recent_action_results=({
+            "success": True,
+            "action_type": "extract_to_staging",
+            "acted_object_track_id": "roof",
+            "task_role": "roof",
+        },))
+        generated = generate_physical_edges(
+            current, (), "build_house", config(),
+            lambda _obj, _interval: None,
+            lambda obj: staging_orientation_targets(
+                current, obj, "blocker", config(),
+            ),
+            target_specs=(TargetSpec("roof__roof", "roof", "roof"),),
+            variant_placement_provider=lambda _obj, _interval, _role: None,
+        )
+        self.assertEqual(generated.edges_by_target["roof__roof"], ())
+
     def test_merged_two_cube_column_verifies_upper_contact(self):
         lower = raw_object(
             1, "lower", [0.430, 0.270, 0.0],
@@ -63,6 +182,60 @@ class NewHousePlannerTests(unittest.TestCase):
         self.assertTrue(
             state.role_bindings["right_support_lower"].startswith("inferred_hidden_")
         )
+
+    def test_prebound_merged_upper_still_restores_hidden_lower(self):
+        merged = raw_object(
+            1, "column", [0.420, 0.263, 0.0114],
+            size=[0.0256, 0.0241, 0.0478], label="square blue",
+            local_support_surface={"support_z_base_m": -0.0125},
+        )
+        current = scene([merged])
+        seed = build_house_task_state(current, config())
+        previous = replace(
+            seed,
+            role_bindings={"right_support_upper": "column"},
+            role_completion=_completion(),
+        )
+        state = build_house_task_state(current, config(), previous=previous)
+        self.assertTrue(state.role_completion["right_support_lower"])
+        self.assertTrue(state.role_completion["right_support_upper"])
+        self.assertEqual(state.role_status["right_support_lower"], "COMPLETED_OCCLUDED")
+        self.assertEqual(state.role_status["right_support_upper"], "COMPLETED_VISIBLE")
+        self.assertEqual(state.role_bindings["right_support_upper"], "column")
+        self.assertIn(state.role_bindings["right_support_lower"], state.inferred_hidden_tracks)
+
+    def test_perspective_stretched_164624_blue_column_is_still_complete(self):
+        merged = raw_object(
+            1, "track_blue_01", [0.41684, 0.26434, 0.01142],
+            size=[0.03428, 0.02482, 0.04905], label="square blue",
+            local_support_surface={"support_z_base_m": -0.01311},
+        )
+        current = scene([merged])
+        seed = build_house_task_state(current, config())
+        previous = replace(
+            seed,
+            role_bindings={"right_support_upper": "track_blue_01"},
+            role_completion=_completion(),
+        )
+        state = build_house_task_state(current, config(), previous=previous)
+        self.assertEqual(state.role_status["right_support_lower"], "COMPLETED_OCCLUDED")
+        self.assertEqual(state.role_status["right_support_upper"], "COMPLETED_VISIBLE")
+        self.assertIn("track_blue_01", state.protected_structure_tracks)
+
+    def test_repairable_bound_track_remains_a_movable_candidate(self):
+        current = scene([raw_object(
+            1, "misplaced", [0.50, 0.05, 0.02], label="square blue",
+        )])
+        seed = build_house_task_state(current, config())
+        previous = replace(
+            seed,
+            role_bindings={"left_support_lower": "misplaced"},
+            role_completion=_completion(),
+        )
+        state = build_house_task_state(current, config(), previous=previous)
+        self.assertEqual(state.role_status["left_support_lower"], "REPAIRABLE")
+        self.assertNotIn("misplaced", state.protected_structure_tracks)
+        self.assertIn("misplaced", state.role_candidate_tracks["left_support_lower"])
 
     def test_tall_rectangle_is_not_a_merged_support_column(self):
         lower = raw_object(
@@ -145,6 +318,46 @@ class NewHousePlannerTests(unittest.TestCase):
         state = build_house_task_state(current, config())
         self.assertEqual(set(state.protected_structure_tracks), {f"t{index}" for index in range(1, 7)})
         self.assertTrue(evaluate_house_completion(current, state)["task_complete"])
+
+    def test_completion_height_uses_merged_columns_and_nominal_roof_thickness(self):
+        current = scene([
+            raw_object(3, "t3", [0.382, 0.270, 0.012], size=(0.024, 0.024, 0.050)),
+            raw_object(4, "t4", [0.425, 0.270, 0.012], size=(0.024, 0.024, 0.050)),
+            raw_object(5, "t5", [0.400, 0.270, 0.019], label="rectangle",
+                       size=(0.062, 0.030, 0.063)),
+            raw_object(6, "t6", [0.407, 0.268, 0.063], label="triangle",
+                       size=(0.035, 0.018, 0.025)),
+        ])
+        base = build_house_task_state(
+            scene(_completed_house_objects(), expected=[f"t{index}" for index in range(1, 7)]),
+            config(),
+        )
+        bindings = {
+            "left_support_lower": "hidden_left", "left_support_upper": "t3",
+            "right_support_lower": "hidden_right", "right_support_upper": "t4",
+            "roof": "t5", "triangle_top": "t6",
+        }
+        support_edges = (
+            ("hidden_left", "t3"), ("hidden_right", "t4"),
+            ("t3", "t5"), ("t4", "t5"), ("t5", "t6"),
+        )
+        state = replace(
+            base,
+            scene_revision=current.scene_revision,
+            role_bindings=bindings,
+            role_completion={role: True for role in bindings},
+            unresolved_missing_tracks=(),
+            inferred_hidden_tracks=("hidden_left", "hidden_right"),
+            support_relations=tuple(
+                {"support": lower, "supported": upper, "verified": True}
+                for lower, upper in support_edges
+            ),
+        )
+        result = evaluate_house_completion(current, state, config())
+        self.assertTrue(result["structure_total_height_valid"])
+        self.assertIsNotNone(result["minimum_required_total_height_m"])
+        self.assertLess(result["minimum_required_total_height_m"], 0.080)
+        self.assertTrue(result["task_complete"])
 
     def test_all_legal_role_track_pairs_are_exposed_without_order_binding(self):
         current = scene([
@@ -279,7 +492,7 @@ class NewHousePlannerTests(unittest.TestCase):
         self.assertTrue(all(
             edge.action_type == ActionType.PLACE_HOUSE_ROLE for edge in edges
         ))
-        self.assertEqual(mocked_path_check.call_count, 1)
+        self.assertEqual(mocked_path_check.call_count, 2)
 
         grasp_order[:] = [-90.0, 0.0]
         with patch(
@@ -354,8 +567,9 @@ class NewHousePlannerTests(unittest.TestCase):
             for target in targets
         ]
         self.assertEqual(clearances, sorted(clearances, reverse=True))
+        expected_center_z = config().section("house")["table_surface_z_m"] + 0.025
         self.assertTrue(all(
-            abs(target.place_pose["position_m"][2] - 0.025) < 1e-9
+            abs(target.place_pose["position_m"][2] - expected_center_z) < 1e-9
             for target in targets
         ))
 
@@ -439,6 +653,188 @@ class NewHousePlannerTests(unittest.TestCase):
                 ActionType.PICK_AWAY_BLOCKER, ActionType.NUDGE_BLOCKER,
             }
             for edge in edges
+        ))
+
+    def test_172451_wrong_groove_face_uses_tabletop_staging_not_airborne_flip(self):
+        roof = raw_object(
+            1, "roof", [0.38495, 0.07539, 0.00086],
+            label="concave rectangle red", size=(0.05614, 0.02581, 0.03028),
+            semantic_shape="concave_rectangle", semantic_shape_confidence=0.95,
+            semantic_shape_uncertain=False, orientation_confidence=0.95,
+            orientation_xyzw=[0.0, 0.0, 0.0, 1.0],
+            long_axis_base=[1.0, 0.0, 0.0],
+            groove_opening_normal_base=[0.0, 0.0, 1.0],
+            evidence_scene_revision=1,
+        )
+        objects = [
+            roof,
+            raw_object(
+                2, "green", [0.29805, 0.07366, -0.00168],
+                label="square green", size=(0.02596, 0.01796, 0.02332),
+            ),
+            raw_object(
+                3, "red_02", [0.38861, 0.16892, -0.00634],
+                label="rectangle red", size=(0.05763, 0.02666, 0.01514),
+            ),
+            raw_object(
+                4, "left_upper", [0.3775, 0.270, 0.043],
+                label="square yellow", size=(0.025, 0.025, 0.025),
+            ),
+            raw_object(
+                5, "right_upper", [0.4225, 0.270, 0.043],
+                label="square blue", size=(0.025, 0.025, 0.025),
+            ),
+        ]
+        current = scene(objects, protected=("left_upper", "right_upper"))
+        completion = _completion()
+        completion.update(
+            left_support_lower=True, right_support_lower=True,
+            left_support_upper=True, right_support_upper=True,
+        )
+        state = replace(
+            build_house_task_state(current, config()),
+            role_bindings={
+                "left_support_upper": "left_upper",
+                "right_support_upper": "right_upper",
+            },
+            role_completion=completion,
+        )
+
+        generated = generate_physical_edges(
+            current, (), "build_house", config(),
+            lambda _obj, _interval: None,
+            lambda obj: staging_orientation_targets(
+                current, obj, "blocker", config(),
+            ),
+            target_specs=(TargetSpec("roof__roof", "roof", "roof"),),
+            variant_placement_provider=lambda obj, interval, role: house_placement_target(
+                current, state, obj, role, config(), interval=interval,
+            ),
+        )
+        edges = generated.edges_by_target["roof__roof"]
+        self.assertTrue(edges)
+        self.assertFalse(any(
+            edge.acted_object_track_id == "roof"
+            and edge.action_type == ActionType.PLACE_HOUSE_ROLE
+            for edge in edges
+        ))
+        self.assertTrue(any(
+            edge.acted_object_track_id == "roof"
+            and edge.action_type == ActionType.EXTRACT_TO_STAGING
+            and edge.physical_parameters["staging_purpose"]
+            == "tabletop_face_reorientation"
+            and edge.physical_parameters["airborne_face_change_forbidden"]
+            for edge in edges
+        ))
+
+    def test_correct_roof_face_is_preserved_without_forced_flip(self):
+        objects = [
+            raw_object(
+                1, "roof", [0.52, -0.02, 0.015],
+                label="rectangle red", size=(0.060, 0.026, 0.018),
+                semantic_shape="rectangle", semantic_shape_confidence=0.95,
+                semantic_shape_uncertain=False, orientation_confidence=0.95,
+                orientation_xyzw=[0.0, 0.0, 0.0, 1.0],
+                long_axis_base=[1.0, 0.0, 0.0],
+                broad_face_normal_base=[0.0, 0.0, 1.0],
+                evidence_scene_revision=1,
+            ),
+            raw_object(
+                2, "left_upper", [0.3775, 0.270, 0.043],
+                label="square yellow", size=(0.025, 0.025, 0.025),
+            ),
+            raw_object(
+                3, "right_upper", [0.4225, 0.270, 0.043],
+                label="square blue", size=(0.025, 0.025, 0.025),
+            ),
+        ]
+        current = scene(objects, protected=("left_upper", "right_upper"))
+        completion = _completion()
+        completion.update(
+            left_support_lower=True, right_support_lower=True,
+            left_support_upper=True, right_support_upper=True,
+        )
+        state = replace(
+            build_house_task_state(current, config()),
+            role_bindings={
+                "left_support_upper": "left_upper",
+                "right_support_upper": "right_upper",
+            },
+            role_completion=completion,
+        )
+        generated = generate_physical_edges(
+            current, (), "build_house", config(),
+            lambda _obj, _interval: None,
+            lambda _obj: (),
+            target_specs=(TargetSpec("roof__roof", "roof", "roof"),),
+            variant_placement_provider=lambda obj, interval, role: house_placement_target(
+                current, state, obj, role, config(), interval=interval,
+            ),
+        )
+        target_poses = [
+            edge.physical_parameters["target_object_pose"]
+            for edge in generated.edges_by_target["roof__roof"]
+            if edge.action_type == ActionType.PLACE_HOUSE_ROLE
+        ]
+        self.assertEqual(len(target_poses), 1)
+        self.assertFalse(target_poses[0]["forced_nominal_flip"])
+        self.assertAlmostEqual(target_poses[0]["target_tilt_deg"], 0.0)
+        roof_edges = [
+            edge for edge in generated.edges_by_target["roof__roof"]
+            if edge.action_type == ActionType.PLACE_HOUSE_ROLE
+        ]
+        self.assertTrue(all(
+            edge.physical_parameters["airborne_adjustment_kind"]
+            == "minimum_required_target_orientation_alignment"
+            and not edge.physical_parameters["tabletop_face_reorientation_required"]
+            and abs(edge.physical_parameters["tilted_place_clearance_m"]) < 1e-9
+            and not edge.physical_parameters["tilted_place_clearance_applied"]
+            for edge in roof_edges
+        ))
+
+    def test_wrong_rectangle_face_requires_tabletop_staging_before_roof(self):
+        objects = [
+            raw_object(
+                1, "roof", [0.52, -0.02, 0.015],
+                label="rectangle red", size=(0.060, 0.026, 0.018),
+                semantic_shape="rectangle", semantic_shape_confidence=0.95,
+                semantic_shape_uncertain=False, orientation_confidence=0.95,
+                orientation_xyzw=[1.0, 0.0, 0.0, 0.0],
+                long_axis_base=[1.0, 0.0, 0.0],
+                broad_face_normal_base=[0.0, 0.0, -1.0],
+                evidence_scene_revision=1,
+            ),
+            raw_object(2, "left_upper", [0.3775, 0.270, 0.043]),
+            raw_object(3, "right_upper", [0.4225, 0.270, 0.043]),
+        ]
+        current = scene(objects, protected=("left_upper", "right_upper"))
+        completion = _completion()
+        completion.update(
+            left_support_lower=True, right_support_lower=True,
+            left_support_upper=True, right_support_upper=True,
+        )
+        state = replace(
+            build_house_task_state(current, config()),
+            role_bindings={
+                "left_support_upper": "left_upper",
+                "right_support_upper": "right_upper",
+            },
+            role_completion=completion,
+        )
+        roof = current.object_by_track("roof")
+        interval = scan_grasp_yaws(
+            roof, current.current_objects, config(),
+        ).safe_intervals[0]
+        targets = house_placement_target(
+            current, state, roof, "roof", config(), interval=interval,
+        )
+        self.assertTrue(targets)
+        self.assertTrue(all(
+            target.action_type == ActionType.EXTRACT_TO_STAGING
+            and target.additional_physical_parameters["staging_purpose"]
+            == "tabletop_face_reorientation"
+            and target.additional_physical_parameters["airborne_face_change_forbidden"]
+            for target in targets
         ))
 
     def test_roof_blocking_support_is_picked_far_away_and_never_pushed(self):
@@ -606,6 +1002,47 @@ class NewHousePlannerTests(unittest.TestCase):
         self.assertFalse(state.role_completion["right_support_upper"])
         self.assertEqual(legal_incomplete_roles(state.role_completion), ("right_support_upper",))
         self.assertIn("left_upper", state.protected_structure_tracks)
+
+    def test_fresh_run_recovers_four_hidden_supports_from_elevated_roof(self):
+        roof = raw_object(
+            1, "assembled_roof", [0.4014, 0.2678, 0.0187],
+            label="rectangle", size=(0.0597, 0.0295, 0.0639),
+            local_support_surface={"support_z_base_m": -0.01327},
+            top_z_base_m=0.0506,
+            height_surface_cluster={"coverage_ratio": 0.66},
+            yaw_deg=2.65,
+        )
+        triangle = raw_object(
+            2, "triangle", [0.4025, 0.1304, -0.0052],
+            label="triangle", size=(0.0410, 0.0237, 0.0186),
+        )
+        current = scene([roof, triangle])
+
+        state = build_house_task_state(current, config())
+
+        for role in (
+            "left_support_lower", "left_support_upper",
+            "right_support_lower", "right_support_upper", "roof",
+        ):
+            self.assertTrue(state.role_completion[role], role)
+        self.assertFalse(state.role_completion["triangle_top"])
+        self.assertEqual(state.role_bindings["roof"], "assembled_roof")
+        self.assertEqual(len(state.inferred_hidden_tracks), 4)
+        self.assertEqual(legal_incomplete_roles(state.role_completion), ("triangle_top",))
+
+    def test_table_rectangle_cannot_infer_hidden_house_supports(self):
+        roof = raw_object(
+            1, "loose_roof", [0.400, 0.270, -0.006],
+            label="rectangle", size=(0.060, 0.030, 0.014),
+            local_support_surface={"support_z_base_m": -0.013},
+            top_z_base_m=0.001,
+            height_surface_cluster={"coverage_ratio": 0.80},
+        )
+
+        state = build_house_task_state(scene([roof]), config())
+
+        self.assertFalse(state.inferred_hidden_tracks)
+        self.assertFalse(state.role_completion["roof"])
 
     def test_verified_lower_support_remains_complete_while_occluded_by_upper(self):
         visible = scene([raw_object(

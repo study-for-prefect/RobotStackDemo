@@ -8,7 +8,7 @@ from unittest.mock import patch
 import requests
 
 from robot_scene_pipeline.ollama_policy_client import (
-    POLICY_GENERATION_CONFIG, _next_num_predict, call_policy, unload_model,
+    DEFAULT_VLM_NUM_CTX, POLICY_GENERATION_CONFIG, _next_num_predict, call_policy, unload_model,
 )
 
 
@@ -31,8 +31,8 @@ class OllamaPolicyClientTests(unittest.TestCase):
     def test_default_budgets_are_bounded_and_retry_grows_gradually(self):
         self.assertEqual(POLICY_GENERATION_CONFIG["target_selection"]["num_predict"], 768)
         self.assertEqual(POLICY_GENERATION_CONFIG["edge_selection"]["num_predict"], 768)
-        self.assertEqual(POLICY_GENERATION_CONFIG["target_selection"]["num_ctx"], 12288)
-        self.assertEqual(POLICY_GENERATION_CONFIG["edge_selection"]["num_ctx"], 12288)
+        self.assertEqual(DEFAULT_VLM_NUM_CTX, 32768)
+        self.assertTrue(all("num_ctx" not in value for value in POLICY_GENERATION_CONFIG.values()))
         self.assertEqual(
             [_next_num_predict(value) for value in (2048, 4096, 6144, 8192)],
             [4096, 6144, 8192, 12288],

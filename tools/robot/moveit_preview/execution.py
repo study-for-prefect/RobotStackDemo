@@ -31,6 +31,7 @@ from .trajectory import (
     joint_position_map_from_state,
     joint_state_from_trajectory,
     max_joint_delta,
+    max_joint_start_goal_delta,
     maybe_confirm,
     print_trajectory_summary,
     stretch_trajectory_timing,
@@ -334,6 +335,29 @@ def plan_and_maybe_execute_motion(
                 )
             )
 
+    # A dense trajectory can hide a remote IK branch: every adjacent sample is
+    # small even though one or more joints make an almost complete revolution.
+    # Apply the same safety limit to the complete unwrapped start-to-goal
+    # travel, not only to adjacent samples and wrist_3.
+    start_goal_delta = max_joint_start_goal_delta(trajectory)
+    if start_goal_delta:
+        start_goal_joint, start_goal_value = start_goal_delta
+        start_goal_limit = (
+            max(joint_delta_limit, float(args.max_wrist_3_start_goal_delta))
+            if start_goal_joint == "wrist_3_joint"
+            else joint_delta_limit
+        )
+        if start_goal_value > start_goal_limit:
+            delta_too_large = True
+            node.get_logger().warning(
+                "Large joint start-goal travel detected: {} delta={:.3f} rad > {:.3f}; "
+                "rejecting remote IK branch.".format(
+                    start_goal_joint,
+                    start_goal_value,
+                    start_goal_limit,
+                )
+            )
+
     wrist_3_start_goal_delta = joint_start_goal_delta(trajectory, "wrist_3_joint")
     wrist_3_delta_too_large = bool(
         wrist_3_start_goal_delta is not None
@@ -348,7 +372,7 @@ def plan_and_maybe_execute_motion(
         )
 
     if not args.execute:
-        if wrist_3_delta_too_large:
+        if delta_too_large or wrist_3_delta_too_large:
             return False
         return joint_state_from_trajectory(trajectory) or True
     if delta_too_large or wrist_3_delta_too_large:

@@ -22,6 +22,14 @@ def parse_args():
         help="Run one staged tabletop push from push_execution_plan_v1 JSON.",
     )
     parser.add_argument(
+        "--pose-sequence-json",
+        default="",
+        help=(
+            "Plan or execute an ordered full-SE(3) TCP waypoint sequence. Each waypoint "
+            "is planned from the preceding trajectory endpoint."
+        ),
+    )
+    parser.add_argument(
         "--close-gripper-for-push",
         action="store_true",
         help="In --push-plan-json --execute mode, close the gripper as a rigid paddle, preflight, execute, then reopen.",
@@ -258,7 +266,7 @@ def parse_args():
     parser.add_argument(
         "--orientation-settle-error-deg",
         type=float,
-        default=0.2,
+        default=2.0,
         help="At approach height, retry an in-place orientation correction above this full orientation error.",
     )
     parser.add_argument("--orientation-settle-attempts", type=int, default=2)

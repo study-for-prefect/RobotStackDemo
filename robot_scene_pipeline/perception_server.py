@@ -16,6 +16,7 @@ from .detector_runtime import DetectorModel, add_detector_args
 from .io_utils import project_path
 from .perception_contract import (
     DetectorProcessingError,
+    PERCEPTION_PIPELINE_REVISION,
     PerceptionRequestError,
     SceneProcessingError,
     config_fingerprint,
@@ -137,6 +138,7 @@ class PerceptionServerState:
         return {
             "ok": True,
             "ready": ready,
+            "perception_pipeline_revision": PERCEPTION_PIPELINE_REVISION,
             **status,
             "color_topic": config["color_topic"],
             "depth_topic": config["depth_topic"],

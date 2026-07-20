@@ -215,6 +215,26 @@ class NewSceneEdgePolicyTests(unittest.TestCase):
         )
         self.assertEqual(reviewed["semantic_review_recovered_candidate_ids"], [5])
 
+    def test_high_fill_yellow_cube_overrides_repeated_semicircle_confusion(self):
+        candidate = raw_object(
+            4, "yellow_support", [0.335, 0.077, 0.0],
+            label="semi circle", visual_color="yellow",
+            size=(0.0219, 0.0207, 0.0243),
+            bbox=[472.4, 225.3, 534.9, 277.3], mask_area_px=2962,
+            footprint_aspect_ratio=1.055,
+            primary_detector_passed=True, pointcloud_geometry_valid=True,
+        )
+        reviewed = _apply_decisions(
+            {"objects": [candidate]}, [candidate],
+            {"decisions": [{
+                "candidate_id": 4, "accept": True,
+                "corrected_shape": "semi_circle", "confidence": "high",
+            }]},
+        )
+        self.assertEqual(reviewed["objects"][0]["label"], "square yellow")
+        self.assertTrue(reviewed["objects"][0]["high_fill_cube_shape_override"])
+        self.assertEqual(reviewed["semantic_review_geometry_square_override_ids"], [4])
+
     def test_green_square_is_forced_through_square_triangle_confusion_review(self):
         candidate = raw_object(
             1, "ignored", [0.363, 0.022, 0.0],
@@ -270,6 +290,29 @@ class NewSceneEdgePolicyTests(unittest.TestCase):
         )
         self.assertEqual([item["id"] for item in reviewed["objects"]], [3])
         self.assertEqual(reviewed["semantic_review_safety_rejections"], [])
+
+    def test_green_triangle_metric_geometry_overrides_square_projection_verdict(self):
+        candidate = raw_object(
+            3, "ignored", [0.36, 0.18, 0.0],
+            label="square green", visual_color="green",
+            bbox=[300.0, 200.0, 390.0, 260.0], mask_shape=[736, 960],
+            dimensions_m=[0.048, 0.024, 0.024],
+            footprint_aspect_ratio=2.0,
+            primary_detector_passed=True, pointcloud_geometry_valid=True,
+        )
+        reviewed = _apply_decisions(
+            {"objects": [candidate]}, [candidate],
+            {"decisions": [{
+                "candidate_id": 3, "accept": True,
+                "corrected_shape": "square", "confidence": "high",
+            }]},
+            geometry_model={"square_edge_length_m": 0.024},
+        )
+        self.assertEqual(len(reviewed["objects"]), 1)
+        self.assertEqual(reviewed["objects"][0]["label"], "triangle")
+        self.assertTrue(reviewed["objects"][0]["metric_triangle_shape_override"])
+        self.assertEqual(reviewed["semantic_review_safety_rejections"], [])
+        self.assertEqual(reviewed["semantic_review_metric_triangle_override_ids"], [3])
 
     def test_unreviewed_green_yolo_square_is_not_used_as_support(self):
         candidate = raw_object(
@@ -666,19 +709,19 @@ class NewSceneEdgePolicyTests(unittest.TestCase):
         self.assertIsNone(outcome.selected)
         self.assertEqual(outcome.decision_source, "policy_invalid_output")
 
-    def test_14_safe_diagonal_grasp_is_accepted(self):
+    def test_14_safe_edge_grasp_is_preferred_over_diagonal(self):
         current = scene([raw_object(1, "t1", [0.5, 0.0, 0.02])])
         result = scan_grasp_yaws(current.current_objects[0], current.current_objects, config())
         self.assertTrue(result.graspable)
-        self.assertNotIn(result.safe_intervals[0].selected_yaw_deg, (0.0, 90.0))
+        self.assertIn(result.safe_intervals[0].selected_yaw_deg, (0.0, -90.0))
 
-    def test_15_non_edge_aligned_yaw_generates_edge(self):
+    def test_15_edge_aligned_yaw_generates_edge_when_available(self):
         current = scene([raw_object(1, "t1", [0.5, 0.0, 0.02], yaw_deg=0.0)])
         generated = generate_physical_edges(current, ["t1"], "organize_blocks", config(), placement, lambda obj: None)
         yaw = generated.edges_by_target["t1"][0].physical_parameters["grasp_yaw_deg"]
-        self.assertNotIn(yaw, (0.0, 90.0))
+        self.assertIn(yaw, (0.0, -90.0))
 
-    def test_normal_block_preserves_grasp_yaw_through_release(self):
+    def test_normal_block_decouples_grasp_yaw_from_release_yaw(self):
         current = scene([raw_object(1, "t1", [0.5, 0.0, 0.02], yaw_deg=30.0)])
 
         def target(obj, interval):
@@ -695,22 +738,22 @@ class NewSceneEdgePolicyTests(unittest.TestCase):
             current, ["t1"], "organize_blocks", config(), target, lambda obj: None,
         )
         physical = generated.edges_by_target["t1"][0].physical_parameters
-        self.assertEqual(
+        self.assertNotEqual(
             physical["release_gripper_yaw_deg"],
             physical["grasp_yaw_deg"],
         )
         self.assertEqual(physical["requested_place_object_yaw_deg"], 10.0)
-        self.assertEqual(physical["expected_place_object_yaw_deg"], 30.0)
+        self.assertEqual(physical["expected_place_object_yaw_deg"], 10.0)
         self.assertEqual(
             physical["placement_yaw_policy"],
-            "preserve_grasp_yaw_until_release",
+            "safe_height_yaw_only_for_clearance",
         )
-        self.assertEqual(physical["orientation_policy"], "downward_yaw_only")
-        self.assertEqual(len(physical["transport_path"]), 2)
+        self.assertEqual(physical["orientation_mode"], "downward_yaw_only")
         self.assertEqual(
-            physical["transport_path"][1]["yaw_deg"],
-            physical["grasp_yaw_deg"],
+            physical["transport_path"][-2]["motion_role"],
+            "ordinary_yaw_only_at_safe_height",
         )
+        self.assertEqual(physical["transport_path"][-1]["motion_role"], "final_orientation_transport")
 
     def test_16_narrow_yaw_interval_is_rejected(self):
         current = scene([raw_object(1, "t1", [0.5, 0.0, 0.02])])

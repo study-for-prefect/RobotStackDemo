@@ -223,6 +223,10 @@ def _grasp_sample_id(track_id: str, yaw_deg: Any) -> str:
 def _grasp_rejection_reason(sample: Mapping[str, Any]) -> str:
     if not bool(sample.get("opening_ok")):
         return "gripper_opening_insufficient"
+    if not bool(sample.get("axial_coverage_ok", True)):
+        return "finger_axial_coverage_insufficient"
+    if not bool(sample.get("stable_opposed_contact_ok", True)):
+        return "unstable_opposed_grasp_contact"
     if not bool(sample.get("center_offset_ok")):
         return "grasp_center_offset_exceeded"
     if not bool(sample.get("contact_length_ok")):
@@ -286,6 +290,18 @@ def _edge_rejection(
         "rejection_stage": stage,
         "rejection_reason": reason,
         "blocking_track_ids": list(checks.get("blocking_track_ids", [])),
+        "place_blocking_track_ids": list(checks.get("place_blocking_track_ids", [])),
+        "place_upper_finger_blocking_track_ids": list(
+            checks.get("place_upper_finger_blocking_track_ids", [])
+        ),
+        "transport_blocking_track_ids": list(checks.get("transport_blocking_track_ids", [])),
+        "place_finger_safe": checks.get("place_finger_safe"),
+        "place_upper_finger_safe": checks.get("place_upper_finger_safe"),
+        "place_palm_safe": checks.get("place_palm_safe"),
+        "place_gripper_descent_safe": checks.get("place_gripper_descent_safe"),
+        "place_object_footprint_safe": checks.get("place_object_footprint_safe"),
+        "required_3d_rotation_deg": physical.get("required_3d_rotation_deg"),
+        "tilted_place_clearance_m": physical.get("tilted_place_clearance_m"),
         "wrist_3_start_goal_delta_rad": checks.get("wrist_3_start_goal_delta_rad"),
         "wrist_3_limit_rad": 1.75,
         "moveit_error": checks.get("error"),

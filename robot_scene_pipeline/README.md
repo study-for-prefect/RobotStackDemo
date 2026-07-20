@@ -10,11 +10,13 @@
 - `ros_topic_capture.py`：从已运行的 ROS 2 相机话题获取同步 RGB-D。
 - `realsense_capture.py`：显式请求时使用的旧 direct RealSense 路径。
 - `detector_runtime.py`：YOLO 检测。
-- `depth_geometry.py` / `tabletop_geometry.py`：三维中心、尺寸、yaw 和桌面估计。
+- `depth_geometry.py` / `tabletop_geometry.py`：三维中心、尺寸、桌面，以及 mask/depth 点云 PCA
+  长轴、可见面法向和对象四元数估计。
 - `tf_transform.py`：读取最新 TF，将 optical-frame 点变换到 `base_link`。
 - `object_tracking.py`：跨 revision 的显式 track 重绑定；不把 detector ID 当持久身份。
 - `grasp_yaw_search.py`：连续抓取 yaw 和安全区间的底层几何能力。
-- `tool_swept_volume.py`：GF225 指尖/掌部的分段扫掠检查。
+- `tool_swept_volume.py`：GF225 指尖/掌部、持物与 D435i/支架的分段扫掠检查；完整三维旋转段
+  使用保守旋转包络，不退化为 yaw 扫掠。
 - `task_geometry.py`：共享的 footprint 和区域几何谓词。
 - `visual_color.py` / `object_semantics.py`：感知语义归一化。
 - `ollama_policy_client.py`：无状态、有界 Ollama 单轮调用基础设施。

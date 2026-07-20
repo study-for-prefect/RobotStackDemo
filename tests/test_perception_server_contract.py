@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from robot_scene_pipeline.depth_geometry import build_private_state
 from robot_scene_pipeline.perception_contract import (
+    PERCEPTION_PIPELINE_REVISION,
     PerceptionRequestError,
     PerceptionServerError,
     parse_snapshot_request,
@@ -144,6 +145,18 @@ class PerceptionServerContractTests(unittest.TestCase):
         mismatch = perception_config_mismatches(args, health)
         self.assertEqual(mismatch["detector_imgsz"], {"expected": 960, "actual": 640})
 
+    def test_stale_server_without_current_pipeline_revision_is_rejected(self):
+        args = _client_args()
+        health = {
+            **_matching_health(args),
+            "perception_pipeline_revision": "older-code",
+        }
+        mismatch = perception_config_mismatches(args, health)
+        self.assertEqual(mismatch["perception_pipeline_revision"], {
+            "expected": PERCEPTION_PIPELINE_REVISION,
+            "actual": "older-code",
+        })
+
 
 def _client_args():
     return SimpleNamespace(
@@ -164,6 +177,23 @@ def _client_args():
         depth_topic="/camera/camera/aligned_depth_to_color/image_raw",
         camera_info_topic="/camera/camera/color/camera_info",
     )
+
+
+def _matching_health(args):
+    return {
+        "semantic_review_candidate_pool": True,
+        "color_topic": args.color_topic,
+        "depth_topic": args.depth_topic,
+        "camera_info_topic": args.camera_info_topic,
+        "configured_camera_frame": args.camera_frame,
+        "base_frame": args.base_frame,
+        "tf_point_mode": args.tf_point_mode,
+        "detector_weight": str((Path.cwd() / args.detector_weight).resolve()),
+        "detector_imgsz": args.detector_imgsz,
+        "detector_iou": args.detector_iou,
+        "candidate_score_thresh": args.candidate_score_thresh,
+        "detector_device": args.detector_device,
+    }
 
 
 def _server_query(tf_path: str):

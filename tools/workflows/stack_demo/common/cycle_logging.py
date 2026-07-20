@@ -21,6 +21,13 @@ PLANNING_ARTIFACTS = (
     "qwen_edge_response.json",
     "selected_edge.json",
     "final_safety_gate.json",
+    "target_object_pose.json",
+    "grasp_tcp_object_transform.json",
+    "airborne_adjustment_candidates.json",
+    "orientation_candidates.json",
+    "orientation_sweep_checks.json",
+    "moveit_plan_results.json",
+    "ordinary_yaw_adjustment.json",
 )
 
 EXECUTION_ARTIFACTS = (
@@ -28,6 +35,7 @@ EXECUTION_ARTIFACTS = (
     "post_grasp_verification.json",
     "post_place_verification.json",
     "action_history.json",
+    "post_place_3d_verification.json",
 )
 
 

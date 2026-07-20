@@ -103,6 +103,23 @@ def execute_one_edge(
 
     executor.transport(edge)
     stages.append({"stage": "transport", "status": "executed_after_grasp_verification"})
+    trajectory = edge.physical_parameters.get("orientation_trajectory")
+    if isinstance(trajectory, Mapping):
+        stages.extend([
+            {"stage": "safe_orientation_adjustment_approach_pose", "status": "executed_far_from_house"},
+            {"stage": "safe_orientation_adjustment_start_pose", "status": "executed"},
+            {"stage": "fixed_tcp_orientation_waypoints", "status": "executed",
+             "waypoint_count": len(trajectory.get("waypoints", ())),
+             "maximum_tcp_position_error_m": trajectory.get("orientation_sweep_checks", {}).get("maximum_tcp_position_error_m")},
+            {"stage": "orientation_adjustment_complete_pose", "status": "final_3d_orientation_reached"},
+            {"stage": "final_pre_place_pose", "status": "translated_with_final_orientation_held"},
+        ])
+    elif edge.physical_parameters.get("ordinary_yaw_adjustment"):
+        stages.append({
+            "stage": "safe_height_yaw_adjustment",
+            "status": "completed_before_final_transport",
+            **dict(edge.physical_parameters["ordinary_yaw_adjustment"]),
+        })
     try:
         executor.descend_place(edge)
     except Exception as descent_error:
@@ -131,6 +148,13 @@ def execute_one_edge(
         "stage": "retreat",
         "status": "executed_to_safe_height_before_place_verification",
     })
+    # A vertical retreat still leaves the wrist-mounted D435i above the house.
+    # Restore the calibrated overview before judging the released placement.
+    executor.return_to_observation_pose(edge)
+    stages.append({
+        "stage": "return_to_observation_pose",
+        "status": "executed_before_place_verification",
+    })
     after_place = observer.observe("post_place")
     stages.append({
         "stage": "fresh_post_place_observation_at_safe_height",
@@ -144,15 +168,9 @@ def execute_one_edge(
             "stage": "track_state",
             "status": "placed" if place.success else "unresolved",
         })
-    if place.success:
-        executor.return_to_observation_pose(edge)
+    if not place.success:
         stages.append({
-            "stage": "return_to_observation_pose",
-            "status": "executed_after_place_verification",
-        })
-    else:
-        stages.append({
-            "stage": "return_to_observation_pose",
+            "stage": "place_verification",
             "status": "skipped",
             "reason": "place_not_verified",
         })

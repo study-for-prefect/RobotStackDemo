@@ -17,6 +17,17 @@ from ..common.config import StackDemoConfig
 from ..common.scene_state import ClutterSceneState, SceneObjectState
 from .state import HouseTaskState
 from .structure import object_at_pose, role_observation_checks
+from .orientation_trajectory import (
+    FULL_3D_ORIENTATION_SHAPES,
+    beam_axis_from_supports,
+    build_airborne_orientation_plan,
+    build_triangle_tabletop_step_pose,
+    orientation_airborne_blocking_tracks,
+    solve_target_object_orientations,
+    semantic_face_ready_for_structural_tilt,
+    special_shape_evidence_ready,
+    triangle_tabletop_evidence_ready,
+)
 
 
 def house_placement_target(
@@ -28,7 +39,62 @@ def house_placement_target(
     *,
     interval: GraspInterval | None = None,
 ) -> PlacementTarget | tuple[PlacementTarget, ...] | None:
+    if role == "triangle_top" and obj.shape == "triangle":
+        obj = _with_verified_triangle_tabletop_pose(scene, obj, config)
     pose = _role_pose(scene, state, obj, role, config)
+    if obj.shape in FULL_3D_ORIENTATION_SHAPES and role in {"roof", "triangle_top"}:
+        if special_shape_evidence_ready(obj, config):
+            face_ready, face_checks = semantic_face_ready_for_structural_tilt(obj, config)
+            if not face_ready:
+                staged = staging_orientation_targets(
+                    scene, obj, role, config, interval=interval,
+                )
+                return tuple(
+                    replace(
+                        target,
+                        expected_effects=(
+                            "tabletop_face_reorientation_before_final_place",
+                            "require_fresh_orientation_observation",
+                        ),
+                        additional_physical_parameters={
+                            **dict(target.additional_physical_parameters or {}),
+                            **face_checks,
+                            "staging_purpose": "tabletop_face_reorientation",
+                            "failed_direct_orientation_reason": (
+                                "semantic_face_requires_tabletop_reorientation"
+                            ),
+                            "airborne_face_change_forbidden": True,
+                        },
+                    )
+                    for target in staged
+                ) or None
+        direct = _special_shape_targets(scene, state, obj, role, pose, config, interval)
+        if direct:
+            return direct
+        if interval is not None and special_shape_evidence_ready(obj, config):
+            blockers = orientation_airborne_blocking_tracks(scene, obj, config)
+            if blockers:
+                # Emit a non-executable diagnostic edge.  Shared edge
+                # generation extracts these concrete blockers and offers
+                # pick-away actions instead of shuttling the roof again.
+                return (PlacementTarget(
+                    action_type=ActionType.PLACE_HOUSE_ROLE,
+                    target_region_id=None,
+                    task_role=role,
+                    place_pose=pose,
+                    task_progress_gain=1.0,
+                    expected_effects=("clear_orientation_space_before_full_3d_place",),
+                    precheck_results={
+                        "orientation_airborne_space_safe": False,
+                        "orientation_space_blocking_track_ids": list(blockers),
+                    },
+                    additional_physical_parameters={
+                        "required_grasp_yaw_deg": interval.selected_yaw_deg,
+                        "required_grasp_checks": dict(interval.selected_check),
+                        "failed_direct_orientation_reason": "orientation_airborne_space_blocked",
+                    },
+                ),)
+        return staging_orientation_targets(scene, obj, role, config, interval=interval) or None
     checks: dict[str, bool] = {
         "transport_safe": True,
         "place_descent_safe": True,
@@ -95,6 +161,159 @@ def house_placement_target(
     )
 
 
+def _with_verified_triangle_tabletop_pose(
+    scene: ClutterSceneState,
+    obj: SceneObjectState,
+    config: StackDemoConfig,
+) -> SceneObjectState:
+    """Recognize a stable apex-up 2:1:1 triangle from fresh metric geometry.
+
+    A right triangular prism resting on its hypotenuse has that measured long
+    edge parallel to the table and its right-angle altitude pointing upward.
+    This fresh support fact is more reliable than choosing an arbitrary
+    three-corner subset from the four-corner projected colour hull.
+    """
+    source = obj.source
+    long_axis = source.get("long_axis_base")
+    visible_normal = source.get("visible_face_normal_base")
+    support = source.get("local_support_surface")
+    support_z = support.get("support_z_base_m") if isinstance(support, Mapping) else None
+    observed_bottom_z = obj.center_xyz_m[2] - 0.5 * obj.size_xyz_m[2]
+    minimum = float(config.section("house_orientation")[
+        "triangle_tabletop_minimum_orientation_confidence"
+    ])
+    maximum_long_axis_vertical = float(config.section("house_orientation").get(
+        "triangle_tabletop_hypotenuse_max_vertical_component", 0.20,
+    ))
+    if not (
+        source.get("metric_triangle_geometry_confirmed") is True
+        and isinstance(long_axis, (list, tuple)) and len(long_axis) == 3
+        and abs(float(long_axis[2])) <= maximum_long_axis_vertical
+        and isinstance(visible_normal, (list, tuple)) and len(visible_normal) == 3
+        and float(visible_normal[2]) >= float(config.section("house_orientation")[
+            "triangle_minimum_upward_component"
+        ])
+        and support_z is not None
+        and abs(observed_bottom_z - float(support_z))
+        <= float(config.section("house")["support_height_tolerance_m"])
+        and float(source.get("orientation_confidence", obj.orientation_confidence)) >= minimum
+    ):
+        return obj
+    return replace(obj, source={
+        **dict(source),
+        "semantic_shape": "triangle",
+        "semantic_shape_uncertain": False,
+        "designated_right_angle_edge_base": [0.0, 0.0, 1.0],
+        "tabletop_apex_up_geometry_verified": True,
+        "triangle_right_angle_direction_source": (
+            "fresh_metric_2_to_1_to_1_hypotenuse_support_geometry"
+        ),
+    })
+
+
+def _special_shape_targets(
+    scene: ClutterSceneState,
+    state: HouseTaskState,
+    obj: SceneObjectState,
+    role: str,
+    pose: Mapping[str, Any],
+    config: StackDemoConfig,
+    interval: GraspInterval | None,
+    *,
+    allow_staged_triangle_face_change: bool = False,
+) -> tuple[PlacementTarget, ...]:
+    """Create only real quaternion/fixed-TCP final-placement candidates."""
+    if interval is None or not special_shape_evidence_ready(obj, config):
+        return ()
+    verified_roof_track = (
+        state.role_bindings.get("roof")
+        if state.role_completion.get("roof") is True
+        else None
+    )
+    beam_axis = beam_axis_from_supports(
+        scene, state.role_bindings, config,
+        verified_roof_track_id=verified_roof_track,
+    )
+    if beam_axis is None:
+        return ()
+    face_ready, face_checks = semantic_face_ready_for_structural_tilt(obj, config)
+    if not face_ready and not allow_staged_triangle_face_change:
+        return ()
+    targets = []
+    for target_object_pose in solve_target_object_orientations(
+        obj, pose["position_m"], beam_axis, config,
+        allow_staged_triangle_face_change=allow_staged_triangle_face_change,
+    ):
+        orientation_config = config.section("house_orientation")
+        is_tilted = float(target_object_pose["target_tilt_deg"]) > float(
+            orientation_config["tilted_place_clearance_min_tilt_deg"]
+        )
+        staged_face_change = bool(allow_staged_triangle_face_change and not face_ready)
+        tilted_clearance = (
+            float(orientation_config["tilted_place_clearance_m"])
+            if is_tilted or staged_face_change else 0.0
+        )
+        target_object_pose = {
+            **target_object_pose,
+            "tilted_place_clearance_m": tilted_clearance,
+        }
+        trajectory = build_airborne_orientation_plan(
+            scene, obj, interval.selected_yaw_deg, target_object_pose, config,
+        )
+        if trajectory is None:
+            continue
+        targets.append(PlacementTarget(
+            action_type=ActionType.PLACE_HOUSE_ROLE,
+            target_region_id=None,
+            task_role=role,
+            place_pose=target_object_pose,
+            task_progress_gain=1.0,
+            expected_effects=(f"complete_house_role:{role}", "protect_completed_structure"),
+            precheck_results={
+                "transport_safe": True, "place_descent_safe": True,
+                "release_safe": True, "return_safe": True, "protected_safe": True,
+                "semantic_shape_certain": True, "measured_beam_axis_available": True,
+                "beam_axis_from_current_frame_geometry": True,
+                "fixed_tcp_orientation_sweep_safe": True,
+                "semantic_face_evidence_available": True,
+                **(
+                    {"staged_triangle_face_change_authorized": True}
+                    if staged_face_change
+                    else {"semantic_face_ready_before_pick": True}
+                ),
+            },
+            additional_physical_parameters={
+                "orientation_trajectory": trajectory,
+                "observed_object_pose": {
+                    "frame_id": "base_link", "position_m": list(obj.center_xyz_m),
+                    "orientation_xyzw": list(obj.source["orientation_xyzw"]),
+                },
+                "target_object_pose": target_object_pose,
+                "grasp_tcp_object_transform": trajectory["grasp_tcp_object_transform"],
+                "release_grasp_tcp_pose": trajectory["release_grasp_tcp_pose"],
+                "airborne_adjustment_candidates": [trajectory["airborne_candidate_checks"]],
+                "orientation_candidates": [target_object_pose],
+                "orientation_sweep_checks": trajectory["orientation_sweep_checks"],
+                "measured_beam_axis_base": list(beam_axis),
+                "measured_beam_axis_source": (
+                    "visible_upper_support_centers"
+                    if _scene_object(scene, state.role_bindings.get("left_support_upper", "")) is not None
+                    and _scene_object(scene, state.role_bindings.get("right_support_upper", "")) is not None
+                    else "current_frame_verified_60_to_67mm_roof_long_axis"
+                ),
+                "required_3d_rotation_deg": trajectory["actual_rotation_angle_deg"],
+                "held_object_rotation_radius_m": trajectory["held_object_rotation_radius_m"],
+                "required_grasp_yaw_deg": interval.selected_yaw_deg,
+                "required_grasp_checks": dict(interval.selected_check),
+                **face_checks,
+                "airborne_adjustment_kind": "minimum_required_target_orientation_alignment",
+                "tilted_place_clearance_m": tilted_clearance,
+                "tilted_place_clearance_applied": bool(is_tilted or staged_face_change),
+            },
+        ))
+    return tuple(targets)
+
+
 def staging_orientation_target(
     obj: SceneObjectState,
     role: str,
@@ -119,6 +338,50 @@ def staging_orientation_targets(
     interval: GraspInterval | None = None,
 ) -> tuple[PlacementTarget, ...]:
     """Return every currently safe camera-visible staging alternative."""
+    if (
+        role == "triangle_top"
+        and scene is not None
+        and interval is not None
+        and obj.shape == "triangle"
+        and triangle_tabletop_evidence_ready(obj, config)
+    ):
+        ready, _ = semantic_face_ready_for_structural_tilt(obj, config)
+        if not ready:
+            incremental = _triangle_tabletop_step_targets(
+                scene, obj, role, config, interval,
+            )
+            if incremental:
+                return incremental
+    relevant_results = tuple(
+        result for result in (scene.recent_action_results if scene is not None else ())
+        if result.get("acted_object_track_id") == obj.track_id
+        and result.get("task_role") == role
+    )
+    latest_failed_final = max(
+        (
+            index for index, result in enumerate(relevant_results)
+            if result.get("action_type") == ActionType.PLACE_HOUSE_ROLE.value
+            and result.get("success") is False
+        ),
+        default=-1,
+    )
+    successful_staging_after_final_failure = any(
+        index > latest_failed_final
+        and result.get("success") is True
+        and result.get("action_type") in {
+            ActionType.EXTRACT_TO_STAGING.value,
+            ActionType.REGRASP_FOR_ORIENTATION.value,
+        }
+        for index, result in enumerate(relevant_results)
+    )
+    if role in {"roof", "triangle_top"} and successful_staging_after_final_failure:
+        # One camera-visible staging attempt is allowed.  If the fresh frame
+        # still cannot produce verified SE(3) evidence, moving among more XY
+        # slots has no demonstrated orientation benefit and must not loop.  A
+        # later failed final placement starts a new repair episode: the part
+        # is on the structure again and must be returned to the table before
+        # changing which triangular face/edge is presented.
+        return ()
     at_staging = bool(obj.source.get("at_staging"))
     transition = obj.source.get("orientation_transition")
     if at_staging:
@@ -164,6 +427,20 @@ def staging_orientation_targets(
             "staging_selection_mode": "live_scene_ranked_multi_point",
             "camera_reobservable": True,
             "minimum_obstacle_clearance_m": clearance,
+            "staging_purpose": (
+                "change_orientation_observation" if role in {"roof", "triangle_top"}
+                else "change_accessibility"
+            ),
+            "expected_next_grasp_family": "stable_edge_aligned",
+            "expected_orientation_evidence": (
+                ["long_axis_base", "broad_face_or_groove_or_right_angle_axis", "orientation_xyzw"]
+                if role in {"roof", "triangle_top"} else []
+            ),
+            "requires_fresh_vlm_verification": role in {"roof", "triangle_top"},
+            "failed_direct_orientation_reason": str(
+                obj.source.get("failed_direct_orientation_reason")
+                or "insufficient_semantic_3d_evidence_or_airborne_sweep"
+            ),
         }
         if role not in {"roof", "triangle_top"}:
             targets.append(PlacementTarget(
@@ -206,6 +483,68 @@ def staging_orientation_targets(
     return tuple(targets)
 
 
+def _triangle_tabletop_step_targets(
+    scene: ClutterSceneState,
+    obj: SceneObjectState,
+    role: str,
+    config: StackDemoConfig,
+    interval: GraspInterval,
+) -> tuple[PlacementTarget, ...]:
+    """One 45-degree rigid rotation followed by release and fresh observation."""
+    target_pose = build_triangle_tabletop_step_pose(
+        obj, obj.center_xyz_m[:2], config,
+    )
+    if target_pose is None:
+        return ()
+    trajectory = build_airborne_orientation_plan(
+        scene, obj, interval.selected_yaw_deg, target_pose, config,
+    )
+    if trajectory is None:
+        return ()
+    clearance = float(config.section("house_orientation")["tilted_place_clearance_m"])
+    return (PlacementTarget(
+        action_type=ActionType.EXTRACT_TO_STAGING,
+        target_region_id="house_orientation_staging",
+        task_role=role,
+        place_pose=target_pose,
+        task_progress_gain=0.0,
+        expected_effects=(
+            "rotate_triangle_one_45deg_step_on_table",
+            "release_before_orientation_decision",
+            "require_fresh_orientation_observation",
+        ),
+        precheck_results=_staging_checks({
+            "incremental_45deg_tabletop_reorientation": True,
+            "final_house_transport_forbidden_this_edge": True,
+        }),
+        additional_physical_parameters={
+            "orientation_trajectory": trajectory,
+            "observed_object_pose": {
+                "frame_id": "base_link",
+                "position_m": list(obj.center_xyz_m),
+                "orientation_xyzw": list(obj.source["orientation_xyzw"]),
+            },
+            "target_object_pose": target_pose,
+            "grasp_tcp_object_transform": trajectory["grasp_tcp_object_transform"],
+            "release_grasp_tcp_pose": trajectory["release_grasp_tcp_pose"],
+            "airborne_adjustment_candidates": [trajectory["airborne_candidate_checks"]],
+            "orientation_candidates": [target_pose],
+            "orientation_sweep_checks": trajectory["orientation_sweep_checks"],
+            "required_3d_rotation_deg": trajectory["actual_rotation_angle_deg"],
+            "held_object_rotation_radius_m": trajectory["held_object_rotation_radius_m"],
+            "required_grasp_yaw_deg": interval.selected_yaw_deg,
+            "required_grasp_checks": dict(interval.selected_check),
+            "staging_purpose": "incremental_tabletop_apex_up_reorientation",
+            "camera_reobservable": True,
+            "requires_fresh_vlm_verification": True,
+            "airborne_adjustment_kind": "one_45deg_step_then_table_release",
+            "tilted_place_clearance_m": clearance,
+            "tilted_place_clearance_applied": True,
+            "final_house_transport_forbidden_this_edge": True,
+        },
+    ),)
+
+
 def _far_house_staging_poses(
     safe_poses: tuple[tuple[dict[str, Any], dict[str, Any], float], ...],
     config: StackDemoConfig,
@@ -240,11 +579,11 @@ def _safe_staging_poses(
         )
         if item.track_id != obj.track_id
     )
-    table_z = (
-        min(item.center_xyz_m[2] - 0.5 * item.size_xyz_m[2] for item in scene.current_objects)
-        if scene is not None and scene.current_objects
-        else obj.center_xyz_m[2] - 0.5 * obj.size_xyz_m[2]
-    )
+    # Never infer the table from only the currently visible objects: after the
+    # house is built the sole movable item can be sitting on the roof, which
+    # made the old code release it at roof height and let it fall/roll.  The
+    # calibrated base_link table plane is stable across observations.
+    table_z = float(house.get("table_surface_z_m", 0.0))
     center_z = table_z + 0.5 * obj.size_xyz_m[2]
     output = []
     for configured_index, value in enumerate(candidates, start=1):
@@ -266,8 +605,9 @@ def _safe_staging_poses(
             moved, (moved, *obstacles), release_yaw_deg, config,
         ))
         gripper_safe = all(bool(gripper_checks.get(key)) for key in (
-            "opening_ok", "center_offset_ok", "contact_length_ok",
-            "finger_safe", "palm_safe", "descent_safe", "lift_safe",
+            "opening_ok", "axial_coverage_ok", "stable_opposed_contact_ok",
+            "center_offset_ok", "contact_length_ok", "finger_safe", "palm_safe",
+            "descent_safe", "lift_safe",
         ))
         if not gripper_safe:
             continue
@@ -474,16 +814,24 @@ def _role_pose(
         ]
         if any(item is None for item in supports):
             raise ValueError("roof requires both verified upper supports")
-        x = 0.5 * (supports[0].center_xyz_m[0] + supports[1].center_xyz_m[0])
-        origin_y = 0.5 * (supports[0].center_xyz_m[1] + supports[1].center_xyz_m[1])
+        # The roof defines the configured house center.  Using the midpoint of
+        # two noisy/partially merged support masks moved the live roof target
+        # about 5 mm away from that center in the 20260719 runs.
+        x, origin_y = origin_x, origin_y
         z = max(item.center_xyz_m[2] + 0.5 * item.size_xyz_m[2] for item in supports) + 0.5 * obj.size_xyz_m[2]
     elif role == "triangle_top":
         roof = _scene_object(scene, state.role_bindings.get("roof", ""))
         if roof is None:
             raise ValueError("triangle_top requires a verified roof")
-        x, origin_y = roof.center_xyz_m[:2]
+        # Like the roof itself, the triangle belongs at the configured house
+        # center.  The visible roof mask is commonly clipped by the supports
+        # and previously displaced the live target by several millimetres.
+        x, origin_y = origin_x, origin_y
         z = roof.center_xyz_m[2] + 0.5 * (roof.size_xyz_m[2] + obj.size_xyz_m[2])
-    z += float(house.get("final_place_z_offset_m", 0.0))
+    z += float(house.get(
+        "roof_final_place_z_offset_m" if role == "roof" else "final_place_z_offset_m",
+        0.0,
+    ))
     return {"frame_id": "base_link", "position_m": [x, origin_y, z], "yaw_deg": 0.0}
 
 
@@ -518,8 +866,9 @@ def _edge_aligned_grasps(
             obj, scene.current_objects, yaw, config,
         ))
         safe = all(bool(checks.get(key)) for key in (
-            "opening_ok", "center_offset_ok", "contact_length_ok",
-            "finger_safe", "palm_safe", "descent_safe", "lift_safe",
+            "opening_ok", "axial_coverage_ok", "stable_opposed_contact_ok",
+            "center_offset_ok", "contact_length_ok", "finger_safe", "palm_safe",
+            "descent_safe", "lift_safe",
         ))
         if not safe:
             continue

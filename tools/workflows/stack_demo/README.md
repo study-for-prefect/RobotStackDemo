@@ -47,6 +47,7 @@ plan 和开放式 VLM 动作入口已删除，不存在新旧 planner 并行运�
 | `perception_client.py` | 感知 server 健康检查、严格请求契约和结构化 HTTP 错误 |
 | `live_integration.py` | ROS/topic 前检、无运动参数守卫、关节差值和集成报告 |
 | `common/config.py` | 加载统一 planner、工作区配置 |
+| `common/pose3d.py` | 四元数、SE(3)、刚体抓持变换和 SLERP |
 | `common/scene_state.py` | revision-scoped 对象和持久 track 状态 |
 | `common/action_edges.py` | 固定动作枚举、不可变物理边和 fingerprint |
 | `common/action_validation.py` | 最终安全门 |
@@ -102,8 +103,9 @@ YOLO 主阈值实例可被纠正形状标签；低于
 `base_link` 几何时才会进入场景。VLM 不得创建候选 ID、检测框或三维坐标，完全没有检测
 候选的物体不会因文字猜测进入规划。记录写入
 每个观测目录的 `semantic_detection_review.json`；可用 `--no-vlm-semantic-review` 禁用。
-绿色 YOLO 方块必须取得可靠的 square/triangle 图像复核；若大模型仍判 square，但候选轮廓
-贴住图像边界或实测桌面轮廓长宽比大于 `1.6`，代码会以
+绿色 YOLO 方块必须取得可靠的 square/triangle 图像复核；绿色三角件的独立点云模型为
+`斜边:三角面高:棱柱厚度 = 2s:s:s`，其中 `s` 是方块边长；若大模型仍判 square，但候选轮廓
+贴住图像边界、实测桌面轮廓长宽比大于 `1.6`，或三维比例符合三角件，代码会以
 `semantic_review_safety_rejections` 拒绝该次候选，禁止其进入房梁柱角色。复核缺失或低置信度时
 同样拒绝，不再回退使用原始 `square green` 标签。
 客户端强制校验持久感知服务的低置信度候选池能力与 `candidate_score_thresh`，旧服务必须重启，
@@ -138,27 +140,34 @@ place_house_role        repair_structure          reobserve
 任务角色、预期效果、净空收益、风险、protected track、预检和失败 fingerprint。Qwen 看不到可
 修改参数的接口。
 
-抓取 yaw 默认以 5 度扫描 `[0, 180)`，不要求沿检测 yaw 或物体边。代码验证开口、有效双指
-接触、中心偏差、指尖、掌部、下降、抬升及 MoveIt。连续安全区间至少 10 度，并从区间内部
-取角，不使用贴边角。单点角接触或窄安全区间不会成为边。
+抓取 yaw 默认以 5 度扫描 `[0, 180)`。代码分别验证闭合方向开口、手指轴向覆盖、左右悬出、
+有效双指接触、中心偏差、指尖、掌部、下降、抬升及 MoveIt。连续安全区间至少 10 度；候选
+按沿边、正交沿边、小偏角、角抓、极限中转分级，只要沿边抓取可行就不会因 MoveIt 代价略低
+选择角抓。
 
 目标不可抓时，只分析真正占用其抓取区间或夹爪扫掠的直接阻挡物。清障枚举配置中的
 `±x/±y`、3/4/5 cm 和安全腕角，可生成抓走、推动或安全中转。预推从接触侧空闲位置下降；
 松散接触只允许水平推动阶段。无净空收益、进入目标颜色区、损坏 protected/已完成结构或
 MoveIt plan-only 失败的候选不会交给 Qwen。
 
-`place_pose` 是期望物体最终位姿。代码保存抓取时物体相对夹爪 yaw，并由它计算不可由 Qwen
-修改的释放夹爪 yaw。普通积木会为同色每个安全槽位独立生成放置边，按实测桌面与该物体
-高度计算接触高度，`release_pose` 不再悬空；三角形和凹槽矩形仍使用独立的 10 mm 特殊形状
-释放间隙。放置边在选择前验证张开 GF225 下降、掌部、持物运输、释放和退回路径。staging
+`place_pose` 是期望物体最终位姿。普通物体保存平面物体相对夹爪 yaw，反算释放 yaw，并在
+远离目标/protected 结构的安全高度保持 downward 完成 yaw-only 调整；最终运输与下降保持该
+姿态。房屋三类特殊构件则保存完整 `T_grasp_tcp_object`，由目标对象四元数反算释放 TCP，不
+使用 yaw 代替三维姿态。放置边在选择前验证张开 GF225 下降、掌部、持物运输、释放和退回路径。staging
 会避开可见物体和动作历史中已执行松爪的保留位置，不会把两个积木放到同一固定点。
 
 ## Qwen 选择协议
 
-默认 `qwen3-vl:8b-instruct`、`temperature=0`、`think=false`、`stream=false`，上下文和输出
-预算有界。每次请求是一个新的短 system + user 请求，只带最新 RGB、只标短 ID 的 overlay、
+默认 `qwen3-vl:8b-instruct`、`temperature=0`、`think=false`、`stream=false`；全部请求显式
+使用 `num_ctx=32768`，旧 context 覆盖会被启动校验拒绝。每次请求是一个新的短 system + user 请求，只带最新 RGB、只标短 ID 的 overlay、
 最新 revision/state、当前候选和有限失败。不会携带历史 assistant 回答、旧图片或依靠聊天
 记忆保存机器人状态。
+
+实时抓后、放后和无动作重观测在视觉 review 前递增 `scene_revision`，保证语义证据 revision
+与随后建立的 `ClutterSceneState` 一致。特殊构件 VLM 输出先校验响应 revision，再逐对象校验
+候选 ID、枚举、布尔值和 `[0,1]` 置信度；单个坏对象写入 `rejected_objects`，不会连带删除
+同批合法对象。相机坐标的凹槽开口方向通过该帧 `camera -> base` 旋转变换并投影到可见面，
+不能用相机 left/right 字符串或可见面法向冒充三维开口轴。
 
 同色同形状且三维中心落在 `8 mm` 内的重复检测会在 track 分配前合并，避免同一物体生成两个
 竞争 track。初始遮挡、之后连续两帧才出现的真实物体会加入 `expected_tracks`；一次性误检
@@ -209,7 +218,7 @@ MoveIt plan-only 失败的候选不会交给 Qwen。
 当前结果和最近失败。所有未完成合法对象参与目标比较，Qwen 能看到邻居数、最近邻、拥挤侧、
 安全 yaw、清障成本、释放其他物体的收益、任务收益、风险和失败次数。
 
-颜色区域、槽位、占用和完成均由代码计算。最终 yaw 不要求精确。只有最新观测确认所有预期
+颜色区域、槽位、占用和完成均由代码计算。最终主轴以 `12°` 容差对齐槽位 X/Y 轴。只有最新观测确认所有预期
 track 在正确颜色区域、无缺失、无非法重叠且杂乱区无未完成对象时才能完成；无边不等于完成。
 
 固定布局为腕部相机画面中的四个 `0.08 × 0.08 m` 方区：红为左上
@@ -262,7 +271,9 @@ roof                 triangle_top
 稳定下支撑；roof 依赖两个稳定上支撑、合法间距/高差；triangle 依赖已验证 roof。完成结构
 自动成为 protected。
 
-凹槽屋顶显式维护 groove face、face up、长轴、抓取姿态、覆盖、中心偏差、两侧余量和稳定性；
+矩形、凹槽矩形和三角形均显式维护对象四元数、三维长轴和形状专用语义轴；
+同一绿色三角形被实例分割成两个方块框时，只有连通斜轮廓、深度连续、同支撑面和联合长构件
+点云同时成立才合并，并以联合 mask 重新求完整 SE(3)，不沿用任一半框的伪方块姿态。
 三角顶维护 apex/base direction、face、目标 yaw、底边接触、质心投影、支撑余量和 roof 相对
 位姿。两侧梁柱按物体实际宽度保持 `0.015 m` 净间距，最终叠放抓取必须沿实测物体边缘；
 房屋最终角色的几何接触放置高度统一施加 `-0.005 m` 实机补偿；该补偿不作用于颜色整理。
@@ -273,10 +284,40 @@ MoveIt 门就直接放置并停止检查等价姿态，只有两种姿态都不�
 不是固定单点：代码会从多个标定候选中按实时物体占用、物体落脚轮廓、工作空间/机器人禁区、
 张开夹爪下降间隙筛选并按最小障碍间隙排序，随后每个候选通过完整运输几何门，选中候选还必须
 通过最终 MoveIt 规划门；一个点不可用会继续检查其余点，全部不可用则拒绝中转并在同一任务内
-继续其他候选/重新观测。尚未满足屋顶前置条件的屋顶若成为梁柱清障对象，只使用距房屋中心
+继续其他候选/重新观测。屋顶最终目标中心使用配置的房屋中心 XY，并通过独立的
+`roof_final_place_z_offset_m` 修正接触高度。尚未满足屋顶前置条件的屋顶若成为梁柱清障对象，只使用距房屋中心
 至少 `0.15 m` 的安全中转候选（无此候选时保留最远安全点），避免占用最终搭建区。代码用
 最新观测验证结构。其他姿态不满足时也走 staging -> fresh observation -> regrasp，绝不
-假定 wrist yaw 能翻面。只有确定性感知给出可靠姿态证据时才生成最终放置边。
+假定 wrist yaw 能翻面。只有确定性感知给出可靠姿态证据时才生成最终放置边。正常直接路径是
+“垂直抬升 -> 安全空中点 -> 固定 GF225 TCP XYZ 的四元数 SLERP -> 保持最终姿态运输 ->
+垂直下降”；实体 staging 只用于抓持关系不可达、扫掠/IK 不连续或视觉证据不足。
+
+rectangle 宽面已朝上、concave_rectangle 凹槽已朝下或 triangle 指定边已朝上时保留当前
+完整面态，不再强制构造 ±45° 或任何固定翻转；只有长轴等目标朝向与支撑轴不一致时才执行
+最小必要三维旋转。若上述表面不正确，禁止直接空中换面，必须先进入桌面
+`tabletop_face_reorientation` staging，重新观测并重新抓取。倾斜构件释放高度在原安全间隙上
+额外增加 `4 mm`，且释放后的垂直撤离保持最终四元数，禁止在房屋上方恢复 downward。
+
+特殊构件的 MoveIt 最终门使用单个 `tcp_pose_sequence_v1` 连续序列检查
+`approach -> grasp -> lift -> 固定 TCP 三维旋转 -> 目标运输 -> release`。第一段从实时关节状态
+规划，此后每一段都从上一段轨迹终点继续，并逐段执行碰撞检查和
+`wrist_3 start_goal <= 1.75 rad` 门限；实机 transport 使用同一序列语义。不得把每个四元数
+waypoint 当成从 ready/实机初始状态独立可达的 hover，也不得用 yaw 替代该序列。
+
+三角件的图像直角顶点方向通过该帧 camera→base_link 旋转投影到三角面，`up`、`right` 等
+方向分别映射，不能再按同一 PCA 符号处理。目标求解把这条“质心指向直角顶点”的三维轴旋到
+世界 `+Z`，使斜边接触屋顶、直角顶点朝上。桌面新观测未确认顶点向上时，每条边只能绕实测
+长边做一次 45° 完整三维转动，随后放回桌面、开爪并重新观测；未通过时必须基于新姿态再生成
+下一次 45°，禁止夹持着直接翻成屋顶姿态。只有顶点竖直分量达到独立三角门限后，才允许重新
+抓取并运输到屋顶。放后观测会用绿色轮廓重新提取 90° 顶点；执行
+目标四元数仅写入审计日志，不能覆盖新观测到的错误顶点方向。续跑遇到这种已释放但方向错误
+的三角件时保留已验证屋顶，并把三角角色标为 `REPAIRABLE`。
+
+若上述空中点的工作空间与房屋距离合法、但被现场物体占用，失败边会记录
+`orientation_space_blocking_track_ids`。候选生成器此时只向 Qwen 暴露移动这些阻挡物的清障边，
+不再同时暴露屋顶件自身的 staging 边。对同一屋顶角色，一次成功
+`extract_to_staging/regrasp_for_orientation` 后若没有新的可执行姿态证据，也不会再次生成中转，
+从候选层阻断“来回拿同一长方形/凹槽矩形”的循环。
 
 ## 最终安全门
 
@@ -302,6 +343,11 @@ qwen_edge_response.json        selected_edge.json
 final_safety_gate.json         execution_result.json
 post_grasp_verification.json   post_place_verification.json
 action_history.json
+target_object_pose.json         grasp_tcp_object_transform.json
+airborne_adjustment_candidates.json orientation_candidates.json
+orientation_sweep_checks.json  moveit_plan_results.json
+ordinary_yaw_adjustment.json   post_place_3d_verification.json
+house_completion_state.json
 ```
 
 不适用阶段写 `skipped_reason`；任务结果另写 `task_completion.json`。日志中的

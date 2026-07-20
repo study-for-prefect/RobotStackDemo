@@ -183,6 +183,7 @@ class Retry4ArchitectureFixTests(unittest.TestCase):
         )
         self.assertEqual(set(result["checked_components"]), {
             "held_object", "fingertips", "upper_fingers", "palm", "tcp_to_gripper_body",
+            "d435i_and_mount",
         })
 
     def test_track_lifecycle_held_then_placed_and_place_anchor(self):

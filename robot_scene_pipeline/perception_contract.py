@@ -13,6 +13,12 @@ from typing import Any, Mapping
 from .tf_transform import frame_matches, validate_point_mode_for_frame
 
 
+# Bump whenever a persistent server must be restarted to load perception
+# behavior changes.  The workflow checks this value before requesting a frame,
+# so an old in-memory process cannot silently serve new runs.
+PERCEPTION_PIPELINE_REVISION = "build-house-triangle-postplace-v3"
+
+
 @dataclass(frozen=True)
 class PerceptionSnapshotRequest:
     output_dir: str

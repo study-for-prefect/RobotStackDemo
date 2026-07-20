@@ -30,7 +30,10 @@
     "approach_envelope_length_m": 0.020,
     "minimum_continuous_safe_yaw_span_deg": 10.0,
     "interval_boundary_inset_deg": 2.0,
-    "maximum_edges_per_target": 3
+    "maximum_edges_per_target": 3,
+    "allowed_axial_overhang_m": 0.003,
+    "opening_margin_m": 0.002,
+    "triangle_side_grasp_max_alignment_error_deg": 10.0
   },
   "clearing": {
     "push_distances_m": [0.030, 0.040, 0.050],
@@ -55,7 +58,7 @@
     "temperature": 0.0,
     "think": false,
     "stream": false,
-    "num_ctx": 12288,
+    "num_ctx": 32768,
     "num_predict": 768,
     "recent_failure_limit": 5,
     "max_consecutive_reobserve": 3
@@ -71,14 +74,48 @@
     },
     "minimum_spacing_m": 0.015,
     "alignment_tolerance_m": 0.012,
-    "observation_region_tolerance_m": 0.003
+    "observation_region_tolerance_m": 0.003,
+    "placement_yaw_tolerance_deg": 12.0
+  },
+  "special_shape_vlm": {
+    "enabled": true,
+    "minimum_shape_confidence": 0.75,
+    "minimum_orientation_confidence": 0.70,
+    "crop_padding_ratio": 0.15,
+    "crop_long_edge_px": 384,
+    "maximum_candidates_per_request": 6,
+    "hard_maximum_candidates_per_request": 8,
+    "minimum_physical_block_extent_m": 0.008,
+    "square_edge_length_m": 0.024,
+    "triangle_hypotenuse_to_square_edge_ratio": 2.0,
+    "triangle_face_altitude_to_square_edge_ratio": 1.0,
+    "triangle_prism_height_to_square_edge_ratio": 1.0,
+    "triangle_dimension_ratio_tolerance": 0.35
+  },
+  "house_orientation": {
+    "flip_tolerance_deg": 8.0,
+    "long_axis_tolerance_deg": 8.0,
+    "fixed_tcp_position_tolerance_m": 0.001,
+    "orientation_interpolation_step_deg": 5.0,
+    "tilted_place_clearance_m": 0.004,
+    "tilted_place_clearance_min_tilt_deg": 5.0,
+    "minimum_upward_normal_component": 0.45,
+    "triangle_minimum_upward_component": 0.85,
+    "triangle_tabletop_reorientation_step_deg": 45.0,
+    "triangle_tabletop_minimum_orientation_confidence": 0.45,
+    "triangle_tabletop_hypotenuse_max_vertical_component": 0.20,
+    "minimum_downward_normal_component": 0.45,
+    "minimum_airborne_adjustment_house_distance_m": 0.15,
+    "airborne_adjustment_safety_margin_m": 0.03
   },
   "house": {
     "support_classes": ["square"],
     "roof_classes": ["concave_rectangle", "rectangle"],
     "triangle_classes": ["triangle"],
     "origin_center_base_m": [0.400, 0.270, 0.020],
+    "table_surface_z_m": -0.014,
     "final_place_z_offset_m": -0.005,
+    "roof_final_place_z_offset_m": 0.000,
     "orientation_staging_camera_bounds_base_m": {
       "xmin": 0.245,
       "xmax": 0.450,
@@ -96,6 +133,9 @@
     "roof_blocker_staging_min_house_distance_m": 0.150,
     "support_inner_gap_m": 0.015,
     "support_height_tolerance_m": 0.008,
+    "roof_nominal_thickness_m": 0.014,
+    "assembled_roof_height_above_table_min_m": 0.060,
+    "assembled_roof_height_above_table_max_m": 0.067,
     "center_tolerance_m": 0.010,
     "minimum_support_margin_m": 0.006,
     "minimum_support_overlap_ratio": 0.20,

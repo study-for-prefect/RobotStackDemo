@@ -88,6 +88,7 @@ class ClutterExtractionPlanner:
         logger.write("task_state.json", dict(task_state))
         logger.write("target_options.json", [item.to_dict() for item in options])
         logger.write("physical_action_edges.json", [item.to_dict() for item in all_edges])
+        _write_orientation_artifacts(logger, all_edges)
         generation_summary = generated.audit.summary(
             physical_action_edge_count=len(all_edges),
             target_option_count=len(options),
@@ -194,6 +195,7 @@ class ClutterExtractionPlanner:
             edge_result.decision_source, False,
         )
 
+
     def _first_moveit_feasible_direct_grasp(
         self,
         scene: ClutterSceneState,
@@ -256,6 +258,29 @@ class ClutterExtractionPlanner:
         if attempts:
             logger.write("direct_grasp_plan_attempts.json", attempts)
         return None
+
+
+def _write_orientation_artifacts(
+    logger: CycleLogger,
+    edges: Sequence[PhysicalActionEdge],
+) -> None:
+    """Persist the complete generated pose chain, including rejected alternatives."""
+    mappings = {
+        "target_object_pose.json": "target_object_pose",
+        "grasp_tcp_object_transform.json": "grasp_tcp_object_transform",
+        "airborne_adjustment_candidates.json": "airborne_adjustment_candidates",
+        "orientation_candidates.json": "orientation_candidates",
+        "orientation_sweep_checks.json": "orientation_sweep_checks",
+        "ordinary_yaw_adjustment.json": "ordinary_yaw_adjustment",
+    }
+    for filename, key in mappings.items():
+        values = [{"candidate_id": edge.candidate_id, key: edge.physical_parameters[key]}
+                  for edge in edges if edge.physical_parameters.get(key) is not None]
+        logger.write(filename, values if values else {"skipped_reason": f"no_{key}_candidate"})
+    logger.write("moveit_plan_results.json", [{
+        "candidate_id": edge.candidate_id,
+        "precheck_results": dict(edge.precheck_results),
+    } for edge in edges])
 
 
 def _is_direct_grasp(edge: PhysicalActionEdge) -> bool:

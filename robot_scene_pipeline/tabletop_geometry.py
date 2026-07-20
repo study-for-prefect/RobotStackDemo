@@ -621,6 +621,121 @@ def estimate_object_footprint(
     }
 
 
+def estimate_object_semantic_axes_3d(points_base):
+    """Recover a right-handed 3D PCA frame from mask/depth object points."""
+    points = np.asarray(points_base, dtype=float)
+    if points.ndim != 2 or points.shape[0] < 20 or points.shape[1] != 3:
+        return None
+    centered = points - np.median(points, axis=0)
+    eigenvalues, eigenvectors = np.linalg.eigh(np.cov(centered, rowvar=False))
+    order = np.argsort(eigenvalues)[::-1]
+    values = eigenvalues[order]
+    long_axis = eigenvectors[:, order[0]]
+    face_normal = eigenvectors[:, order[-1]]
+    if long_axis[0] < 0.0 or (abs(long_axis[0]) < 1e-9 and long_axis[1] < 0.0):
+        long_axis = -long_axis
+    if face_normal[2] < 0.0:
+        face_normal = -face_normal
+    cross_axis = np.cross(face_normal, long_axis)
+    if np.linalg.norm(cross_axis) <= 1e-9:
+        return None
+    cross_axis /= np.linalg.norm(cross_axis)
+    long_axis = np.cross(cross_axis, face_normal)
+    long_axis /= np.linalg.norm(long_axis)
+    quaternion = _rotation_matrix_to_quaternion_xyzw(
+        np.column_stack((long_axis, cross_axis, face_normal))
+    )
+    separation = float((values[0] - values[1]) / max(values[0], 1e-12))
+    planarity = float((values[1] - values[2]) / max(values[1], 1e-12))
+    return {
+        "long_axis_base": [round(float(value), 6) for value in long_axis],
+        "visible_face_normal_base": [round(float(value), 6) for value in face_normal],
+        "orientation_xyzw": [round(float(value), 8) for value in quaternion],
+        "orientation_confidence": round(max(0.0, min(1.0, 0.5 * (separation + planarity))), 4),
+        "orientation_evidence_source": "mask_depth_pca_and_visible_plane_normal",
+        "orientation_pca_eigenvalues": [round(float(value), 10) for value in values],
+    }
+
+
+def estimate_triangle_vertical_profile(
+    points_base,
+    long_axis_base,
+    support_z_base_m=None,
+    top_z_base_m=None,
+):
+    """Measure whether a triangular prism narrows from its base toward its apex."""
+    points = np.asarray(points_base, dtype=float)
+    axis = np.asarray(long_axis_base, dtype=float)
+    if points.ndim != 2 or points.shape[0] < 80 or points.shape[1] != 3 or axis.shape != (3,):
+        return {"available": False, "reason": "insufficient_points_or_axis"}
+    axis[2] = 0.0
+    axis_norm = float(np.linalg.norm(axis))
+    if axis_norm <= 1e-9:
+        return {"available": False, "reason": "vertical_or_invalid_long_axis"}
+    axis /= axis_norm
+    support_z = (
+        float(support_z_base_m) if support_z_base_m is not None
+        else float(np.percentile(points[:, 2], 2.0))
+    )
+    top_z = (
+        float(top_z_base_m) if top_z_base_m is not None
+        else float(np.percentile(points[:, 2], 98.0))
+    )
+    height = top_z - support_z
+    if not math.isfinite(height) or height < 0.012:
+        return {"available": False, "reason": "vertical_extent_too_small"}
+    normalized_height = (points[:, 2] - support_z) / height
+    long_values = points.dot(axis)
+    lower = long_values[(normalized_height >= 0.08) & (normalized_height <= 0.42)]
+    upper = long_values[(normalized_height >= 0.58) & (normalized_height <= 0.92)]
+    if min(len(lower), len(upper)) < 25:
+        return {"available": False, "reason": "profile_band_points_insufficient"}
+    lower_extent = float(np.percentile(lower, 98.0) - np.percentile(lower, 2.0))
+    upper_extent = float(np.percentile(upper, 98.0) - np.percentile(upper, 2.0))
+    ratio = lower_extent / max(upper_extent, 1e-9)
+    inverse_ratio = upper_extent / max(lower_extent, 1e-9)
+    threshold = 1.18
+    return {
+        "available": True,
+        "source": "fresh_mask_depth_vertical_long_axis_profile",
+        "support_z_base_m": round(support_z, 6),
+        "top_z_base_m": round(top_z, 6),
+        "lower_long_axis_extent_m": round(lower_extent, 6),
+        "upper_long_axis_extent_m": round(upper_extent, 6),
+        "lower_to_upper_extent_ratio": round(ratio, 4),
+        "apex_up_confirmed": bool(ratio >= threshold),
+        "apex_down_confirmed": bool(inverse_ratio >= threshold),
+        "minimum_extent_ratio": threshold,
+        "lower_band_point_count": int(len(lower)),
+        "upper_band_point_count": int(len(upper)),
+    }
+
+
+def _rotation_matrix_to_quaternion_xyzw(matrix):
+    trace = float(np.trace(matrix))
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        value = np.array([(matrix[2, 1] - matrix[1, 2]) / scale,
+                          (matrix[0, 2] - matrix[2, 0]) / scale,
+                          (matrix[1, 0] - matrix[0, 1]) / scale, scale / 4.0])
+    else:
+        index = int(np.argmax(np.diag(matrix)))
+        if index == 0:
+            scale = math.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0
+            value = np.array([scale / 4.0, (matrix[0, 1] + matrix[1, 0]) / scale,
+                              (matrix[0, 2] + matrix[2, 0]) / scale, (matrix[2, 1] - matrix[1, 2]) / scale])
+        elif index == 1:
+            scale = math.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0
+            value = np.array([(matrix[0, 1] + matrix[1, 0]) / scale, scale / 4.0,
+                              (matrix[1, 2] + matrix[2, 1]) / scale, (matrix[0, 2] - matrix[2, 0]) / scale])
+        else:
+            scale = math.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
+            value = np.array([(matrix[0, 2] + matrix[2, 0]) / scale,
+                              (matrix[1, 2] + matrix[2, 1]) / scale, scale / 4.0,
+                              (matrix[1, 0] - matrix[0, 1]) / scale])
+    return value / np.linalg.norm(value)
+
+
 def workspace_roi(detections):
     candidates = [
         det for det in detections if det.get("label") == "workspace" or det.get("is_workspace")
@@ -740,6 +855,9 @@ def attach_tabletop_geometry(detections, depth_frame, intrinsics, args, transfor
         )
         det["depth_geometry_observable"] = pointcloud["source"] != "mask_known_height_fallback"
         det["pointcloud_point_count"] = geometry["point_count"]
+        semantic_axes = estimate_object_semantic_axes_3d(object_points)
+        if semantic_axes is not None:
+            det.update(semantic_axes)
         if in_base and geometry.get("top_z_base_m") is not None:
             support = estimate_local_support_surface(
                 depth_frame,
@@ -786,5 +904,13 @@ def attach_tabletop_geometry(detections, depth_frame, intrinsics, args, transfor
         det["height_estimation_method"] = geometry["height_estimation_method"]
         det["height_surface_cluster"] = geometry["height_surface_cluster"]
         det["height_surface_candidate_count"] = geometry["height_surface_candidate_count"]
+        if in_base and det.get("long_axis_base") is not None:
+            support = geometry.get("local_support_surface") or {}
+            det["triangle_vertical_profile"] = estimate_triangle_vertical_profile(
+                object_points,
+                det["long_axis_base"],
+                support.get("support_z_base_m"),
+                geometry.get("top_z_base_m"),
+            )
 
     return detections, public_plane_payload(plane, frame)
